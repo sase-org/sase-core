@@ -259,8 +259,8 @@ pub(super) fn try_tail_apply(
     }
     if tail_event_count == 0 {
         return commit_sweep_refresh(
-            beads_dir, cache_path, connection, token, &stored, &tail_sigs,
-            finish,
+            beads_dir, cache_path, connection, meta, token, &stored,
+            &tail_sigs, finish,
         );
     }
     // Merge the tail in full stream order (empty placeholders keep the
@@ -438,19 +438,25 @@ fn cache_or_store(
 
 /// Commit a change that appended no events: refresh the stored stream
 /// signatures, token, and sweep time without bumping the generation.
-/// The post-commit sweep guards the stats-then-token race the same way
-/// the rebuild path guards its content commit.
+/// Content generation advances so a concurrent stamp, sweep refresh, or
+/// publish whose witness predates this commit loses its own CAS. The
+/// post-commit sweep guards the stats-then-token race the same way the
+/// rebuild path guards its content commit. A lost generation race
+/// rolls back and replays; it never drops the file.
 #[allow(clippy::too_many_arguments)]
-fn commit_sweep_refresh(
+pub(super) fn commit_sweep_refresh(
     beads_dir: &Path,
     cache_path: &Path,
     connection: &Connection,
+    meta: &CacheMeta,
     token: &str,
     stored: &BTreeMap<String, StoredStreamSig>,
     tail_sigs: &BTreeMap<String, NewStreamSig>,
     finish: RefreshFinish,
 ) -> Result<TailDecision, Fault> {
     let now = now_ns();
+    let start_generation = meta.generation;
+    let start_content = meta.content_generation;
     let mut refreshed: BTreeMap<String, (u64, i64, u64, u64, String)> =
         BTreeMap::new();
     for (stream_id, stored_sig) in stored {
@@ -502,6 +508,28 @@ fn commit_sweep_refresh(
         .and_then(|()| {
             update_token_and_sweep(connection, token, now)
                 .map_err(|_| WriteFault::Other)
+        })
+        .and_then(|()| {
+            let generation_held = connection
+                .execute(
+                    "UPDATE meta SET value = value WHERE key = 'generation' AND value = ?1",
+                    rusqlite::params![start_generation.to_string()],
+                )
+                .map_err(|_| WriteFault::Other)?;
+            if generation_held != 1 {
+                return Err(WriteFault::CasLost);
+            }
+            let new_content = start_content.saturating_add(1).to_string();
+            let content_held = connection
+                .execute(
+                    "UPDATE meta SET value = ?1 WHERE key = 'content_generation' AND value = ?2",
+                    rusqlite::params![new_content, start_content.to_string()],
+                )
+                .map_err(|_| WriteFault::Other)?;
+            if content_held != 1 {
+                return Err(WriteFault::CasLost);
+            }
+            Ok(())
         });
     match outcome {
         Ok(()) => {
@@ -509,7 +537,11 @@ fn commit_sweep_refresh(
                 .execute_batch("COMMIT")
                 .map_err(|_| Fault::Cache)?;
         }
-        Err(_) => {
+        Err(WriteFault::CasLost) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            return Err(Fault::Cache);
+        }
+        Err(WriteFault::Other) => {
             let _ = connection.execute_batch("ROLLBACK");
             drop_cache_file(cache_path);
             return Err(Fault::Cache);

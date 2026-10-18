@@ -20,7 +20,13 @@
 //!   generation compare-and-swap: a writer commits only if the generation
 //!   it started from is still current, and it never pairs newer
 //!   signatures with older content (signatures and bytes come from the
-//!   same open files; see `jsonl::StreamFileSignature`).
+//!   same open files; see `jsonl::StreamFileSignature`). Freshness stamps
+//!   (`token` plus `last_sweep_ns`) and sweep-only signature refreshes
+//!   are the same kind of writer: those two fields alone arm the
+//!   token-only fast path, so only a compare-and-swap that still sees
+//!   the probe's generation, content generation, `streams_known` marker,
+//!   and token may set them. A stamp that lost its race never resurrects
+//!   a cache that was invalidated in place.
 //! - A reader that cannot obtain the cache within a short bounded wait
 //!   replays itself and serves that without writing. It never waits on
 //!   another process's rebuild, and it never serves stale data: after a
@@ -607,7 +613,10 @@ fn rebuild(
         };
         match probe_with(&connection, &meta, &token, &sweep) {
             Probe::Fresh => {
-                update_token_and_sweep(&connection, &token, now)?;
+                if !stamp_freshness_if_current(&connection, &meta, &token, now)?
+                {
+                    return Err(Fault::Cache);
+                }
                 let snapshot = match load_snapshot(&connection) {
                     Ok(snapshot) => snapshot,
                     Err(_) => {
@@ -824,7 +833,9 @@ fn ensure_fresh(beads_dir: &Path, cache_path: &Path) -> Result<bool, Fault> {
     };
     match probe_with(&connection, &meta, &token, &sweep) {
         Probe::Fresh => {
-            update_token_and_sweep(&connection, &token, now)?;
+            if !stamp_freshness_if_current(&connection, &meta, &token, now)? {
+                return Err(Fault::Cache);
+            }
             note_serve_outcome(&connection);
             Ok(true)
         }
@@ -898,7 +909,9 @@ fn ensure_fresh_forced(
     };
     match probe_with(&connection, &meta, &token, &sweep) {
         Probe::Fresh => {
-            update_token_and_sweep(&connection, &token, now)?;
+            if !stamp_freshness_if_current(&connection, &meta, &token, now)? {
+                return Err(Fault::Cache);
+            }
             note_serve_outcome(&connection);
             Ok(true)
         }
@@ -1252,6 +1265,86 @@ pub(super) fn update_token_and_sweep(
         )
         .map_err(|_| Fault::Cache)?;
     Ok(())
+}
+
+/// Stamp `token` and `last_sweep_ns` inside one `IMMEDIATE` transaction
+/// guarded by the probe's generation compare-and-swap.
+///
+/// Returns `Ok(true)` when the stamp held. A lost race returns
+/// `Ok(false)` and writes nothing: the caller must not serve from that
+/// probe, because `token` plus `last_sweep_ns` alone arm the token-only
+/// fast path and must never re-arm a cache that was invalidated in
+/// place. Write faults surface as [`Fault::Cache`].
+pub(super) fn stamp_freshness_if_current(
+    connection: &Connection,
+    meta: &CacheMeta,
+    token: &str,
+    now_ns: i64,
+) -> Result<bool, Fault> {
+    connection
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(|_| Fault::Cache)?;
+    let outcome = (|| {
+        let generation_held = connection
+            .execute(
+                "UPDATE meta SET value = value WHERE key = 'generation' AND value = ?1",
+                rusqlite::params![meta.generation.to_string()],
+            )
+            .map_err(|_| WriteFault::Other)?;
+        if generation_held != 1 {
+            return Err(WriteFault::CasLost);
+        }
+        let content_held = connection
+            .execute(
+                "UPDATE meta SET value = value WHERE key = 'content_generation' AND value = ?1",
+                rusqlite::params![meta.content_generation.to_string()],
+            )
+            .map_err(|_| WriteFault::Other)?;
+        if content_held != 1 {
+            return Err(WriteFault::CasLost);
+        }
+        let streams_held = connection
+            .execute(
+                "UPDATE meta SET value = value WHERE key = 'streams_known'",
+                [],
+            )
+            .map_err(|_| WriteFault::Other)?;
+        if streams_held != 1 {
+            return Err(WriteFault::CasLost);
+        }
+        let token_held = connection
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'token' AND value = ?2",
+                rusqlite::params![token, meta.token],
+            )
+            .map_err(|_| WriteFault::Other)?;
+        if token_held != 1 {
+            return Err(WriteFault::CasLost);
+        }
+        connection
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'last_sweep_ns'",
+                [now_ns.to_string()],
+            )
+            .map_err(|_| WriteFault::Other)?;
+        Ok(())
+    })();
+    match outcome {
+        Ok(()) => {
+            connection
+                .execute_batch("COMMIT")
+                .map_err(|_| Fault::Cache)?;
+            Ok(true)
+        }
+        Err(WriteFault::CasLost) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Ok(false)
+        }
+        Err(WriteFault::Other) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(Fault::Cache)
+        }
+    }
 }
 
 /// Why a snapshot write failed: a lost generation race versus a fault.

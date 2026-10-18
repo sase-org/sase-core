@@ -1103,7 +1103,11 @@ fn private_argv_is_not_serialized_on_queries() {
             tool_name: None,
             definition: ToolDefinitionWire {
                 name: String::new(),
-                argv: vec!["secret".into(), "--token".into(), "abc".into()],
+                argv: vec![
+                    "secret".into(),
+                    "--token".into(),
+                    "hunter2-private-token".into(),
+                ],
                 ..definition()
             },
             extra_args: Vec::new(),
@@ -1111,7 +1115,7 @@ fn private_argv_is_not_serialized_on_queries() {
             private_argv: Some(vec![
                 "secret".into(),
                 "--token".into(),
-                "abc".into(),
+                "hunter2-private-token".into(),
             ]),
             project: Some("sase".into()),
             agent: None,
@@ -1137,7 +1141,7 @@ fn private_argv_is_not_serialized_on_queries() {
     .unwrap();
     assert!(started.run.logs.has_private_argv);
     let encoded = serde_json::to_string(&started.run).unwrap();
-    assert!(!encoded.contains("abc"));
+    assert!(!encoded.contains("hunter2-private-token"));
     assert!(encoded.contains("***"));
 }
 

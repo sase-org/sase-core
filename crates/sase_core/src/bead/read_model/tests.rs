@@ -581,3 +581,151 @@ fn schemaless_cache_file_heals_on_next_read() {
     let verify = read_model_verify_cache_at(&beads_dir, &cache_path);
     assert!(verify.matched, "{}", verify.reason);
 }
+
+#[test]
+fn freshness_stamp_loses_to_in_place_invalidation() {
+    use std::time::Duration;
+    let temp = tempfile::tempdir().unwrap();
+    let (beads_dir, cache_path) = test_store_path(&temp);
+    seed_event_store(&beads_dir);
+
+    rebuild_read_model_at(&beads_dir, &cache_path).unwrap();
+
+    // Capture the reader view a Fresh probe would hold, then invalidate
+    // in place the way a lost post-commit guard does.
+    let connection =
+        super::store::open_read_write(&cache_path, Duration::from_secs(5))
+            .unwrap_or_else(|_| {
+                panic!("cache must open for the probe snapshot")
+            });
+    let meta = super::store::read_meta(&connection).unwrap();
+    let token = super::freshness::freshness_token(&beads_dir).unwrap();
+    let _sweep = super::freshness::sweep_store_signatures(&beads_dir).unwrap();
+    assert_eq!(token, meta.token);
+    assert!(meta.streams_known);
+    drop(connection);
+
+    super::store::drop_cache_file(&cache_path);
+
+    let connection =
+        super::store::open_read_write(&cache_path, Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("invalidated cache must still open"));
+    let held = super::store::stamp_freshness_if_current(
+        &connection,
+        &meta,
+        &token,
+        super::freshness::now_ns(),
+    )
+    .unwrap_or_else(|_| panic!("stamp must report held or lost"));
+    assert!(!held, "stamp must lose to in-place invalidation");
+    drop(connection);
+
+    let reopened =
+        super::store::open_read_only(&cache_path, Duration::from_secs(5))
+            .unwrap();
+    let after = super::store::read_meta(&reopened).unwrap();
+    assert_eq!(after.token, "");
+    assert_eq!(after.last_sweep_ns, 0);
+    assert!(!after.streams_known);
+    drop(reopened);
+
+    assert!(
+        super::store::ensure_cache_ready_at(&beads_dir, &cache_path).unwrap()
+    );
+    let verify = read_model_verify_cache_at(&beads_dir, &cache_path);
+    assert!(verify.matched, "{}", verify.reason);
+}
+
+#[test]
+fn sweep_refresh_loses_to_concurrent_commit() {
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+    let temp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(temp.path().join(".git")).unwrap();
+    let beads_dir = temp.path().join("beads");
+    seed_event_store(&beads_dir);
+    let cache_path = read_model_cache_path_for_store(&beads_dir).unwrap();
+
+    rebuild_read_model_at(&beads_dir, &cache_path).unwrap();
+
+    let connection =
+        super::store::open_read_write(&cache_path, Duration::from_secs(5))
+            .unwrap_or_else(|_| {
+                panic!("cache must open before the concurrent commit")
+            });
+    let stale_meta = super::store::read_meta(&connection).unwrap();
+    let stale_stored = super::store::load_stored_stream_sigs(&connection);
+    let stale_token = stale_meta.token.clone();
+    drop(connection);
+
+    append_issue_note(
+        &beads_dir,
+        "beads-1.1",
+        "A note appended after the cached read.",
+        Some("read-model-cas-test".to_string()),
+        Some("2026-01-02T00:00:00Z".to_string()),
+        None,
+    )
+    .unwrap();
+
+    let winner =
+        super::store::open_read_only(&cache_path, Duration::from_secs(5))
+            .unwrap();
+    let winner_meta = super::store::read_meta(&winner).unwrap();
+    let winner_stored = super::store::load_stored_stream_sigs(&winner);
+    assert!(
+        winner_meta.content_generation > stale_meta.content_generation,
+        "publish must move content_generation so the stale sweep CAS loses"
+    );
+    assert!(winner_meta.streams_known);
+    assert!(!winner_meta.token.is_empty());
+    drop(winner);
+
+    let connection =
+        super::store::open_read_write(&cache_path, Duration::from_secs(5))
+            .unwrap_or_else(|_| {
+                panic!("cache must open for the stale sweep refresh")
+            });
+    let result = super::tail::commit_sweep_refresh(
+        &beads_dir,
+        &cache_path,
+        &connection,
+        &stale_meta,
+        &stale_token,
+        &stale_stored,
+        &BTreeMap::new(),
+        super::refresh::RefreshFinish::Readiness,
+    );
+    assert!(
+        matches!(result, Err(super::store::Fault::Cache)),
+        "stale sweep refresh must replay rather than overwrite the winner"
+    );
+    drop(connection);
+
+    let after =
+        super::store::open_read_only(&cache_path, Duration::from_secs(5))
+            .unwrap();
+    let after_meta = super::store::read_meta(&after).unwrap();
+    let after_stored = super::store::load_stored_stream_sigs(&after);
+    assert_eq!(after_meta.token, winner_meta.token);
+    assert_eq!(after_meta.last_sweep_ns, winner_meta.last_sweep_ns);
+    assert_eq!(after_meta.generation, winner_meta.generation);
+    assert_eq!(
+        after_meta.content_generation,
+        winner_meta.content_generation
+    );
+    assert!(after_meta.streams_known);
+    assert!(!after_meta.token.is_empty());
+    assert_eq!(after_stored.len(), winner_stored.len());
+    for (id, sig) in &winner_stored {
+        assert_eq!(
+            after_stored.get(id).map(|row| row.content_hash.as_str()),
+            Some(sig.content_hash.as_str())
+        );
+    }
+    drop(after);
+
+    assert!(cache_path.is_file());
+    let verify = read_model_verify_cache_at(&beads_dir, &cache_path);
+    assert!(verify.matched, "{}", verify.reason);
+}
