@@ -17,6 +17,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-plz.yml"
+MERGE_SCRIPT = REPO_ROOT / ".github" / "scripts" / "release_plz_merge.py"
 
 HEAL_CRON = "23 */6 * * *"
 
@@ -148,15 +149,23 @@ class MergeSafetyGuardTests(unittest.TestCase):
 
     def test_merge_only_touches_the_guarded_release_plz_pr(self) -> None:
         block = job_block(workflow_text(), "release-plz-merge")
-        for needle in (
-            "--base master --state open --author \"${release_actor}\"",
-            r'test("^release-plz-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z$")',
-            r'test("^chore: release v[0-9]+\\.[0-9]+\\.[0-9]+$")',
-            'contains("generated with [release-plz]")',
-            "gh pr checks \"${PR_NUMBER}\" --watch --fail-fast",
-            'gh pr merge "${PR_NUMBER}" --squash --delete-branch',
-        ):
-            self.assertIn(needle, block)
+        script = MERGE_SCRIPT.read_text()
+        self.assertIn("python3 .github/scripts/release_plz_merge.py", block)
+        self.assertIn("--base", script)
+        self.assertIn('"master"', script)
+        self.assertIn('"--state",\n                "open"', script)
+        self.assertIn('"--author",', script)
+        self.assertIn("^release-plz-[0-9]{4}-[0-9]{2}-[0-9]{2}T", script)
+        self.assertIn("^chore: release v[0-9]+\\\\.", script)
+        self.assertIn("generated with [release-plz]", script)
+        self.assertIn('["pr", "checks", str(pr_number)', script)
+        self.assertIn('["run", "rerun", run_id, "--failed"]', script)
+        self.assertIn('["pr", "merge", str(pr_number), "--squash", "--delete-branch"]', script)
+
+    def test_merge_job_exposes_the_typed_outcome(self) -> None:
+        block = job_block(workflow_text(), "release-plz-merge")
+        for output in ("outcome", "failed_check", "run_url"):
+            self.assertIn(f"{output}: ${{{{ steps.merge.outputs.{output} }}}}", block)
 
     def test_merge_still_follows_the_release_pr_job(self) -> None:
         block = job_block(workflow_text(), "release-plz-merge")

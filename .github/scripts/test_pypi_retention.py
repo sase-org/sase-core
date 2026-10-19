@@ -46,6 +46,7 @@ def make_bundle(
     sase_requirements: dict[str, list[str]] | None = None,
     github_requirements: list[str] | None = None,
     sase_versions: list[str] | None = None,
+    sase_tags: dict[str, str | None] | None = None,
 ) -> dict[str, object]:
     core_versions = core_versions or ["0.31.0", "0.42.0", "0.42.1", "0.43.0", "0.44.0"]
     sase_versions = sase_versions or ["0.17.1", "0.18.0"]
@@ -82,6 +83,7 @@ def make_bundle(
             },
         }
     return {
+        "sase_tags": sase_tags or {},
         "core": {
             "project": {"releases": core_project_releases},
             "versions": core_release_json,
@@ -148,6 +150,38 @@ class ProtectedSetTests(unittest.TestCase):
         # This version falls outside the newest-30 floor and has no consumer window,
         # so an already-broken release does not prevent a safe reclaim.
         self.assertEqual(protected.violations(["0.31.0"]), [])
+
+    def test_in_flight_sase_tag_protects_its_exact_published_core_pin(self) -> None:
+        versions = [f"0.{minor}.0" for minor in range(1, 51)]
+        bundle = make_bundle(
+            core_versions=versions,
+            sase_tags={
+                "v0.18.0": '[project]\nname = "sase"\ndependencies = ["sase-core-rs==0.11.0"]\n',
+                "v0.18.1": '[project]\nname = "sase"\ndependencies = ["sase-core-rs==0.10.0"]\n',
+                "v0.18.2": '[project]\nname = "sase"\ndependencies = ["sase-core-rs>=0.09.0,<0.10.0"]\n',
+            },
+        )
+        protected = self.compute(bundle)
+        self.assertIn(
+            "sase tag v0.18.1 (not yet on PyPI) pins sase-core-rs==0.10.0",
+            protected.reasons_by_version["0.10.0"],
+        )
+        self.assertNotIn("0.11.0", protected.reasons_by_version)
+        self.assertNotIn("0.09.0", protected.reasons_by_version)
+        self.assertNotIn(
+            "sase tag v0.18.2 (not yet on PyPI) pins sase-core-rs==0.10.0",
+            protected.reasons_by_version["0.10.0"],
+        )
+
+    def test_unreadable_in_flight_tag_pyproject_fails_closed(self) -> None:
+        bundle = make_bundle(sase_tags={"v0.18.1": None})
+        with self.assertRaisesRegex(retention.RetentionError, "pyproject.toml is unreadable"):
+            self.compute(bundle)
+
+    def test_unreadable_in_flight_tag_version_fails_closed(self) -> None:
+        bundle = make_bundle(sase_tags={"vnot-a-version": "[project]\\n"})
+        with self.assertRaisesRegex(retention.RetentionError, "cannot parse fixture sase release tag"):
+            self.compute(bundle)
 
     def test_support_horizon_cannot_drop_below_ten(self) -> None:
         with self.assertRaisesRegex(retention.RetentionError, "at least 10"):

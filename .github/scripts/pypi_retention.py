@@ -16,13 +16,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import subprocess
 import sys
+import tomllib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import quote
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import SpecifierSet
@@ -59,6 +63,8 @@ CLEANUP_VERSION_LINE = re.compile(r"^INFO:root: (\S+)\s*$")
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-plz.yml"
+SASE_REPOSITORY = "https://github.com/sase-org/sase.git"
+SASE_RAW_BASE = "https://raw.githubusercontent.com/sase-org/sase"
 
 
 class RetentionError(Exception):
@@ -168,6 +174,10 @@ class DataSource(Protocol):
 
     def fetch_release(self, package: str, version: str) -> dict[str, Any]: ...
 
+    def list_sase_tags(self) -> list[tuple[str, Version]]: ...
+
+    def fetch_sase_pyproject(self, tag: str) -> str: ...
+
 
 def fetch_json(url: str, *, timeout: int, context: str) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"User-Agent": "sase-pypi-retention"})
@@ -200,6 +210,52 @@ class LiveDataSource:
             context=f"{package} {version} release metadata",
         )
 
+    def list_sase_tags(self) -> list[tuple[str, Version]]:
+        """Read public release tags without GitHub credentials."""
+        try:
+            result = subprocess.run(
+                ["git", "ls-remote", "--tags", "--refs", SASE_REPOSITORY, "refs/tags/v*"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            )
+        except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+            raise RetentionError(f"cannot list public sase tags: {exc}") from exc
+        if result.returncode != 0:
+            detail = result.stderr.strip() or f"git exited {result.returncode}"
+            raise RetentionError(f"cannot list public sase tags: {detail}")
+
+        tags: list[tuple[str, Version]] = []
+        for line in result.stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) != 2 or not fields[0] or not fields[1].startswith("refs/tags/v"):
+                raise RetentionError(f"malformed public sase tag listing line: {line!r}")
+            tag = fields[1].removeprefix("refs/tags/")
+            try:
+                version = Version(tag[1:])
+            except InvalidVersion as exc:
+                raise RetentionError(f"cannot parse public sase release tag {tag!r}") from exc
+            tags.append((tag, version))
+        return sorted(tags, key=lambda item: (item[1], item[0]))
+
+    def fetch_sase_pyproject(self, tag: str) -> str:
+        """Fetch a tag's pyproject from raw GitHub over anonymous HTTPS."""
+        url = f"{SASE_RAW_BASE}/{quote(tag, safe='')}/pyproject.toml"
+        request = urllib.request.Request(url, headers={"User-Agent": "sase-pypi-retention"})
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                status = response.getcode()
+                if status != 200:
+                    raise RetentionError(f"sase tag {tag}: HTTP {status} fetching pyproject.toml")
+                return response.read().decode("utf-8")
+        except RetentionError:
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError, UnicodeError) as exc:
+            status = f"HTTP {exc.code}" if isinstance(exc, urllib.error.HTTPError) else str(exc)
+            raise RetentionError(f"sase tag {tag}: failed to fetch pyproject.toml: {status}") from exc
+
 
 class FixtureDataSource:
     """Offline source for --fixture-bundle, with the same shapes as the PyPI API."""
@@ -229,6 +285,32 @@ class FixtureDataSource:
             raise RetentionError(f"fixture bundle is missing {package} {version} release JSON") from exc
         if not isinstance(value, dict):
             raise RetentionError(f"fixture bundle has malformed {package} {version} release JSON")
+        return value
+
+    def list_sase_tags(self) -> list[tuple[str, Version]]:
+        try:
+            tags = self.bundle.get("sase_tags", {})
+        except AttributeError as exc:
+            raise RetentionError("fixture bundle has malformed sase_tags") from exc
+        if not isinstance(tags, dict):
+            raise RetentionError("fixture bundle has malformed sase_tags")
+        parsed: list[tuple[str, Version]] = []
+        for tag in tags:
+            if not isinstance(tag, str) or not tag.startswith("v"):
+                raise RetentionError(f"fixture has malformed sase release tag {tag!r}")
+            try:
+                parsed.append((tag, Version(tag[1:])))
+            except InvalidVersion as exc:
+                raise RetentionError(f"cannot parse fixture sase release tag {tag!r}") from exc
+        return sorted(parsed, key=lambda item: (item[1], item[0]))
+
+    def fetch_sase_pyproject(self, tag: str) -> str:
+        tags = self.bundle.get("sase_tags", {})
+        if not isinstance(tags, dict) or tag not in tags:
+            raise RetentionError(f"sase tag {tag}: fixture is missing pyproject.toml")
+        value = tags[tag]
+        if not isinstance(value, str):
+            raise RetentionError(f"sase tag {tag}: fixture pyproject.toml is unreadable")
         return value
 
 
@@ -367,6 +449,40 @@ def consumer_requirements(payload: dict[str, Any], package: str, version: str) -
     return tuple(uses)
 
 
+def exact_core_pins(pyproject_text: str, *, tag: str) -> set[str]:
+    """Return exact direct sase-core-rs pins from a tag's project dependencies."""
+    try:
+        document = tomllib.loads(pyproject_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise RetentionError(f"sase tag {tag}: pyproject.toml is malformed: {exc}") from exc
+    project = document.get("project")
+    if not isinstance(project, dict):
+        raise RetentionError(f"sase tag {tag}: pyproject.toml is missing [project]")
+    dependencies = project.get("dependencies", [])
+    if not isinstance(dependencies, list) or any(not isinstance(raw, str) for raw in dependencies):
+        raise RetentionError(f"sase tag {tag}: project.dependencies is malformed")
+
+    pins: set[str] = set()
+    for raw in dependencies:
+        try:
+            requirement = Requirement(raw)
+        except InvalidRequirement as exc:
+            raise RetentionError(f"sase tag {tag}: cannot parse dependency {raw!r}: {exc}") from exc
+        if canonicalize_name(requirement.name) != canonicalize_name(PACKAGE):
+            continue
+        specifiers = list(requirement.specifier)
+        if len(specifiers) != 1 or specifiers[0].operator != "==" or "*" in specifiers[0].version:
+            # Older tags declare a version window; this source only covers exact pins.
+            continue
+        try:
+            pins.add(str(Version(specifiers[0].version)))
+        except InvalidVersion as exc:
+            raise RetentionError(
+                f"sase tag {tag}: invalid exact {PACKAGE} pin {specifiers[0].version!r}"
+            ) from exc
+    return pins
+
+
 def has_upper_bound(specifier: SpecifierSet) -> bool:
     return any(part.operator in {"<", "<=", "==", "===", "~="} for part in specifier)
 
@@ -444,9 +560,14 @@ def compute_protected_set(
 
     consumer_releases: dict[str, list[ConsumerRelease]] = {}
     supported_releases: dict[str, list[ConsumerRelease]] = {}
+    newest_sase_pypi_version: Version | None = None
     for package in CONSUMERS:
         project = source.fetch_project(package)
         releases = load_releases(project, context=f"{package} project JSON")
+        if package == "sase" and releases:
+            # Include yanked versions: a published version still marks the boundary
+            # between shipped releases and tags whose files have not reached PyPI.
+            newest_sase_pypi_version = releases[-1].version
         available = [
             release
             for release in reversed(releases)
@@ -483,8 +604,6 @@ def compute_protected_set(
 
     # Confirmed-working baseline: the two newest sase releases, of any age, whose
     # dependency window currently contains at least one complete core version.
-    # E2 adds candidate-manifest-qualified versions at this union boundary; it does
-    # not change the consumer or retention rules implemented here.
     baseline_count = 0
     for row in consumer_releases["sase"]:
         if baseline_count >= 2:
@@ -513,6 +632,20 @@ def compute_protected_set(
             protected.already_unresolvable.append(
                 f"sase {row.release.name}: " + "; ".join(use.raw for use in row.requirements)
             )
+
+    # Tags newer than the newest sase release on PyPI represent in-flight releases.
+    # Protect each exact core pin they declare; old window specifiers are handled by
+    # the supported-release rules above and are intentionally ignored here.
+    if newest_sase_pypi_version is None:
+        raise RetentionError("sase project JSON contains no published releases")
+    published_core_versions = set(protected.published_versions)
+    for tag, tag_version in source.list_sase_tags():
+        if tag_version <= newest_sase_pypi_version:
+            continue
+        pyproject = source.fetch_sase_pyproject(tag)
+        for pin in exact_core_pins(pyproject, tag=tag):
+            if pin in published_core_versions:
+                protected.add(pin, f"sase tag {tag} (not yet on PyPI) pins {PACKAGE}=={pin}")
 
     # The unchanged retention floor and explicit human-selected versions.
     newest = core_releases[-keep_count:]

@@ -93,11 +93,15 @@ It tells the failures apart, because they have different fixes:
    non-yanked releases of `sase`, `sase-github`, `sase-telegram` and `sase-research-artifacts`. For bounded core
    requirements they protect every published matching version; for unbounded requirements they protect the newest
    complete match. Extras and environment markers are handled conservatively. They also protect the windows of the
-   newest two `sase` releases with a complete compatible core, the newest 30 core releases, and every
-   `--keep-version`. Each protected version prints the consumer requirement and every file that version currently
-   holds. `ALREADY UNRESOLVABLE` entries name historical releases whose windows are empty; they are reported for the
-   core-backfill runbook and do not block a reclaim. The E2 candidate-manifest source will join this set later; it is
-   not part of this implementation.
+   newest two `sase` releases with a complete compatible core, the exact core pins in `pyproject.toml` at every public
+   `sase` `v*` tag newer than the newest `sase` release on PyPI, the newest 30 core releases, and every
+   `--keep-version`. The tag source uses `git ls-remote --tags` and anonymous raw GitHub fetches. A tag's exact
+   `sase-core-rs==X.Y.Z` pin protects that published core version with a reason naming the `sase` tag; old window
+   specifiers are ignored here because the consumer rules above already protect supported windows. If the tag list or
+   any relevant tag's `pyproject.toml` cannot be read or parsed, planning and checking fail closed. Each protected
+   version prints its reasons and every file that version currently holds. `ALREADY UNRESOLVABLE` entries name
+   historical releases whose windows are empty; they are reported for the core-backfill runbook and do not block a
+   reclaim.
 
    Check any proposed or previously saved list immediately before review:
 
