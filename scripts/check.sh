@@ -270,7 +270,7 @@ cmd_test() {
 }
 
 cmd_script_test() {
-    python3 -m unittest discover -s .github/scripts -t .github/scripts
+    uv run --no-project --with packaging --with requests python -m unittest discover -s .github/scripts -t .github/scripts
 }
 
 # Fresh-by-construction module map: every sase_core top-level module with the

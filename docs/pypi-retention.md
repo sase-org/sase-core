@@ -22,24 +22,28 @@ weighs about 75 MB, so a project holds roughly 140 releases when nothing else is
 
 ## Tools
 
-`.github/scripts/pypi_retention.py` is a self-contained `uv run --script` (it depends only on `packaging`). It owns
-everything around the deletion but never deletes anything itself:
+`.github/scripts/pypi_retention.py` is a `uv run --script` (it depends on `packaging` and imports the shared
+`.github/scripts/pypi_release_files.py` parser). It owns everything around the deletion but never deletes anything
+itself:
 
-| Subcommand | Purpose                                                                              |
-| ---------- | ------------------------------------------------------------------------------------ |
-| `plan`     | Derive the delete list from live data: sort by version, keep the newest N.           |
-| `regex`    | Turn a delete list into the exact `--version-regex` argument, anchored at both ends. |
-| `compare`  | Check that a `pypi-cleanup --query-only` log selects exactly the delete list.        |
-| `verify`   | Re-measure the project and assert the outcome (under the limit, versions gone/kept). |
+| Subcommand | Purpose                                                                                              |
+| ---------- | ---------------------------------------------------------------------------------------------------- |
+| `plan`     | Derive the delete list from live consumers and PyPI data, retaining the newest 30 and explicit pins. |
+| `check`    | Refuse a list containing a protected version or distribution file; plan checks its own output too.   |
+| `regex`    | Turn a delete list into the exact `--version-regex` argument, anchored at both ends.                 |
+| `compare`  | Check that a `pypi-cleanup --query-only` log selects exactly the delete list.                        |
+| `verify`   | Re-measure the project and assert the outcome (under the limit, versions gone/kept).                |
 
-`.github/scripts/pypi_delete.py` is the deletion driver, also a self-contained `uv run --script` (`packaging`,
-`requests`). It reimplements the small login/delete flow `pypi-cleanup@0.1.10` performs, with one difference that
-matters: it keeps its HTTP session alive across PyPI's login-confirmation wall (see Troubleshooting) instead of exiting
-when it hits it. It deletes exactly the list it is given and refuses to run when
+`.github/scripts/pypi_delete.py` is the deletion driver, a `uv run --script` (`packaging`, `requests`). It imports the
+retention module and recomputes the live protected set before reading credentials or logging in. It reimplements the
+small login/delete flow `pypi-cleanup@0.1.10` performs, with one difference that matters: it keeps its HTTP session
+alive across PyPI's login-confirmation wall (see Troubleshooting) instead of exiting when it hits it. It deletes exactly
+the list it is given and refuses to run when
 
 - `--confirm` is absent,
 - the list is empty, or would remove every published version, or
-- any listed version is equal to or newer than a `--keep-version` (repeat it for every version a consumer pins exactly).
+- any listed version is equal to or newer than a `--keep-version` (repeat it for every version a human explicitly pins),
+- the list touches the live protected set, or that set cannot be computed (`error_kind: protected`, exit 2).
 
 It never prompts, because it runs from a gate with no TTY. The username is `--username` (or `PYPI_USERNAME`), the
 password comes from `PYPI_CLEANUP_PASSWORD` and the current TOTP from `PYPI_TOTP` (`--password-env` / `--totp-env` name
@@ -60,44 +64,33 @@ It tells the failures apart, because they have different fixes:
 
 ## Procedure
 
-1. **Choose the keep boundary.** The default keeps the newest 30 published versions so a rollback target older than the
-   current floor still exists. Before deleting, grep every consumer of the binding (`sase`, `sase-github`,
-   `sase-telegram`, `sase-nvim`, `sase-research-artifacts`) for an exact `sase-core-rs==` pin or a floor below the
-   boundary, including `uv.lock`. If one pins a version that would be deleted, raise the boundary or pass
-   `--keep-version` for it. A `==X` pin that is meant to **fail** (a negative test) does not need protecting.
+1. **Review the automatic protected set.** `plan` and `check` read each release's own PyPI metadata for the newest ten
+   non-yanked releases of `sase`, `sase-github`, `sase-telegram` and `sase-research-artifacts`. For bounded core
+   requirements they protect every published matching version; for unbounded requirements they protect the newest
+   complete match. Extras and environment markers are handled conservatively. They also protect the windows of the
+   newest two `sase` releases with a complete compatible core, the newest 30 core releases, and every
+   `--keep-version`. Each protected version prints the consumer requirement and every file that version currently
+   holds. `ALREADY UNRESOLVABLE` entries name historical releases whose windows are empty; they are reported for the
+   core-backfill runbook and do not block a reclaim. The E2 candidate-manifest source will join this set later; it is
+   not part of this implementation.
 
-   **Also audit what is already published**, not just the checkouts. A consumer's *released* distributions carry
-   their own frozen `sase-core-rs` requirement in their PyPI metadata, and deleting out from under it makes that
-   published release permanently uninstallable — the source pin that a grep finds is the *next* release's, not the
-   one users are resolving today. This is not hypothetical: the 2026-09-20 keep-30 run deleted every `0.32.x`
-   release, and every published `sase` up to 0.17.1 pins `sase-core-rs>=0.32.16,<0.33.0`, so `pip install sase`
-   became unsatisfiable until a `sase` release carrying the newer floor was published. Check each consumer's live
-   metadata before choosing the boundary:
+   Check any proposed or previously saved list immediately before review:
 
    ```bash
-   python3 - <<'EOF'
-   import json, urllib.request
-   for pkg in ("sase", "sase-github", "sase-telegram", "sase-nvim", "sase-research-artifacts"):
-       try:
-           info = json.load(urllib.request.urlopen(f"https://pypi.org/pypi/{pkg}/json"))["info"]
-       except Exception as error:  # not published at all
-           print(f"{pkg}: {error}")
-           continue
-       pins = [r for r in (info.get("requires_dist") or []) if "core-rs" in r]
-       print(f"{pkg}=={info['version']}: {pins}")
-   EOF
+   uv run --script .github/scripts/pypi_retention.py check --list delete-list.txt
    ```
 
-   Every window printed there must still contain a kept version, or that published consumer breaks. If one would
-   not, either raise the boundary with `--keep-version` to hold its window open, or publish the consumer release
-   that moves its floor **before** deleting.
+   `check` accepts version names and individual distribution filenames. Missing or malformed PyPI evidence, or a
+   missing expected-file set, fails closed. A `==X` requirement that is meant to **fail** in a negative test is still
+   conservatively protected when it appears in a supported published release.
 2. **Generate the list from live data**, never by hand:
 
    ```bash
    uv run --script .github/scripts/pypi_retention.py plan --keep 30 --output delete-list.txt
    ```
 
-   Review the printed keep/delete counts, sizes, and the projected headroom, then have the list reviewed.
+   `plan` checks the generated list against the same protected set before writing it. Review the printed consumer
+   reasons, keep/delete counts, sizes, and projected headroom, then have the list reviewed.
 
 3. **Dry-run.** `--query-only` needs no credentials and prints what would be deleted. The selection must equal the list
    (use `--allow-subset` only to tolerate versions that are already gone; extra versions are always a mismatch):

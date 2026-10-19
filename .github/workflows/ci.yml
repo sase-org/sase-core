@@ -72,15 +72,17 @@ jobs:
       - name: cargo test --workspace
         run: ./scripts/check.sh test
 
-  # Stdlib-only unit checks for the helper scripts the Release-plz workflow
-  # runs, e.g. the publish-plan completeness gate. No toolchain or cache needed.
+  # Offline unit checks for the release helper scripts. The retention tests use
+  # packaging, and the delete-driver tests use requests, so provide both explicitly.
   release-scripts:
     name: release workflow scripts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: python3 -m unittest .github/scripts
+      - uses: astral-sh/setup-uv@v10
+
+      - name: unit tests for release helper scripts
         run: ./scripts/check.sh script-test
 
   wheel-smoke:

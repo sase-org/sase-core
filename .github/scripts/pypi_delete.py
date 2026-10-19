@@ -18,9 +18,9 @@ It never prompts: the password and the TOTP come from environment variables, the
 from a file, and there is no TTY. It prints exactly one JSON object on stdout; every
 diagnostic goes to stderr. The exit status is 0 only for ``"status": "deleted"``.
 
-The delete list must come from ``pypi_retention.py plan`` (see ``docs/pypi-retention.md``);
-this script deletes exactly what it is given, so it refuses an empty list, a missing
-``--confirm``, and any list that reaches a version the caller said to protect.
+The delete list must come from ``pypi_retention.py plan`` (see ``docs/pypi-retention.md``).
+Before reading credentials, this script recomputes the live consumer-driven protected set
+and refuses any list that touches it or when that set cannot be computed.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ import subprocess
 import sys
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from html.parser import HTMLParser
@@ -43,6 +44,8 @@ from urllib.parse import urlparse
 
 import requests
 from packaging.version import InvalidVersion, Version
+
+import pypi_retention as retention
 
 PACKAGE = "sase-core-rs"
 DEFAULT_BASE_URL = "https://pypi.org"
@@ -81,6 +84,13 @@ class Refused(DriverError):
 
     def __init__(self, message: str) -> None:
         super().__init__("refused", message)
+
+
+class Protected(DriverError):
+    """The live protected set was touched or could not be proven safe."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("protected", message)
 
 
 @dataclass
@@ -483,9 +493,18 @@ def measure(client: Client, package: str) -> tuple[str | None, int | None]:
     return str(min(Version(v) for v in published)), sum(published.values())
 
 
-def run(args: argparse.Namespace, environ: dict[str, str]) -> dict[str, Any]:
+def run(args: argparse.Namespace, environ: Mapping[str, str]) -> dict[str, Any]:
     requested = read_list(Path(args.list))
     validate_request(requested, args.keep_version, args.confirm)
+
+    if args.package == retention.PACKAGE:
+        try:
+            protected = retention.compute_protected_set(keep_versions=args.keep_version)
+            violations = protected.violations(requested)
+        except Exception as exc:
+            raise Protected(f"cannot compute the live protected set; refusing deletion: {exc}") from exc
+        if violations:
+            raise Protected("delete list touches the live protected set: " + "; ".join(violations))
 
     username = args.username or environ.get(DEFAULT_USERNAME_ENV, "")
     password = environ.get(args.password_env, "")
@@ -617,11 +636,17 @@ def emit(result: dict[str, Any]) -> None:
 def main() -> int:
     args = build_parser().parse_args()
     try:
-        result = run(args, dict(os.environ))
+        result = run(args, os.environ)
     except DriverError as exc:
         log(f"{exc.kind}: {exc}")
-        emit({"status": "refused" if exc.kind == "refused" else "failed", "error_kind": exc.kind, "error": str(exc)})
-        return 2 if exc.kind == "refused" else 1
+        emit(
+            {
+                "status": "refused" if exc.kind in {"refused", "protected"} else "failed",
+                "error_kind": exc.kind,
+                "error": str(exc),
+            }
+        )
+        return 2 if exc.kind in {"refused", "protected"} else 1
     except KeyboardInterrupt:
         emit({"status": "failed", "error_kind": "interrupted", "error": "interrupted"})
         return 130
