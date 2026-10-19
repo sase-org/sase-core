@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.1](https://github.com/sase-org/sase-core/compare/v0.42.0...v0.42.1) - 2026-10-19
+
+### Added
+
+- *(stats)* count committed source lines with tokei
+
 ## [0.42.0](https://github.com/sase-org/sase-core/compare/v0.41.0...v0.42.0) - 2026-10-18
 
 ### Added
