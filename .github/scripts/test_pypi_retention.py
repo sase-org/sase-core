@@ -13,6 +13,8 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
+from packaging.version import Version
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pypi_release_files  # noqa: E402
@@ -278,6 +280,100 @@ class SharedFileSetTests(unittest.TestCase):
             ).state,
             pypi_release_files.COMPLETE,
         )
+
+
+class HeadroomTests(unittest.TestCase):
+    def releases(self, sizes: list[int]) -> list[retention.Release]:
+        return [
+            retention.Release(Version(f"0.{index}.0"), f"0.{index}.0", 5, size)
+            for index, size in enumerate(sizes)
+        ]
+
+    def test_runway_days_equal_remaining_releases_at_one_per_day(self) -> None:
+        headroom = retention.compute_headroom(self.releases([100] * 5), limit=1000, cadence=1.0)
+        self.assertEqual(headroom.used, 500)
+        self.assertEqual(headroom.free, 500)
+        self.assertEqual(headroom.average_bytes, 100)
+        self.assertEqual(headroom.remaining_releases, 5)
+        self.assertEqual(headroom.runway_days, 5.0)
+        self.assertTrue(headroom.computable)
+
+    def test_runway_below_threshold_is_a_breach(self) -> None:
+        headroom = retention.compute_headroom(self.releases([100] * 5), limit=1000)
+        self.assertLess(headroom.runway_days, retention.DEFAULT_MIN_RUNWAY_DAYS)
+
+    def test_runway_at_threshold_is_not_a_breach(self) -> None:
+        # 5 used of 3500 at 100 bytes each -> 30 remaining releases, 30 days.
+        headroom = retention.compute_headroom(self.releases([100] * 5), limit=3500)
+        self.assertEqual(headroom.runway_days, 30.0)
+        self.assertFalse(headroom.runway_days < retention.DEFAULT_MIN_RUNWAY_DAYS)
+
+    def test_over_limit_is_zero_runway(self) -> None:
+        headroom = retention.compute_headroom(self.releases([400] * 5), limit=1000)
+        self.assertEqual(headroom.remaining_releases, 0)
+        self.assertEqual(headroom.runway_days, 0.0)
+        self.assertTrue(headroom.computable)
+
+    def test_zero_average_is_not_computable(self) -> None:
+        headroom = retention.compute_headroom(self.releases([0] * 3), limit=1000)
+        self.assertFalse(headroom.computable)
+        self.assertEqual(headroom.runway_days, 0.0)
+
+    def test_empty_project_is_not_computable(self) -> None:
+        headroom = retention.compute_headroom([], limit=1000)
+        self.assertFalse(headroom.computable)
+
+
+class VerifyRunwayCliTests(unittest.TestCase):
+    def project(self, sizes: list[int]) -> dict[str, object]:
+        return {
+            "releases": {
+                f"0.{index}.0": [
+                    {"filename": f"sase_core_rs-0.{index}.0.tar.gz", "size": size}
+                ]
+                for index, size in enumerate(sizes)
+            }
+        }
+
+    def run_verify(self, project: dict[str, object], extra: list[str]) -> tuple[int, str, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "project.json"
+            path.write_text(json.dumps(project))
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = retention.main(["verify", "--input-json", str(path), *extra])
+            return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_default_threshold_passes_when_runway_is_long(self) -> None:
+        # Tiny files under a 10 GiB cap leave thousands of days of runway.
+        code, stdout, stderr = self.run_verify(self.project([100] * 10), [])
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("OK", stdout)
+        self.assertIn("runway at 1 releases/day", stdout)
+
+    def test_forced_high_threshold_exits_nonzero(self) -> None:
+        code, stdout, stderr = self.run_verify(
+            self.project([100] * 10), ["--min-runway-days", "1000000000"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("projected runway is", stderr)
+        self.assertIn("minimum is 1000000000", stderr)
+
+    def test_partial_releases_do_not_crash_verify(self) -> None:
+        project = {
+            "releases": {
+                "0.1.0": [{"filename": "sase_core_rs-0.1.0.tar.gz", "size": 100}] * 5,
+                "0.2.0": [{"filename": "sase_core_rs-0.2.0.tar.gz", "size": 100}] * 3,
+            }
+        }
+        code, stdout, stderr = self.run_verify(project, ["--min-runway-days", "0"])
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("partial releases", stdout)
+
+    def test_zero_average_fails_closed(self) -> None:
+        code, _stdout, stderr = self.run_verify(self.project([0] * 2), ["--min-runway-days", "0"])
+        self.assertEqual(code, 1)
+        self.assertIn("cannot compute runway", stderr)
 
 
 if __name__ == "__main__":

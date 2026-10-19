@@ -1,0 +1,94 @@
+name: PyPI headroom
+
+# Weekly detector for sase-core-rs storage runway. A red run is the alert
+# (ci_watch watches sase-core). When SASE_RELEASE_TOKEN can write issues on
+# sase-org/sase, the same job also opens or updates one mirrored issue so the
+# sase issue mirror can turn it into a task bead. If that token cannot write
+# issues there, the red run still stands: the red run is the alert.
+#
+# This is a detector, not a merge gate. It never deletes anything and never
+# proposes a deletion. Reclaim stays the human-gated retention procedure in
+# docs/pypi-retention.md.
+on:
+  schedule:
+    # Monday 08:17 UTC, off the daily release-plz cut at 07:41.
+    - cron: "17 8 * * 1"
+  workflow_dispatch:
+    inputs:
+      min_runway_days:
+        description: Fail when projected runway at one release a day is below this many days.
+        type: string
+        default: "30"
+
+permissions:
+  contents: read
+
+jobs:
+  headroom:
+    name: Runway threshold
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: ${{ github.repository_owner == 'sase-org' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v10
+
+      - name: Measure runway
+        id: verify
+        continue-on-error: true
+        env:
+          MIN_RUNWAY_DAYS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_runway_days || '30' }}
+        run: |
+          set -euo pipefail
+          uv run --script .github/scripts/pypi_retention.py verify \
+            --min-runway-days "$MIN_RUNWAY_DAYS" 2>&1 | tee verify.out
+
+      - name: Mirror the alert onto sase-org/sase
+        env:
+          GH_TOKEN: ${{ secrets.SASE_RELEASE_TOKEN }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="[pypi-headroom] sase-core-rs runway below 30 days"
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "SASE_RELEASE_TOKEN is unset; the red run is the alert."
+            exit 0
+          fi
+
+          if ! gh issue list --repo sase-org/sase --limit 1 >/dev/null 2>&1; then
+            echo "SASE_RELEASE_TOKEN cannot list issues on sase-org/sase; the red run is the alert."
+            exit 0
+          fi
+
+          gh label create pypi-headroom --repo sase-org/sase --color E4A800 \
+            --description "sase-core-rs PyPI storage runway below 30 days" \
+            2>/dev/null || true
+
+          number="$(gh issue list --repo sase-org/sase --label pypi-headroom --state open \
+            --search "$title in:title" --json number --jq '.[0].number // empty' \
+            || true)"
+
+          if [ "$VERIFY_OUTCOME" = "failure" ]; then
+            measured="$(cat verify.out 2>/dev/null || echo "(verify output missing)")"
+            body="sase-core-rs PyPI storage runway is below the 30-day threshold at one release a day. This alert never deletes anything and never proposes a deletion. Reclaim is the human-gated procedure in https://github.com/sase-org/sase-core/blob/master/docs/pypi-retention.md. The open size request is https://github.com/pypi/support/issues/12339. Run: $RUN_URL"$'\n\n'"$measured"
+            if [ -z "$number" ]; then
+              gh issue create --repo sase-org/sase --title "$title" \
+                --label pypi-headroom --body "$body"
+            else
+              gh issue comment --repo sase-org/sase "$number" --body "$body (still below threshold)"
+            fi
+          elif [ -n "$number" ]; then
+            gh issue comment --repo sase-org/sase "$number" \
+              --body "Runway is back above the threshold: $RUN_URL."
+            gh issue close --repo sase-org/sase "$number"
+          else
+            echo "No alert action (outcome=$VERIFY_OUTCOME open_issue=${number:-none})."
+          fi
+
+      - name: Fail the detector on a runway breach
+        if: steps.verify.outcome == 'failure'
+        run: |
+          echo "::error::sase-core-rs PyPI runway is below the threshold. This workflow never deletes files. See docs/pypi-retention.md."
+          exit 1

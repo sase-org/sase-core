@@ -10,6 +10,31 @@ test fails if they differ, so if PyPI grants a size increase, change both.
 A release is five files (macOS universal2, Windows, Linux x86_64, Linux aarch64 wheels, and the sdist) and currently
 weighs about 75 MB, so a project holds roughly 140 releases when nothing else is kept.
 
+## Runway
+
+Measured 2026-10-19 from `uv run --script .github/scripts/pypi_retention.py verify`:
+
+```text
+sase-core-rs: 53 releases, 265 files, 4.39 GB
+  used 4.39 GB (40.9% of 10 GiB), free 6.35 GB
+  average newest-10 release 105.1 MB -> ~60 more releases
+    runway at 4.32 releases/day: ~14 days
+    runway at 1 releases/day: ~60 days
+```
+
+That is 4.09 GiB of the 10 GiB cap, 53 complete releases, about 105 MB for a newest-10 release, and about 60 days of
+runway at the current one-release-a-day cadence. The 50 GiB size request
+[pypi/support#12339](https://github.com/pypi/support/issues/12339) has been open since 2026-09-19; do not file a second
+request. If PyPI grants it, change both `PYPI_PROJECT_LIMIT_BYTES` in `.github/workflows/release-plz.yml` and
+`PROJECT_LIMIT_BYTES` in `.github/scripts/pypi_retention.py`. `test_pypi_quota.py` keeps those two constants equal.
+
+`verify --min-runway-days D` (default 30) exits non-zero when the projected runway at one release a day falls below D.
+`.github/workflows/pypi-headroom.yml` runs that check every Monday. **Live alert path:** a red scheduled run is the
+alert, because ci_watch watches sase-core. The same job also tries to open or update one sase-org/sase issue titled
+`[pypi-headroom] sase-core-rs runway below 30 days` (label `pypi-headroom`) with `SASE_RELEASE_TOKEN`, so the sase issue
+mirror can turn it into a task bead. If that token cannot write issues on sase, the red run still stands. The workflow
+never deletes anything and never proposes a deletion.
+
 ## Deletion is irreversible and human-gated
 
 - PyPI **permanently burns** a deleted version and its filenames. A deleted version can never be uploaded again.
@@ -32,7 +57,7 @@ itself:
 | `check`    | Refuse a list containing a protected version or distribution file; plan checks its own output too.   |
 | `regex`    | Turn a delete list into the exact `--version-regex` argument, anchored at both ends.                 |
 | `compare`  | Check that a `pypi-cleanup --query-only` log selects exactly the delete list.                        |
-| `verify`   | Re-measure the project and assert the outcome (under the limit, versions gone/kept).                |
+| `verify`   | Re-measure the project and assert the outcome (under the limit, versions gone/kept, `--min-runway-days` default 30). |
 
 `.github/scripts/pypi_delete.py` is the deletion driver, a `uv run --script` (`packaging`, `requests`). It imports the
 retention module and recomputes the live protected set before reading credentials or logging in. It reimplements the
@@ -129,7 +154,8 @@ It tells the failures apart, because they have different fixes:
    ```
 
    It prints bytes used, bytes free, and the approximate number of releases that still fit at the average size of the
-   newest ten releases, and fails if any listed version is still published or the project is at or over the limit.
+   newest ten releases, and fails if any listed version is still published, the project is at or over the limit, or the
+   projected runway at one release a day is below `--min-runway-days` (default 30).
 
 ## Pre-flight quota guard
 

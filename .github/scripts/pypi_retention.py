@@ -45,6 +45,10 @@ DEFAULT_KEEP = 30
 # Observed release cadence before the daily-cut change, and the target after it.
 CADENCES_PER_DAY = (4.32, 1.0)
 
+# Runway threshold uses the post-cut cadence: one release a day.
+DEFAULT_RUNWAY_CADENCE = 1.0
+DEFAULT_MIN_RUNWAY_DAYS = 30
+
 # Number of newest releases averaged to estimate the size of the next release.
 RECENT_RELEASES = 10
 
@@ -87,6 +91,25 @@ class ConsumerRelease:
     package: str
     release: Release
     requirements: tuple[RequirementUse, ...]
+
+
+@dataclass(frozen=True)
+class Headroom:
+    """Projected PyPI storage runway at a given release cadence."""
+
+    used: int
+    free: int
+    release_count: int
+    file_count: int
+    recent_count: int
+    average_bytes: int
+    remaining_releases: int
+    runway_days: float
+    cadence: float
+
+    @property
+    def computable(self) -> bool:
+        return self.average_bytes > 0
 
 
 @dataclass
@@ -536,21 +559,51 @@ def gb(size: int) -> str:
     return f"{size / 1e9:.2f} GB"
 
 
-def report_headroom(releases: list[Release]) -> None:
+def compute_headroom(
+    releases: list[Release],
+    *,
+    limit: int = PROJECT_LIMIT_BYTES,
+    cadence: float = DEFAULT_RUNWAY_CADENCE,
+) -> Headroom:
+    """Project remaining releases and days of storage from current occupancy."""
     used = sum(release.size for release in releases)
-    free = PROJECT_LIMIT_BYTES - used
+    free = limit - used
     recent = releases[-RECENT_RELEASES:]
-    average = sum(release.size for release in recent) // max(len(recent), 1)
-    print(
-        f"  used {gb(used)} ({used / PROJECT_LIMIT_BYTES:.1%} of "
-        f"{PROJECT_LIMIT_BYTES / 1024**3:.0f} GiB), free {gb(free)}"
-    )
+    average = sum(release.size for release in recent) // max(len(recent), 1) if recent else 0
     if average <= 0 or free <= 0:
-        return
-    remaining = free // average
-    print(f"  average newest-{len(recent)} release {average / 1e6:.1f} MB -> ~{remaining} more releases")
+        remaining = 0
+        runway = 0.0
+    else:
+        remaining = free // average
+        runway = remaining / cadence
+    return Headroom(
+        used=used,
+        free=free,
+        release_count=len(releases),
+        file_count=sum(release.files for release in releases),
+        recent_count=len(recent),
+        average_bytes=average,
+        remaining_releases=remaining,
+        runway_days=runway,
+        cadence=cadence,
+    )
+
+
+def report_headroom(releases: list[Release]) -> Headroom:
+    headroom = compute_headroom(releases)
+    print(
+        f"  used {gb(headroom.used)} ({headroom.used / PROJECT_LIMIT_BYTES:.1%} of "
+        f"{PROJECT_LIMIT_BYTES / 1024**3:.0f} GiB), free {gb(headroom.free)}"
+    )
+    if headroom.average_bytes <= 0 or headroom.free <= 0:
+        return headroom
+    print(
+        f"  average newest-{headroom.recent_count} release "
+        f"{headroom.average_bytes / 1e6:.1f} MB -> ~{headroom.remaining_releases} more releases"
+    )
     for cadence in CADENCES_PER_DAY:
-        print(f"    runway at {cadence:g} releases/day: ~{remaining / cadence:.0f} days")
+        print(f"    runway at {cadence:g} releases/day: ~{headroom.remaining_releases / cadence:.0f} days")
+    return headroom
 
 
 def print_protection(protected: ProtectedSet) -> None:
@@ -704,15 +757,23 @@ def cmd_verify(args: argparse.Namespace) -> int:
     used = sum(release.size for release in releases)
     files = sum(release.files for release in releases)
     print(f"{args.package}: {len(releases)} releases, {files} files, {gb(used)}")
-    report_headroom(releases)
-    partial = [release for release in releases if release.files < pypi_release_files.EXPECTED_FILES_PER_RELEASE]
+    headroom = report_headroom(releases)
+    expected_files = len(read_expected_suffixes())
+    partial = [release for release in releases if release.files < expected_files]
     if partial:
         print(
-            f"  partial releases (fewer than {pypi_release_files.EXPECTED_FILES_PER_RELEASE} files): "
+            f"  partial releases (fewer than {expected_files} files): "
             + abbreviate([f"{release.name} ({release.files})" for release in partial])
         )
 
     problems: list[str] = []
+    if not headroom.computable:
+        problems.append("cannot compute runway: newest-release average size is 0")
+    elif headroom.runway_days < args.min_runway_days:
+        problems.append(
+            f"projected runway is {headroom.runway_days:.0f} days at "
+            f"{headroom.cadence:g} release/day; minimum is {args.min_runway_days}"
+        )
     if args.list:
         leftover = sorted(published & set(read_list(Path(args.list))), key=Version)
         if leftover:
@@ -729,6 +790,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         problems.append(f"expected {args.expect_oldest} to be the oldest release, found {found}")
     if used >= PROJECT_LIMIT_BYTES:
         problems.append(f"project is at or over the {PROJECT_LIMIT_BYTES} byte limit")
+    sys.stdout.flush()
     for problem in problems:
         print(f"FAIL: {problem}", file=sys.stderr)
     if not problems:
@@ -754,6 +816,16 @@ def keep_count_arg(value: str) -> int:
     if count < DEFAULT_KEEP:
         raise argparse.ArgumentTypeError(f"keep count cannot be lower than {DEFAULT_KEEP}")
     return count
+
+
+def min_runway_days_arg(value: str) -> int:
+    try:
+        days = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("min runway days must be an integer") from exc
+    if days < 0:
+        raise argparse.ArgumentTypeError("min runway days cannot be negative")
+    return days
 
 
 def add_protection_arguments(parser: argparse.ArgumentParser) -> None:
@@ -823,6 +895,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="version that must be the oldest release left; tolerates newer releases published since the deletion",
     )
     verify.add_argument("--input-json", help="read this saved PyPI project JSON instead of querying PyPI")
+    verify.add_argument(
+        "--min-runway-days",
+        type=min_runway_days_arg,
+        default=DEFAULT_MIN_RUNWAY_DAYS,
+        help=(
+            "fail when projected days of storage at one release a day fall below this "
+            f"(default: {DEFAULT_MIN_RUNWAY_DAYS})"
+        ),
+    )
     verify.set_defaults(handler=cmd_verify)
     return parser
 
