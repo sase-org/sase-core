@@ -31,7 +31,7 @@ request. If PyPI grants it, change both `PYPI_PROJECT_LIMIT_BYTES` in `.github/w
 `verify --min-runway-days D` (default 30) exits non-zero when the projected runway at one release a day falls below D.
 `.github/workflows/pypi-headroom.yml` runs that check every Monday. **Live alert path:** a red scheduled run is the
 alert, because ci_watch watches sase-core. The same job also tries to open or update one sase-org/sase issue titled
-`[pypi-headroom] sase-core-rs runway below 30 days` (label `pypi-headroom`) with `SASE_RELEASE_TOKEN`, so the sase issue
+`[pypi-headroom] sase-core-rs runway below threshold` (label `pypi-headroom`) with `SASE_RELEASE_TOKEN`, so the sase issue
 mirror can turn it into a task bead. If that token cannot write issues on sase, the red run still stands. The workflow
 never deletes anything and never proposes a deletion.
 
@@ -270,8 +270,14 @@ all — the `ALREADY UNRESOLVABLE` block that `plan` prints for sase 0.1.5 throu
 complete version to resolve to. Backfill is human-gated; this section documents it and no agent or workflow performs it.
 
 1. **Confirm the window is really empty.** Run `plan` and read the `ALREADY UNRESOLVABLE` block, or check the candidate
-   directly: `python3 .github/scripts/pypi_release_files.py status <version>` must not print `complete` for any version
-   in the window.
+   directly with the expected-file set from `release-plz.yml`:
+
+   ```bash
+   EXPECTED_DIST_SUFFIXES="$(python3 -c "import yaml; print(yaml.safe_load(open('.github/workflows/release-plz.yml'))['env']['EXPECTED_DIST_SUFFIXES'])")" \
+     python3 .github/scripts/pypi_release_files.py status <version>
+   ```
+
+   It must not print `complete` for any version in the window.
 2. **Cut the patch from the old tag.** Branch from the tag, bump `[workspace.package].version` in `Cargo.toml` (and the
    lockfile) to the new patch, commit, tag `v<new-version>`, and push the branch and the tag. The tag must carry the
    bumped version: the publish guard below refuses a `dist/` whose wheel/sdist metadata does not equal
@@ -297,8 +303,9 @@ complete version to resolve to. Backfill is human-gated; this section documents 
 5. **Pay the quota cost knowingly.** A backfill is a full new release of about 75–105 MB. Each one shortens the runway
    in "Runway" above, so backfill only windows a supported sase release actually needs; the already-broken historical
    windows stay broken until they age out of the horizon.
-6. **Confirm.** Re-run `status` for the new version, which must print `complete` (re-query once first: PyPI's JSON API
-   is CDN-cached briefly after an upload), and re-run `plan` to check the window left the `ALREADY UNRESOLVABLE` block.
+6. **Confirm.** Re-run `status` for the new version with `EXPECTED_DIST_SUFFIXES` set as in step 1; it must print
+   `complete` (re-query once first: PyPI's JSON API is CDN-cached briefly after an upload), and re-run `plan` to check
+   the window left the `ALREADY UNRESOLVABLE` block.
    Also glance at the next daily release cut: the out-of-band tag must not have confused the release PR about which
    version comes next.
 

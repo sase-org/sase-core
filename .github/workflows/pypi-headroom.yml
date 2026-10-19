@@ -47,11 +47,12 @@ jobs:
       - name: Mirror the alert onto sase-org/sase
         env:
           GH_TOKEN: ${{ secrets.SASE_RELEASE_TOKEN }}
+          MIN_RUNWAY_DAYS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_runway_days || '30' }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          title="[pypi-headroom] sase-core-rs runway below 30 days"
+          title="[pypi-headroom] sase-core-rs runway below threshold"
           if [ -z "${GH_TOKEN:-}" ]; then
             echo "SASE_RELEASE_TOKEN is unset; the red run is the alert."
             exit 0
@@ -63,7 +64,7 @@ jobs:
           fi
 
           gh label create pypi-headroom --repo sase-org/sase --color E4A800 \
-            --description "sase-core-rs PyPI storage runway below 30 days" \
+            --description "sase-core-rs PyPI storage runway below threshold" \
             2>/dev/null || true
 
           number="$(gh issue list --repo sase-org/sase --label pypi-headroom --state open \
@@ -72,7 +73,7 @@ jobs:
 
           if [ "$VERIFY_OUTCOME" = "failure" ]; then
             measured="$(cat verify.out 2>/dev/null || echo "(verify output missing)")"
-            body="sase-core-rs PyPI storage runway is below the 30-day threshold at one release a day. This alert never deletes anything and never proposes a deletion. Reclaim is the human-gated procedure in https://github.com/sase-org/sase-core/blob/master/docs/pypi-retention.md. The open size request is https://github.com/pypi/support/issues/12339. Run: $RUN_URL"$'\n\n'"$measured"
+            body="sase-core-rs PyPI storage runway is below the ${MIN_RUNWAY_DAYS}-day threshold at one release a day. This alert never deletes anything and never proposes a deletion. Reclaim is the human-gated procedure in https://github.com/sase-org/sase-core/blob/master/docs/pypi-retention.md. The open size request is https://github.com/pypi/support/issues/12339. Run: $RUN_URL"$'\n\n'"$measured"
             if [ -z "$number" ]; then
               gh issue create --repo sase-org/sase --title "$title" \
                 --label pypi-headroom --body "$body"

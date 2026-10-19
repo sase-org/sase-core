@@ -52,7 +52,10 @@ class HeadroomWorkflowTests(unittest.TestCase):
         self.assertIn("sase-org/sase", text)
         self.assertIn("SASE_RELEASE_TOKEN", text)
         self.assertIn("pypi-headroom", text)
-        self.assertIn("[pypi-headroom] sase-core-rs runway below 30 days", text)
+        self.assertIn("astral-sh/setup-uv@v10.3.0", text)
+        self.assertIn("[pypi-headroom] sase-core-rs runway below threshold", text)
+        self.assertIn("sase-core-rs PyPI storage runway below threshold", text)
+        self.assertIn("below the ${MIN_RUNWAY_DAYS}-day threshold", text)
 
     def test_red_run_is_the_guaranteed_alert(self) -> None:
         text = workflow_text()

@@ -42,9 +42,10 @@ from pathlib import Path
 from typing import Any, NoReturn
 from urllib.parse import urlparse
 
-import requests
+from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
+import requests
 import pypi_retention as retention
 
 PACKAGE = "sase-core-rs"
@@ -497,7 +498,7 @@ def run(args: argparse.Namespace, environ: Mapping[str, str]) -> dict[str, Any]:
     requested = read_list(Path(args.list))
     validate_request(requested, args.keep_version, args.confirm)
 
-    if args.package == retention.PACKAGE:
+    if canonicalize_name(args.package) == canonicalize_name(retention.PACKAGE):
         try:
             protected = retention.compute_protected_set(keep_versions=args.keep_version)
             violations = protected.violations(requested)

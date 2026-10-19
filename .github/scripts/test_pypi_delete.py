@@ -31,9 +31,33 @@ class DeleteProtectionTests(unittest.TestCase):
 
     def test_protected_list_is_refused_before_credentials_are_read(self) -> None:
         credentials = mock.Mock()
-        with mock.patch.object(delete.retention, "compute_protected_set", return_value=self.protected):
+        with mock.patch.object(
+            delete.retention, "compute_protected_set", return_value=self.protected
+        ):
             with self.assertRaises(delete.Protected) as raised:
                 delete.run(self.args, credentials)
+        self.assertEqual(raised.exception.kind, "protected")
+        self.assertIn("sase 0.18.0 requires", str(raised.exception))
+        credentials.get.assert_not_called()
+
+    def test_noncanonical_package_name_is_refused_before_credentials(self) -> None:
+        credentials = mock.Mock()
+        args = delete.build_parser().parse_args(
+            [
+                "--list",
+                str(self.list_path),
+                "--confirm",
+                "--username",
+                "tester",
+                "--package",
+                "SASE_Core_RS",
+            ]
+        )
+        with mock.patch.object(
+            delete.retention, "compute_protected_set", return_value=self.protected
+        ):
+            with self.assertRaises(delete.Protected) as raised:
+                delete.run(args, credentials)
         self.assertEqual(raised.exception.kind, "protected")
         self.assertIn("sase 0.18.0 requires", str(raised.exception))
         credentials.get.assert_not_called()
