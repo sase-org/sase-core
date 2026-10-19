@@ -262,6 +262,46 @@ CDN-cached for a short while after an upload (right after the `0.34.48` heal it 
 so re-query before concluding a heal failed. Healing does not add versions: it can only add the missing files of a
 version that already exists.
 
+## Core backfill
+
+A heal can only top up a version PyPI already knows. When a supported consumer's window holds **no** complete version at
+all — the `ALREADY UNRESOLVABLE` block that `plan` prints for sase 0.1.5 through 0.17.1, for example — the remedy is a
+**backfill**: cut a new patch version from an old tag (for example `0.32.17` from `v0.32.16`) so the window has a
+complete version to resolve to. Backfill is human-gated; this section documents it and no agent or workflow performs it.
+
+1. **Confirm the window is really empty.** Run `plan` and read the `ALREADY UNRESOLVABLE` block, or check the candidate
+   directly: `python3 .github/scripts/pypi_release_files.py status <version>` must not print `complete` for any version
+   in the window.
+2. **Cut the patch from the old tag.** Branch from the tag, bump `[workspace.package].version` in `Cargo.toml` (and the
+   lockfile) to the new patch, commit, tag `v<new-version>`, and push the branch and the tag. The tag must carry the
+   bumped version: the publish guard below refuses a `dist/` whose wheel/sdist metadata does not equal
+   `Name=sase-core-rs Version=<expected_version>`, so a tag that still says the old version cannot publish. Pushing the
+   tag alone triggers nothing; a backfill only ships through the guarded dispatch in step 4.
+3. **Look for an open release PR first.** The dispatch in step 4 sets `dry_run=false`, which also makes it a release
+   cut (see "Release cadence"): the release-plz PR and merge jobs run too, so an open release PR is merged as a side
+   effect and costs another release of quota. Either let that merge happen deliberately or wait for the daily cut to
+   clear it first.
+4. **Dispatch the guarded manual publish from `master`:**
+
+   ```bash
+   gh workflow run release-plz.yml --repo sase-org/sase-core --ref master \
+     -f dry_run=false -f build_wheels=true -f publish_pypi=true -f expected_version=0.32.17
+   ```
+
+   There is no separate approval label on this route; the guard is these four inputs together (verified against the
+   workflow on 2026-10-19). The build jobs check out `build_ref=v<expected_version>`, so nothing newer on master can
+   leak into the backfill. The `publish` job then requires `GITHUB_REF=refs/heads/master`, the `v<expected_version>`
+   tag to exist, `dist/` to match `EXPECTED_DIST_SUFFIXES` one-to-one, and every file's metadata to equal the expected
+   name and version. The quota pre-flight (`pypi_quota.py check dist`) fails before the first byte is sent when the
+   upload would overflow the project limit, and `skip-existing` keeps a retried dispatch idempotent.
+5. **Pay the quota cost knowingly.** A backfill is a full new release of about 75–105 MB. Each one shortens the runway
+   in "Runway" above, so backfill only windows a supported sase release actually needs; the already-broken historical
+   windows stay broken until they age out of the horizon.
+6. **Confirm.** Re-run `status` for the new version, which must print `complete` (re-query once first: PyPI's JSON API
+   is CDN-cached briefly after an upload), and re-run `plan` to check the window left the `ALREADY UNRESOLVABLE` block.
+   Also glance at the next daily release cut: the out-of-band tag must not have confused the release PR about which
+   version comes next.
+
 ## Troubleshooting
 
 - `ValueError: No CSFR found in /manage/project/.../release/<version>/` after a successful login means PyPI served its
