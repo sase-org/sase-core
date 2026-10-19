@@ -80,7 +80,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v10
+      # setup-uv publishes no floating major tags after v7; pin an exact release (see .github/scripts/test_workflow_action_pins.py).
+      - uses: astral-sh/setup-uv@v10.3.0
 
       - name: unit tests for release helper scripts
         run: ./scripts/check.sh script-test
