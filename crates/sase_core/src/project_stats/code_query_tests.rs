@@ -263,7 +263,102 @@ fn clones_do_not_double_count_and_are_request_order_stable() {
     assert_eq!(code.repos_configured, 1);
     assert_eq!(code.repos_measured, 1);
     assert_eq!(first.projects[0].code, second.projects[0].code);
-    assert!(first
+    let disagreement = first
+        .issues
+        .iter()
+        .find(|issue| issue.code == "code_tip_disagreement")
+        .expect("successful clone disagreement");
+    assert!(first.projects[0].repos.iter().all(|repo| {
+        repo.issue
+            .as_ref()
+            .is_some_and(|issue| issue.code == "code_tip_disagreement")
+    }));
+    let chosen_path = disagreement
+        .message
+        .split(" using ")
+        .nth(1)
+        .expect("chosen clone path")
+        .split('@')
+        .next()
+        .expect("chosen clone path segment");
+    let chosen_id = if Path::new(chosen_path)
+        == source.repo.canonicalize().expect("source path")
+    {
+        "source"
+    } else {
+        assert_eq!(
+            Path::new(chosen_path),
+            clone.repo.canonicalize().expect("clone path")
+        );
+        "clone"
+    };
+    assert_eq!(disagreement.repo.as_deref(), Some(chosen_id));
+    assert!(first.projects[0]
+        .repos
+        .iter()
+        .any(|repo| { repo.id == chosen_id && repo.snapshot.is_some() }));
+}
+
+#[test]
+fn agreeing_clones_do_not_emit_a_tip_disagreement() {
+    let source = sample_repo();
+    let clone = clone_repo(&source.repo);
+    let cache = cache_dir();
+    let identity = "https://example.test/agreed.git";
+    let response = query_project_stats(&request(
+        vec![project(
+            "alpha",
+            vec![
+                named_identity("source", &source.repo, identity),
+                named_identity("clone", &clone.repo, identity),
+            ],
+            Vec::new(),
+        )],
+        vec![ProjectStatsFacetWire::Code],
+        &cache.path().to_string_lossy(),
+    ))
+    .unwrap();
+    assert!(!response
+        .issues
+        .iter()
+        .any(|issue| issue.code == "code_tip_disagreement"));
+}
+
+#[test]
+fn failed_clone_at_another_tip_does_not_trigger_disagreement() {
+    let available = sample_repo();
+    let broken = init_repo();
+    commit(&broken.repo, "src/broken.rs", "fn broken() {}\n", "broken");
+    let tree_oid =
+        super::test_support::git(&broken.repo, &["rev-parse", "HEAD^{tree}"]);
+    let tree_object = broken
+        .repo
+        .join(".git/objects")
+        .join(&tree_oid[..2])
+        .join(&tree_oid[2..]);
+    fs::remove_file(tree_object).expect("remove broken clone tree object");
+
+    let cache = cache_dir();
+    let identity = "https://example.test/failed-tip.git";
+    let response = query_project_stats(&request(
+        vec![project(
+            "alpha",
+            vec![
+                named_identity("available", &available.repo, identity),
+                named_identity("broken", &broken.repo, identity),
+            ],
+            Vec::new(),
+        )],
+        vec![ProjectStatsFacetWire::Code],
+        &cache.path().to_string_lossy(),
+    ))
+    .unwrap();
+    assert!(response.projects[0]
+        .code
+        .as_ref()
+        .and_then(|code| code.code_files)
+        .is_some());
+    assert!(!response
         .issues
         .iter()
         .any(|issue| issue.code == "code_tip_disagreement"));

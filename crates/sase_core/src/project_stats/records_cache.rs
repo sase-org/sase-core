@@ -1,6 +1,4 @@
 //! Separately namespaced persistent cache for metadata-only record summaries.
-#![allow(dead_code)] // Used by the records measurement seam in this phase.
-
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

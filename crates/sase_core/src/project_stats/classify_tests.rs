@@ -272,6 +272,56 @@ fn classifies_agent_context_docs_config_tests_source_and_other() {
 }
 
 #[test]
+fn directory_rules_keep_programming_languages_in_code_roles() {
+    let cases = [
+        (b"src/sase/memory/foo.py".as_slice(), Role::Source),
+        (b"sase/memory/note.md".as_slice(), Role::AgentContext),
+        (b".claude/skills/x/SKILL.md".as_slice(), Role::AgentContext),
+        (b"src/sase/skills/cli.py".as_slice(), Role::Source),
+        (b"tests/skills/test_x.py".as_slice(), Role::Tests),
+        (
+            b"src/project_stats/snapshot/mod.rs".as_slice(),
+            Role::Source,
+        ),
+    ];
+    for (path, expected) in cases {
+        let result = classify(path, Some(b"def run(): pass\n"));
+        assert!(
+            matches!(result, Classification::Included { role, .. } if role == expected),
+            "{path:?} was classified as {result:?}, expected {expected:?}"
+        );
+    }
+    assert_eq!(
+        classify(b"__snapshots__/a.snap", Some(b"snapshot")),
+        Classification::Excluded {
+            kind: Exclusion::Generated,
+            reason: Reason::PathHeuristic,
+        }
+    );
+    assert_eq!(
+        classify(b"requirements.txt", Some(b"requests==2\n")),
+        Classification::Included {
+            role: Role::ConfigData,
+            language: None,
+        }
+    );
+    assert_eq!(
+        classify(b"constraints-dev.txt", Some(b"requests==2\n")),
+        Classification::Included {
+            role: Role::ConfigData,
+            language: None,
+        }
+    );
+    assert_eq!(
+        classify(b"CMakeLists.txt", Some(b"project(example)\n")),
+        Classification::Included {
+            role: Role::ConfigData,
+            language: None,
+        }
+    );
+}
+
+#[test]
 fn recognizes_known_and_bounded_env_shebang_languages() {
     assert_eq!(
         classify(

@@ -81,7 +81,7 @@ pub fn query_project_stats(
         .iter()
         .flat_map(|(_, repos)| repos.iter())
         .collect();
-    let (code_by_identity, _) = if wants_code {
+    let (code_by_identity, code_issues) = if wants_code {
         code::measure_identities(
             &all_repos,
             &request.budget,
@@ -268,6 +268,15 @@ pub fn query_project_stats(
         }
     }
 
+    for issue in code_issues {
+        if !all_issues
+            .iter()
+            .any(|existing| issue_payload_matches(existing, &issue))
+        {
+            all_issues.push(issue);
+        }
+    }
+
     let fingerprint = fingerprint(
         request,
         all_tokens.into_iter().collect(),
@@ -329,6 +338,7 @@ fn attach_code(
                 outcome.snapshot,
                 outcome.status,
                 outcome.issue,
+                None,
                 state.all_issues,
             );
             state.facet_tokens.insert(outcome.token);
@@ -344,6 +354,7 @@ fn attach_code(
             outcome.snapshot.clone(),
             outcome.status,
             outcome.issue.clone(),
+            outcome.disagreement_issue.clone(),
             state.all_issues,
         );
         if seen_identities.insert(identity) {
@@ -365,11 +376,12 @@ fn apply_snapshot(
     snapshot: Option<ProjectStatsSnapshotWire>,
     status: ProjectStatsRepoStatusWire,
     issue: Option<ProjectStatsIssueWire>,
+    disagreement_issue: Option<ProjectStatsIssueWire>,
     all_issues: &mut Vec<ProjectStatsIssueWire>,
 ) {
     wire.status = code::merge_status(wire.status, status);
     wire.snapshot = snapshot;
-    if let Some(issue) = issue {
+    for issue in [issue, disagreement_issue].into_iter().flatten() {
         let issue = output::with_project(issue, &project.key);
         if !all_issues.iter().any(|existing| existing == &issue) {
             all_issues.push(issue.clone());
@@ -378,6 +390,17 @@ fn apply_snapshot(
             wire.issue = Some(issue);
         }
     }
+}
+
+fn issue_payload_matches(
+    left: &ProjectStatsIssueWire,
+    right: &ProjectStatsIssueWire,
+) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left.project = None;
+    right.project = None;
+    left == right
 }
 
 fn record_key(repo: &MeasuredRepo<'_>) -> RecordKey {

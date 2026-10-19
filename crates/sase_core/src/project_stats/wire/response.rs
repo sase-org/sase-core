@@ -6,7 +6,7 @@ use super::request::{
 };
 
 pub const PROJECT_STATS_METRIC_POLICY_VERSION: u32 = 1;
-pub const PROJECT_STATS_CLASSIFIER_VERSION: u32 = 1;
+pub const PROJECT_STATS_CLASSIFIER_VERSION: u32 = 2;
 pub const PROJECT_STATS_ENGINE_VERSION: u32 = 1;
 
 /// Versions and measurements returned by one project statistics query.

@@ -1,7 +1,5 @@
 //! Namespaced committed-code snapshot cache.
 
-#![allow(dead_code)] // Reached through measure_code_snapshot.
-
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
@@ -13,7 +11,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::MeasuredPath;
+use super::measure::MeasuredPath;
 use crate::project_stats::classify::BlobEvidence;
 use crate::project_stats::git::ResolvedRepo;
 use crate::project_stats::wire::{
@@ -140,6 +138,11 @@ impl From<MeasuredPath> for CachedPathRow {
 }
 
 impl CachedPathRow {
+    #[cfg(test)]
+    pub(crate) fn oid(&self) -> &str {
+        &self.oid
+    }
+
     pub(crate) fn to_measured(&self) -> Option<MeasuredPath> {
         Some(MeasuredPath {
             path: hex::decode(&self.path_hex).ok()?,

@@ -1,7 +1,5 @@
 //! Committed-tree enumeration via `ls-tree -r -z -l`.
 
-#![allow(dead_code)] // Reached through measure_code_snapshot.
-
 use std::path::Path;
 
 use super::issue;

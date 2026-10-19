@@ -1,7 +1,5 @@
 //! Bounded `cat-file --batch` reads of unique committed blob OIDs.
 
-#![allow(dead_code)] // Reached through measure_code_snapshot.
-
 use std::collections::HashMap;
 use std::path::Path;
 

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -21,6 +22,29 @@ fn budget() -> ProjectStatsBudgetWire {
 
 fn cache_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("cache directory")
+}
+
+#[test]
+fn sha256_repositories_measure_with_their_native_object_format() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repository directory");
+    git(
+        &repo,
+        &["init", "--initial-branch=main", "--object-format=sha256"],
+    );
+    git(&repo, &["config", "user.name", "SASE Test"]);
+    git(&repo, &["config", "user.email", "sase@example.test"]);
+    git(&repo, &["config", "commit.gpgsign", "false"]);
+    commit(&repo, "src/lib.rs", "pub fn value() {}\n", "source");
+
+    let cache = cache_dir();
+    let snapshot = measure(&repo, cache.path());
+    assert_eq!(git(&repo, &["rev-parse", "--show-object-format"]), "sha256");
+    assert_eq!(
+        role_files(&snapshot.snapshot, ProjectStatsFileRoleWire::Source),
+        1
+    );
 }
 
 fn measure_at(
@@ -425,6 +449,52 @@ fn content_edit_rereads_only_the_changed_blob() {
         warm.snapshot,
         measure(&fixture.repo, cache_dir().path()).snapshot
     );
+}
+
+#[test]
+fn blob_cache_prunes_facts_from_superseded_content_versions() {
+    let fixture = seed_repo();
+    let cache = cache_dir();
+    let initial = measure(&fixture.repo, cache.path());
+    assert!(!initial.blob_oids_requested.is_empty());
+
+    for (index, text) in [
+        "fn main() { println!(\"edit one\"); }\n",
+        "fn main() { println!(\"edit two\"); }\n",
+        "fn main() { println!(\"edit three\"); }\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        commit(
+            &fixture.repo,
+            "src/lib.rs",
+            text,
+            &format!("content edit {index}"),
+        );
+        let changed = measure(&fixture.repo, cache.path());
+        assert_eq!(changed.blob_oids_requested.len(), 1);
+    }
+
+    let spec = spec(&fixture.repo);
+    let resolved = resolve_repo(&spec, &budget()).expect("resolve");
+    let key = cache::cache_key(&resolved, ProjectStatsCodeCounterWire::Sloc);
+    let path = cache::cache_path(&cache.path().to_string_lossy(), &key);
+    let entry = cache::load(&path).expect("persisted snapshot cache");
+    let current_oids: HashSet<String> = entry
+        .rows()
+        .iter()
+        .map(|row| row.oid().to_owned())
+        .collect();
+    assert!(entry
+        .blobs()
+        .iter()
+        .all(|facts| { current_oids.contains(&facts.oid) }));
+
+    let warm = measure(&fixture.repo, cache.path());
+    assert!(warm.blob_oids_requested.is_empty());
+    let cold = measure(&fixture.repo, cache_dir().path());
+    assert_eq!(warm.snapshot, cold.snapshot);
 }
 
 #[test]

@@ -1,7 +1,5 @@
 //! Committed Linguist attributes via isolated `check-attr --source`.
 
-#![allow(dead_code)] // Reached through measure_code_snapshot.
-
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,6 +14,20 @@ use crate::project_stats::wire::{
 const ATTR_GENERATED: &[u8] = b"linguist-generated";
 const ATTR_VENDORED: &[u8] = b"linguist-vendored";
 const ATTR_DOCUMENTATION: &[u8] = b"linguist-documentation";
+const ISOLATED_INIT_ENV: &[(&str, &str)] = &[
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("GIT_CONFIG_SYSTEM", "/dev/null"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+];
+
+fn isolated_init_args(object_format: &str) -> Vec<String> {
+    vec![
+        "init".to_owned(),
+        "--bare".to_owned(),
+        "--template=".to_owned(),
+        format!("--object-format={object_format}"),
+    ]
+}
 
 pub(crate) struct AttrSession {
     _temp: tempfile::TempDir,
@@ -66,16 +78,65 @@ impl AttrSession {
                 None,
             )
         })?;
-        git::run_checked(temp.path(), &["init", "--bare"], budget).map_err(
-            |message| {
+        let format_result = git::run_checked(
+            repo_path,
+            &["rev-parse", "--show-object-format"],
+            budget,
+        )
+        .map_err(|message| {
+            issue(
+                spec,
+                "attr_unavailable",
+                format!("cannot read repository object format: {message}"),
+                None,
+            )
+        })?;
+        let object_format = String::from_utf8(format_result.stdout)
+            .map_err(|error| {
                 issue(
                     spec,
                     "attr_unavailable",
-                    format!("cannot initialize an isolated Git directory: {message}"),
+                    format!("Git returned an invalid object format: {error}"),
                     None,
                 )
-            },
-        )?;
+            })?
+            .trim()
+            .to_owned();
+        if !matches!(object_format.as_str(), "sha1" | "sha256") {
+            return Err(issue(
+                spec,
+                "attr_unavailable",
+                format!("unsupported Git object format: {object_format}"),
+                None,
+            ));
+        }
+        let args = isolated_init_args(&object_format);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let initialized = git::run_unchecked_with_stdin_env(
+            temp.path(),
+            &args,
+            b"",
+            ISOLATED_INIT_ENV,
+            budget,
+        )
+        .map_err(|message| {
+            issue(
+                spec,
+                "attr_unavailable",
+                format!(
+                    "cannot initialize an isolated Git directory: {message}"
+                ),
+                None,
+            )
+        })?;
+        if initialized.truncated || initialized.code != Some(0) {
+            return Err(issue(
+                spec,
+                "attr_unavailable",
+                "cannot initialize an isolated Git directory".to_owned(),
+                None,
+            ));
+        }
         let alternates = temp.path().join("objects/info/alternates");
         if let Some(parent) = alternates.parent() {
             fs::create_dir_all(parent).map_err(|error| {
@@ -281,6 +342,57 @@ pub(crate) fn parse_check_attr(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn isolated_init_uses_object_format_and_disables_user_configuration() {
+        assert_eq!(
+            isolated_init_args("sha256"),
+            ["init", "--bare", "--template=", "--object-format=sha256"]
+        );
+        assert_eq!(
+            ISOLATED_INIT_ENV,
+            [
+                ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                ("GIT_CONFIG_SYSTEM", "/dev/null"),
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_template_argument_disables_template_copying() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let template = temp.path().join("template");
+        std::fs::create_dir_all(template.join("info"))
+            .expect("template info directory");
+        std::fs::write(
+            template.join("info/attributes"),
+            "*.rs linguist-generated\n",
+        )
+        .expect("template attributes");
+        let config = temp.path().join("global.config");
+        let configured = Command::new("git")
+            .args(["config", "--file"])
+            .arg(&config)
+            .args(["init.templateDir"])
+            .arg(&template)
+            .status()
+            .expect("write global template config");
+        assert!(configured.success());
+
+        let target = temp.path().join("isolated.git");
+        let mut command = Command::new("git");
+        command
+            .args(isolated_init_args("sha1"))
+            .arg(&target)
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+        let initialized = command.status().expect("initialize isolated repo");
+        assert!(initialized.success());
+        assert!(!target.join("info/attributes").exists());
+    }
 
     #[test]
     fn parses_nul_triplets_for_the_three_linguist_attributes() {

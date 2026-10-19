@@ -22,6 +22,7 @@ pub(crate) struct IdentityCode {
     pub snapshot: Option<ProjectStatsSnapshotWire>,
     pub status: ProjectStatsRepoStatusWire,
     pub issue: Option<ProjectStatsIssueWire>,
+    pub disagreement_issue: Option<ProjectStatsIssueWire>,
     pub token: String,
 }
 
@@ -84,6 +85,9 @@ pub(crate) fn measure_identities(
         if let Some(issue) = outcome.issue.clone() {
             issues.push(issue);
         }
+        if let Some(issue) = outcome.disagreement_issue.clone() {
+            issues.push(issue);
+        }
         measured.insert(identity, outcome);
     }
     (measured, issues)
@@ -108,16 +112,17 @@ fn measure_identity(
             snapshot: None,
             status: ProjectStatsRepoStatusWire::Unavailable,
             issue,
+            disagreement_issue: None,
             token: unavailable_token(identity),
         };
     }
 
-    let tips: BTreeMap<&str, ()> = resolved
+    let resolved_tips: BTreeMap<&str, ()> = resolved
         .iter()
         .filter_map(|repo| repo.resolved.map(|item| item.tip.as_str()))
         .map(|tip| (tip, ()))
         .collect();
-    let disagree = tips.len() > 1;
+    let resolved_tips_disagree = resolved_tips.len() > 1;
     let mut successes: Vec<(
         &MeasuredRepo<'_>,
         ProjectStatsSnapshotWire,
@@ -148,24 +153,35 @@ fn measure_identity(
             )),
             None => last_failure = Some(outcome),
         }
-        if !disagree && successes.len() == 1 {
+        if !resolved_tips_disagree && successes.len() == 1 {
             break;
         }
     }
+
+    let successful_tips: BTreeMap<&str, ()> = successes
+        .iter()
+        .filter_map(|(repo, _, _, _, _)| {
+            repo.resolved.map(|source| source.tip.as_str())
+        })
+        .map(|tip| (tip, ()))
+        .collect();
+    let disagree = successful_tips.len() > 1;
 
     if let Some((repo, snapshot, status, issue, token)) = successes
         .into_iter()
         .min_by_key(|(repo, _, _, _, _)| clone_key(repo))
     {
-        let mut issue = issue;
-        if disagree {
+        let disagreement_issue = if disagree {
             let chosen = repo.resolved.expect("resolved clone");
-            issue = Some(disagreement_issue(identity, repo.spec, chosen));
-        }
+            Some(disagreement_issue(identity, repo.spec, chosen))
+        } else {
+            None
+        };
         return IdentityCode {
             snapshot: Some(snapshot),
             status,
             issue,
+            disagreement_issue,
             token,
         };
     }
@@ -173,6 +189,7 @@ fn measure_identity(
         snapshot: None,
         status: ProjectStatsRepoStatusWire::Unavailable,
         issue: None,
+        disagreement_issue: None,
         token: unavailable_token(identity),
     })
 }
@@ -203,6 +220,7 @@ fn measure_code_repo(
             snapshot: Some(measured.snapshot),
             status: ProjectStatsRepoStatusWire::Ok,
             issue: None,
+            disagreement_issue: None,
             token: code_token(
                 identity,
                 resolved,
@@ -214,6 +232,7 @@ fn measure_code_repo(
             snapshot: None,
             status: ProjectStatsRepoStatusWire::Unavailable,
             issue: Some(issue),
+            disagreement_issue: None,
             token: code_token(
                 identity,
                 resolved,

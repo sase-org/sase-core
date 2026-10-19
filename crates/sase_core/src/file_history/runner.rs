@@ -1,7 +1,8 @@
 //! Bounded, lock-free git runner for file history.
 //!
 //! Every invocation pins `-c core.quotepath=off -c diff.renames=true`
-//! so user config cannot change the output, passes
+//! and `-c log.showSignature=false` so user config cannot change the
+//! output, passes
 //! `--no-optional-locks` with `GIT_OPTIONAL_LOCKS=0` so background
 //! reads never fight writers, sets `GIT_TERMINAL_PROMPT=0` so git can
 //! never block on credentials, sets `GIT_NO_LAZY_FETCH=1` so reads
@@ -206,6 +207,8 @@ fn git_command_with_injected_env(
         .arg("core.quotepath=off")
         .arg("-c")
         .arg("diff.renames=true")
+        .arg("-c")
+        .arg("log.showSignature=false")
         .arg("--no-optional-locks")
         .arg("-C")
         .arg(repo)
@@ -558,6 +561,32 @@ mod tests {
             dumped.lines().any(|line| line == "GIT_TERMINAL_PROMPT=0"),
             "GIT_TERMINAL_PROMPT missing:\n{dumped}"
         );
+    }
+
+    #[test]
+    fn git_commands_pin_signature_output_off() {
+        let args: Vec<String> = git_command(
+            Path::new("/tmp/sase-runner-test"),
+            &["log", "--format=%at", "HEAD"],
+        )
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+        assert_eq!(
+            &args[..9],
+            [
+                "-c",
+                "core.quotepath=off",
+                "-c",
+                "diff.renames=true",
+                "-c",
+                "log.showSignature=false",
+                "--no-optional-locks",
+                "-C",
+                "/tmp/sase-runner-test",
+            ]
+        );
+        assert_eq!(&args[9..], ["log", "--format=%at", "HEAD"]);
     }
 
     #[test]
