@@ -387,6 +387,92 @@ fn publication_recovery_bindings_select_and_complete() {
             selected["selected"][0]["global_agent"],
             json!("alice.athena.foo")
         );
+        assert_eq!(selected["selected"][0]["error_class"], json!("other"));
+
+        let classified = {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "error": "error: Your index contains uncommitted changes."
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_classify_publication_error(py, request).unwrap();
+            py_to_json_value(result.bind(py)).unwrap()
+        };
+        assert_eq!(classified["error_class"], json!("unstaged_changes"));
+
+        let accounting = {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "scope": "repository",
+                    "error": "agents sync lock is busy",
+                    "attempted_keys": [{
+                        "global_agent": "alice.athena.foo",
+                        "primary_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }],
+                    "rows": [{
+                        "global_agent": "alice.athena.foo",
+                        "primary_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "attempts": 2
+                    }]
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result =
+                py_decide_publication_failure_accounting(py, request).unwrap();
+            py_to_json_value(result.bind(py)).unwrap()
+        };
+        assert_eq!(accounting["charge"], json!(false));
+        assert_eq!(accounting["scope"], json!("repository"));
+        assert_eq!(accounting["error_class"], json!("lock_busy"));
+        assert_eq!(accounting["charges"], json!([]));
+
+        let drain = {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "limit": 1,
+                    "retry_retired": true,
+                    "retry_quarantined": true,
+                    "rows": [
+                        {
+                            "global_agent": "alice.athena.foo",
+                            "primary_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "terminal": false,
+                            "quarantined": false,
+                            "last_error": null,
+                            "created_at": 2.0
+                        },
+                        {
+                            "global_agent": "alice.athena.bar",
+                            "primary_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            "terminal": true,
+                            "quarantined": false,
+                            "last_error": "legacy mismatch",
+                            "terminal_reason": "legacy mismatch",
+                            "created_at": 1.0
+                        }
+                    ]
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_select_publication_drain(py, request).unwrap();
+            py_to_json_value(result.bind(py)).unwrap()
+        };
+        assert_eq!(drain["active"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            drain["active"][0]["global_agent"],
+            json!("alice.athena.foo")
+        );
+        assert_eq!(drain["revive"], json!([]));
 
         let request = json_value_to_py(
             py,

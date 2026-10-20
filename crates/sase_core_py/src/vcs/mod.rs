@@ -421,6 +421,66 @@ fn py_select_publication_retries<'py>(
     serialize_to_py(py, &result)
 }
 
+/// Classify one publication error message into the stable doctor/timing class.
+#[pyfunction]
+#[pyo3(name = "classify_publication_error")]
+fn py_classify_publication_error<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PublicationErrorClassifyRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid PublicationErrorClassifyRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_classify_publication_error(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
+/// Decide whether a publication failure may charge attempted request rows.
+#[pyfunction]
+#[pyo3(name = "decide_publication_failure_accounting")]
+fn py_decide_publication_failure_accounting<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PublicationFailureAccountingRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid PublicationFailureAccountingRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    let result = core_decide_publication_failure_accounting(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
+/// Select a bounded drain set of active and reviveable publication rows.
+#[pyfunction]
+#[pyo3(name = "select_publication_drain")]
+fn py_select_publication_drain<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PublicationDrainSelectionRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid PublicationDrainSelectionRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_select_publication_drain(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
 /// Decide whether a publication request's canonical page and revision exist.
 #[pyfunction]
 #[pyo3(name = "decide_publication_request_completion")]
@@ -705,6 +765,12 @@ pub(crate) fn register_vcs(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_select_publication_retries, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_publication_error, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_decide_publication_failure_accounting,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_select_publication_drain, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_decide_publication_request_completion,
         m

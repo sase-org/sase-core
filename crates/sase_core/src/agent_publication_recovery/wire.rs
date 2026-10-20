@@ -1,0 +1,262 @@
+//! Wire records for publication recovery, failure accounting, and drain selection.
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+pub const PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION: u32 = 1;
+
+pub const PUBLICATION_KIND_RUN: &str = "run";
+pub const PUBLICATION_KIND_SESSION: &str = "session";
+
+pub const PROMPT_STATUS_RESTORED: &str = "restored";
+pub const PROMPT_STATUS_ALREADY_ARCHIVED: &str = "already_archived";
+pub const PROMPT_STATUS_NOT_APPLICABLE: &str = "not_applicable";
+pub const PROMPT_STATUS_UNAVAILABLE: &str = "unavailable";
+pub const PROMPT_STATUS_FAILED: &str = "failed";
+
+pub const PUBLICATION_LIFECYCLE_ACTIVE: &str = "active";
+pub const PUBLICATION_LIFECYCLE_QUARANTINED: &str = "quarantined";
+pub const PUBLICATION_LIFECYCLE_RETIRED: &str = "retired";
+
+pub const PUBLICATION_FAILURE_SCOPE_REPOSITORY: &str = "repository";
+pub const PUBLICATION_FAILURE_SCOPE_HOOD: &str = "hood";
+pub const PUBLICATION_FAILURE_SCOPE_UNKNOWN: &str = "unknown";
+
+pub const PUBLICATION_ERROR_TIMEOUT: &str = "timeout";
+pub const PUBLICATION_ERROR_LOCK_BUSY: &str = "lock_busy";
+pub const PUBLICATION_ERROR_INDEX_LOCK: &str = "index_lock";
+pub const PUBLICATION_ERROR_UNSTAGED_CHANGES: &str = "unstaged_changes";
+pub const PUBLICATION_ERROR_REBASE_CONFLICT: &str = "rebase_conflict";
+pub const PUBLICATION_ERROR_MANIFEST_MISMATCH: &str = "manifest_mismatch";
+pub const PUBLICATION_ERROR_UNKNOWN: &str = "unknown";
+pub const PUBLICATION_ERROR_OTHER: &str = "other";
+
+pub const PUBLICATION_ERROR_CLASSES: &[&str] = &[
+    PUBLICATION_ERROR_TIMEOUT,
+    PUBLICATION_ERROR_LOCK_BUSY,
+    PUBLICATION_ERROR_INDEX_LOCK,
+    PUBLICATION_ERROR_UNSTAGED_CHANGES,
+    PUBLICATION_ERROR_REBASE_CONFLICT,
+    PUBLICATION_ERROR_MANIFEST_MISMATCH,
+    PUBLICATION_ERROR_UNKNOWN,
+    PUBLICATION_ERROR_OTHER,
+];
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum PublicationRecoveryError {
+    #[error("unsupported publication recovery wire schema_version {0}")]
+    UnsupportedSchema(u32),
+    #[error("invalid publication recovery request: {0}")]
+    InvalidRequest(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationLogicalKeyWire {
+    pub global_agent: String,
+    pub primary_revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublicationRetryRowWire {
+    pub global_agent: String,
+    pub primary_revision: String,
+    pub terminal: bool,
+    pub quarantined: bool,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub terminal_reason: Option<String>,
+    #[serde(default)]
+    pub created_at: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublicationRetrySelectionRequestWire {
+    pub schema_version: u32,
+    pub retry_retired: bool,
+    pub retry_quarantined: bool,
+    #[serde(default)]
+    pub rows: Vec<PublicationRetryRowWire>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub error_classes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationRetrySelectedWire {
+    pub global_agent: String,
+    pub primary_revision: String,
+    pub prior_class: String,
+    pub prior_failure: String,
+    pub error_class: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationRetrySelectionResponseWire {
+    pub schema_version: u32,
+    pub selected: Vec<PublicationRetrySelectedWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublicationDrainSelectionRequestWire {
+    pub schema_version: u32,
+    pub limit: u32,
+    #[serde(default)]
+    pub retry_retired: bool,
+    #[serde(default)]
+    pub retry_quarantined: bool,
+    #[serde(default)]
+    pub rows: Vec<PublicationRetryRowWire>,
+    #[serde(default)]
+    pub error_classes: Vec<String>,
+    #[serde(default)]
+    pub preferred_key: Option<PublicationLogicalKeyWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationDrainSelectionResponseWire {
+    pub schema_version: u32,
+    pub active: Vec<PublicationRetrySelectedWire>,
+    pub revive: Vec<PublicationRetrySelectedWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationErrorClassifyRequestWire {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationErrorClassifyResponseWire {
+    pub schema_version: u32,
+    pub error_class: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationFailureRowWire {
+    pub global_agent: String,
+    pub primary_revision: String,
+    #[serde(default)]
+    pub attempts: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub terminal: bool,
+    #[serde(default)]
+    pub quarantined: bool,
+    #[serde(default)]
+    pub terminal_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationFailureAccountingRequestWire {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub scope: Option<String>,
+    pub error: String,
+    #[serde(default)]
+    pub format_error: bool,
+    #[serde(default)]
+    pub attempted_keys: Vec<PublicationLogicalKeyWire>,
+    #[serde(default)]
+    pub rows: Vec<PublicationFailureRowWire>,
+    #[serde(default)]
+    pub quarantine_threshold: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationFailureChargeWire {
+    pub global_agent: String,
+    pub primary_revision: String,
+    pub attempts: u32,
+    pub increment_attempts: bool,
+    pub quarantine: bool,
+    pub retire: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationFailureAccountingResponseWire {
+    pub schema_version: u32,
+    pub scope: String,
+    pub charge: bool,
+    pub error_class: String,
+    pub charges: Vec<PublicationFailureChargeWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationRequestIdentityWire {
+    pub global_agent: String,
+    pub local_agent: String,
+    pub primary_revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationPageObservationWire {
+    pub path: String,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationRunObservationWire {
+    pub global_name: String,
+    pub local_name: String,
+    #[serde(default)]
+    pub commit_shas: Vec<String>,
+    #[serde(default)]
+    pub has_prompt_file: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationContainerObservationWire {
+    pub kind: String,
+    pub global_name: String,
+    #[serde(default)]
+    pub member_global_names: Vec<String>,
+    #[serde(default)]
+    pub commit_shas: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationCompletionRequestWire {
+    pub schema_version: u32,
+    pub request: PublicationRequestIdentityWire,
+    #[serde(default)]
+    pub pages: Vec<PublicationPageObservationWire>,
+    #[serde(default)]
+    pub runs: Vec<PublicationRunObservationWire>,
+    #[serde(default)]
+    pub containers: Vec<PublicationContainerObservationWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationCompletionResponseWire {
+    pub schema_version: u32,
+    pub kind: String,
+    pub required_page: String,
+    pub fulfilled: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredPromptClassifyRequestWire {
+    pub schema_version: u32,
+    pub restore_wrote: bool,
+    #[serde(default)]
+    pub restore_error: Option<String>,
+    pub local_source_present: bool,
+    pub archive_present: bool,
+    #[serde(default)]
+    pub prompt_file_in_snapshot: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredPromptClassifyResponseWire {
+    pub schema_version: u32,
+    pub status: String,
+    pub blocks_acknowledgment: bool,
+    pub reason: String,
+}
