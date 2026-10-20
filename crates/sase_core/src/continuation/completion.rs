@@ -21,6 +21,7 @@ pub(crate) const MAX_REPOSITORIES: usize = 128;
 pub(crate) const MAX_OBSERVATION_PATHS: usize = 4_096;
 pub(crate) const MAX_EXECUTORS: usize = 32;
 pub(crate) const MAX_PLACEHOLDER_BYTES: usize = 64;
+pub(crate) const MAX_PRIOR_REFUSALS: usize = 32;
 
 const CHECK_STAGES: [&str; 5] =
     ["formatting", "ruff", "mypy", "validation", "scoped_tests"];
@@ -190,6 +191,21 @@ pub struct ConditionalCompletionIntentWire {
     pub accept: CompletionAcceptPolicyWire,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageSourceWire {
+    RunSilent,
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriorRefusalWire {
+    pub worktree_fingerprint: String,
+    pub command: Vec<String>,
+    pub plan_digest: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConditionalCompletionPrepareRequestWire {
     pub schema_version: u32,
@@ -204,6 +220,14 @@ pub struct ConditionalCompletionPrepareRequestWire {
     /// Requested acceptance policy; defaults to `pass` when omitted.
     #[serde(default)]
     pub accept: CompletionAcceptPolicyWire,
+    /// How the bound check reports stage evidence. Absent means legacy
+    /// callers that predate stage reporting and must keep sealing.
+    #[serde(default)]
+    pub stage_source: Option<StageSourceWire>,
+    /// Previously refused seals from this session. An absent or empty list
+    /// disables the repeat guard.
+    #[serde(default)]
+    pub prior_refusals: Vec<PriorRefusalWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +324,13 @@ pub fn seal_conditional_completion(
     validate_executors(&request.executors)?;
 
     let verification = verification_contract(&request.verification_command)?;
+    if matches!(request.stage_source, Some(StageSourceWire::None)) {
+        return Err(ContinuationError::validation(format!(
+            "bound `{}` reports no stage evidence (the project's tool catalog does not declare `stages: run_silent` for it), so required stages [{}] can never be proven",
+            verification.command.join(" "),
+            verification.required_stages.join(", ")
+        )));
+    }
     let repository_decisions =
         repository_decisions_from_declaration(&request.declaration)?;
     validate_obligation_coverage(
@@ -361,6 +392,13 @@ pub fn seal_conditional_completion(
 
     let worktree =
         worktree_fingerprint(&request.observations, &repository_decisions)?;
+    validate_prior_refusals(&request.prior_refusals)?;
+    check_prior_refusals(
+        &request.prior_refusals,
+        &worktree,
+        &verification.command,
+        &request.context.plan_digest,
+    )?;
     let digest = compute_seal_digest(&SealMaterial {
         creator: &request.creator,
         plan_digest: &request.context.plan_digest,
@@ -984,6 +1022,57 @@ fn validate_execution_identity(
     validate_optional_reference(&owner.workspace_id, "creator.workspace_id")
 }
 
+fn validate_prior_refusals(
+    prior_refusals: &[PriorRefusalWire],
+) -> Result<(), ContinuationError> {
+    if prior_refusals.len() > MAX_PRIOR_REFUSALS {
+        return Err(ContinuationError::validation(format!(
+            "prior_refusals has {} entries; maximum is {MAX_PRIOR_REFUSALS}",
+            prior_refusals.len()
+        )));
+    }
+    for (index, prior) in prior_refusals.iter().enumerate() {
+        validate_sha256(
+            &prior.worktree_fingerprint,
+            &format!("prior_refusals[{index}].worktree_fingerprint"),
+        )?;
+        validate_sha256(
+            &prior.plan_digest,
+            &format!("prior_refusals[{index}].plan_digest"),
+        )?;
+        validate_non_empty_text(
+            &prior.reason,
+            &format!("prior_refusals[{index}].reason"),
+            MAX_TEXT_BYTES,
+        )?;
+        normalize_command(
+            &prior.command,
+            &format!("prior_refusals[{index}].command"),
+        )?;
+    }
+    Ok(())
+}
+
+fn check_prior_refusals(
+    prior_refusals: &[PriorRefusalWire],
+    worktree_fingerprint: &str,
+    command: &[String],
+    plan_digest: &str,
+) -> Result<(), ContinuationError> {
+    for prior in prior_refusals {
+        if prior.worktree_fingerprint == worktree_fingerprint
+            && prior.command == command
+            && prior.plan_digest == plan_digest
+        {
+            return Err(ContinuationError::validation(format!(
+                "identical tree already refused host completion ({}); re-running the same verification on the same tree cannot change the result",
+                prior.reason
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_seal(
     seal: &ConditionalCompletionSealWire,
 ) -> Result<(), ContinuationError> {
@@ -1361,6 +1450,8 @@ mod tests {
                 requires_model: false,
             }],
             accept: CompletionAcceptPolicyWire::Pass,
+            stage_source: None,
+            prior_refusals: Vec::new(),
         }
     }
 
@@ -1731,5 +1822,126 @@ mod tests {
         legacy.seal.digest = digest;
         let error = validate_conditional_completion_intent(legacy).unwrap_err();
         assert!(error.message.contains("worktree fingerprint"));
+    }
+
+    #[test]
+    fn absent_stage_source_keeps_sealing_like_legacy_callers() {
+        let mut req = request();
+        req.stage_source = None;
+        let intent = seal_conditional_completion(req).unwrap();
+        assert_eq!(intent.status, ConditionalCompletionStatusWire::Prepared);
+        assert_eq!(
+            intent.verification.required_stages,
+            vec!["formatting", "ruff", "mypy", "validation", "full_tests"]
+        );
+    }
+
+    #[test]
+    fn run_silent_stage_source_keeps_sealing() {
+        let mut req = request();
+        req.stage_source = Some(StageSourceWire::RunSilent);
+        let intent = seal_conditional_completion(req).unwrap();
+        assert_eq!(intent.status, ConditionalCompletionStatusWire::Prepared);
+        assert_eq!(
+            intent.verification.required_stages,
+            vec!["formatting", "ruff", "mypy", "validation", "full_tests"]
+        );
+    }
+
+    #[test]
+    fn none_stage_source_is_refused_with_required_stages() {
+        let mut req = request();
+        req.stage_source = Some(StageSourceWire::None);
+        let error = seal_conditional_completion(req).unwrap_err();
+        assert!(error.message.contains("no stage evidence"));
+        assert!(error.message.contains("stages: run_silent"));
+        for stage in ["formatting", "ruff", "mypy", "validation", "full_tests"]
+        {
+            assert!(error.message.contains(stage), "missing {stage}");
+        }
+    }
+
+    #[test]
+    fn none_stage_source_lists_check_stages_for_check() {
+        let mut req = request();
+        req.verification_command =
+            vec!["just".to_string(), "check".to_string()];
+        req.stage_source = Some(StageSourceWire::None);
+        let error = seal_conditional_completion(req).unwrap_err();
+        assert!(error.message.contains("just check"));
+        assert!(error.message.contains("scoped_tests"));
+    }
+
+    #[test]
+    fn legacy_request_without_new_fields_still_seals() {
+        let raw = serde_json::to_value(request()).unwrap();
+        let mut map = raw.as_object().unwrap().clone();
+        map.remove("stage_source");
+        map.remove("prior_refusals");
+        let legacy: ConditionalCompletionPrepareRequestWire =
+            serde_json::from_value(Value::Object(map)).unwrap();
+        assert!(legacy.stage_source.is_none());
+        assert!(legacy.prior_refusals.is_empty());
+        seal_conditional_completion(legacy).unwrap();
+    }
+
+    fn sealed_baseline() -> ConditionalCompletionIntentWire {
+        seal_conditional_completion(request()).unwrap()
+    }
+
+    fn prior_for(
+        intent: &ConditionalCompletionIntentWire,
+        reason: &str,
+    ) -> PriorRefusalWire {
+        PriorRefusalWire {
+            worktree_fingerprint: intent.seal.worktree_fingerprint.clone(),
+            command: intent.verification.command.clone(),
+            plan_digest: intent.seal.plan_digest.clone(),
+            reason: reason.to_string(),
+        }
+    }
+
+    #[test]
+    fn matching_prior_refusal_is_refused() {
+        let baseline = sealed_baseline();
+        let reason = "missing_required_stage:formatting";
+        let mut req = request();
+        req.prior_refusals = vec![prior_for(&baseline, reason)];
+        let error = seal_conditional_completion(req).unwrap_err();
+        assert!(error.message.contains(reason));
+        assert!(error.message.contains("same tree"));
+    }
+
+    #[test]
+    fn non_matching_prior_refusals_are_allowed() {
+        let baseline = sealed_baseline();
+
+        let mut different_tree = request();
+        let mut refused =
+            prior_for(&baseline, "missing_required_stage:formatting");
+        refused.worktree_fingerprint = digest64("other-tree");
+        different_tree.prior_refusals = vec![refused];
+        seal_conditional_completion(different_tree).unwrap();
+
+        let mut different_command = request();
+        let mut refused =
+            prior_for(&baseline, "missing_required_stage:formatting");
+        refused.command = vec!["just".to_string(), "check".to_string()];
+        different_command.prior_refusals = vec![refused];
+        seal_conditional_completion(different_command).unwrap();
+
+        let mut different_plan = request();
+        let mut refused =
+            prior_for(&baseline, "missing_required_stage:formatting");
+        refused.plan_digest = digest64("other-plan");
+        different_plan.prior_refusals = vec![refused];
+        seal_conditional_completion(different_plan).unwrap();
+    }
+
+    #[test]
+    fn empty_prior_refusals_disable_the_guard() {
+        let mut req = request();
+        req.prior_refusals = Vec::new();
+        seal_conditional_completion(req).unwrap();
     }
 }

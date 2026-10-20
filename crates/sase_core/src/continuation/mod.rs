@@ -31,9 +31,9 @@ pub use completion::{
     ConditionalCompletionPrepareRequestWire, ConditionalCompletionPreviewWire,
     ConditionalCompletionRollbackRequestWire, ConditionalCompletionSealWire,
     ConditionalCompletionStatusWire, ExecutorCapabilityWire,
-    ObservedPathKindWire, ObservedPathWire, RepositoryDecisionWire,
-    RepositoryObservationWire, VerificationContractWire, VerificationLevelWire,
-    COMPLETION_POLICY_VERSION,
+    ObservedPathKindWire, ObservedPathWire, PriorRefusalWire,
+    RepositoryDecisionWire, RepositoryObservationWire, StageSourceWire,
+    VerificationContractWire, VerificationLevelWire, COMPLETION_POLICY_VERSION,
 };
 pub use completion_eval::{
     consume_conditional_completion_request, evaluate_conditional_completion,

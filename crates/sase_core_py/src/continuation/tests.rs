@@ -209,3 +209,144 @@ fn continuation_contract_bindings_round_trip_json_shapes() {
         );
     });
 }
+
+#[test]
+fn seal_binding_round_trips_stage_source_and_prior_refusals() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let plan =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let context =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let head =
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let head_tree =
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let index_tree =
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let content =
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let seal_request = || {
+            json!({
+                "schema_version": 1,
+                "creator": {
+                    "project": "sase",
+                    "run_id": "run-1",
+                    "agent_name": "agent-1"
+                },
+                "context": {
+                    "run_id": "run-1",
+                    "agent_id": "agent-1",
+                    "turn_nonce": "nonce-1",
+                    "plan_digest": plan,
+                    "context_digest": context,
+                    "obligation_ids": ["repo-main"]
+                },
+                "success_message": "Required checks passed in {duration}.",
+                "verification_command": ["just", "check-full"],
+                "declaration": {
+                    "schema_version": 2,
+                    "context_digest": context,
+                    "plan_digest": plan,
+                    "payloads": [{
+                        "instance_id": "commit",
+                        "payload": {
+                            "repositories": [{
+                                "repo_id": "repo-main",
+                                "action": "commit",
+                                "message": "fix: finish the change"
+                            }],
+                            "deferrals": []
+                        }
+                    }]
+                },
+                "observations": [{
+                    "repo_id": "repo-main",
+                    "kind": "main",
+                    "name": "main",
+                    "head": head,
+                    "head_tree": head_tree,
+                    "index_tree": index_tree,
+                    "paths": [{
+                        "path": "src/app.py",
+                        "xy": "M",
+                        "content_hash": content,
+                        "mode": "100644",
+                        "kind": "file",
+                        "protected": false,
+                        "foreign": false
+                    }],
+                    "complete": true
+                }],
+                "executors": [{
+                    "instance_id": "commit",
+                    "provider_ref": "builtin@commit",
+                    "headless": true,
+                    "durable_replay": true,
+                    "requires_model": false
+                }],
+                "accept": "pass"
+            })
+        };
+
+        let seal = |request: serde_json::Value| {
+            let obj = json_value_to_py(py, &request).unwrap();
+            let dict = obj.bind(py).downcast::<PyDict>().unwrap();
+            py_continuation_seal_conditional_completion(py, dict)
+                .map(|out| py_to_json_value(out.bind(py)).unwrap())
+        };
+
+        // run_silent seals.
+        let mut run_silent = seal_request();
+        run_silent["stage_source"] = json!("run_silent");
+        run_silent["prior_refusals"] = json!([]);
+        let intent = seal(run_silent).unwrap();
+        assert_eq!(intent["status"], json!("prepared"));
+
+        // Absent fields behave like legacy callers and seal.
+        let legacy = seal_request();
+        let legacy_intent = seal(legacy).unwrap();
+        assert_eq!(legacy_intent["status"], json!("prepared"));
+        assert_eq!(intent["seal"]["digest"], legacy_intent["seal"]["digest"]);
+
+        // none is refused with the stage evidence message.
+        let mut none = seal_request();
+        none["stage_source"] = json!("none");
+        none["prior_refusals"] = json!([]);
+        let error = seal(none).unwrap_err();
+        assert!(error.is_instance_of::<PyValueError>(py));
+        let message = error.to_string();
+        assert!(message.contains("no stage evidence"), "{message}");
+        assert!(message.contains("stages: run_silent"), "{message}");
+
+        // A matching prior refusal is refused through the binding.
+        let mut repeated = seal_request();
+        repeated["stage_source"] = json!("run_silent");
+        repeated["prior_refusals"] = json!([{
+            "worktree_fingerprint": intent["seal"]["worktree_fingerprint"],
+            "command": ["just", "check-full"],
+            "plan_digest": plan,
+            "reason": "missing_required_stage:formatting"
+        }]);
+        let error = seal(repeated).unwrap_err();
+        assert!(error.is_instance_of::<PyValueError>(py));
+        let message = error.to_string();
+        assert!(
+            message.contains("missing_required_stage:formatting"),
+            "{message}"
+        );
+        assert!(message.contains("same tree"), "{message}");
+
+        // A non-matching prior refusal still seals.
+        let mut other_tree = seal_request();
+        other_tree["stage_source"] = json!("run_silent");
+        other_tree["prior_refusals"] = json!([{
+            "worktree_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+            "command": ["just", "check-full"],
+            "plan_digest": plan,
+            "reason": "missing_required_stage:formatting"
+        }]);
+        let allowed = seal(other_tree).unwrap();
+        assert_eq!(allowed["status"], json!("prepared"));
+    });
+}

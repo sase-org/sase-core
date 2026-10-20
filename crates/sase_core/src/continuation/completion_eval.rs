@@ -431,6 +431,8 @@ mod tests {
                 requires_model: false,
             }],
             accept: CompletionAcceptPolicyWire::Pass,
+            stage_source: None,
+            prior_refusals: Vec::new(),
         }
     }
 
