@@ -39,6 +39,9 @@ use crate::bead::read_model::{
     drop_cache_file, ensure_cache_ready_for_mutation_at,
     read_invalidated_generation, read_model_cache_path_for_store, CacheWitness,
 };
+use crate::bead::target_probe::{
+    probe_bead_target_owner, BeadTargetProbeStatusWire,
+};
 use crate::bead::wire::{BeadError, IssueWire};
 
 /// How rows are retrieved: indexed cache rows or a replay slice.
@@ -1230,6 +1233,41 @@ impl MutationView {
             }
         }
         Ok(issue.id.clone())
+    }
+
+    /// Whether a missing ID is named by a terminal removal in its
+    /// surviving lineage stream. A missing stream or a non-removal tail is
+    /// ordinary absence; unreadable event data remains an error.
+    pub(crate) fn missing_issue_was_removed(
+        &self,
+        issue_id: &str,
+    ) -> Result<bool, BeadError> {
+        let probe = probe_bead_target_owner(&self.beads_dir, issue_id)?;
+        if probe.status != BeadTargetProbeStatusWire::Hit {
+            return Ok(false);
+        }
+        let Some(stem) = probe.stem else {
+            return Ok(false);
+        };
+        let path =
+            event_streams_dir(&self.beads_dir).join(format!("{stem}.jsonl"));
+        let (stream, _signature) = read_event_stream_file(&path)?;
+        let Some(last) = stream.events.last() else {
+            return Ok(false);
+        };
+        if last.operation != BeadEventOperationWire::IssueRemoved {
+            return Ok(false);
+        }
+        let BeadEventPayloadWire::IssueRemoved {
+            cascade_removed_issue_ids,
+        } = &last.payload
+        else {
+            return Ok(false);
+        };
+        Ok(last.issue_id == issue_id
+            || cascade_removed_issue_ids
+                .iter()
+                .any(|removed_id| removed_id == issue_id))
     }
 
     /// Projection-receipt check over the affected stream only: loads the

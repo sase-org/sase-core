@@ -1524,6 +1524,22 @@ fn bead_set_link_projections_binding_is_registered_and_projects_batch() {
             py,
             &requests,
             json!({
+                "issue_id": "sase-999",
+                "target_ref": "plan:202609/missing.md",
+                "relation": "related",
+                "direction": "out",
+                "present": true,
+                "operation_id": "cccccccccccccccccccccccccccccccc",
+                "description": "missing holder",
+                "origin": "manual",
+                "uses": 1,
+                "missing_holder": "skip"
+            }),
+        );
+        append_json(
+            py,
+            &requests,
+            json!({
                 "issue_id": issue.id,
                 "target_ref": "plan:202609/a.md",
                 "relation": "related",
@@ -1543,6 +1559,26 @@ fn bead_set_link_projections_binding_is_registered_and_projects_batch() {
         assert_eq!(value["operation"], json!("link_project"));
         assert_eq!(value["changed"], json!(true));
         assert_eq!(value["issue_ids"], json!([issue.id]));
+        assert_eq!(
+            value["link_projection_outcomes"].as_array().unwrap().len(),
+            3
+        );
+        assert_eq!(
+            value["link_projection_outcomes"][0]["status"],
+            json!("applied")
+        );
+        assert_eq!(
+            value["link_projection_outcomes"][1]["status"],
+            json!("missing")
+        );
+        assert_eq!(
+            value["link_projection_outcomes"][1]["missing_kind"],
+            json!("absent")
+        );
+        assert_eq!(
+            value["link_projection_outcomes"][2]["status"],
+            json!("applied")
+        );
     });
 }
 

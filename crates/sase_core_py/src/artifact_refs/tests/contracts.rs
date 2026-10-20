@@ -660,6 +660,57 @@ fn artifact_ref_contract_bindings_round_trip_json_shapes() {
             py_to_json_value(acknowledged_receipt.bind(py)).unwrap();
         assert_eq!(acknowledged_receipt["acknowledged"], json!(true));
 
+        let bead_requirements_object = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "operation_id": "cccccccccccccccccccccccccccccccc",
+                "document_refs": [],
+                "bead_refs": ["bead:sase-yy.8"],
+                "unowned_refs": []
+            }),
+        )
+        .unwrap();
+        let bead_requirements = bead_requirements_object
+            .bind(py)
+            .downcast::<PyDict>()
+            .unwrap();
+        let parked_evidence_object = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "operation_id": "cccccccccccccccccccccccccccccccc",
+                "resolved_roots": {},
+                "forced_roots": [],
+                "durable_roots": [],
+                "bead_owner": true,
+                "bead_receipt": false,
+                "bead_endpoints": [{
+                    "endpoint_ref": "bead:sase-yy.8",
+                    "outcome": {"foreign": {"owner_project": "bob-cli"}}
+                }],
+                "local_receipt": true
+            }),
+        )
+        .unwrap();
+        let parked_evidence = parked_evidence_object
+            .bind(py)
+            .downcast::<PyDict>()
+            .unwrap();
+        let parked_receipt = py_artifact_link_publication_receipt(
+            py,
+            bead_requirements,
+            parked_evidence,
+        )
+        .unwrap();
+        let parked_receipt = py_to_json_value(parked_receipt.bind(py)).unwrap();
+        assert_eq!(parked_receipt["acknowledged"], json!(false));
+        assert_eq!(parked_receipt["disposition"], json!("parked"));
+        assert!(parked_receipt["pending_reasons"][0]
+            .as_str()
+            .unwrap()
+            .contains("bob-cli"));
+
         let put_value = json!({
             "schema_version": 1,
             "project_key": "gh_acme__widget",

@@ -83,7 +83,9 @@ pub use managed_table::{
 pub use merge::merge_artifact_link_indexes;
 pub use ownership::{
     artifact_link_event_owner_requirements, artifact_link_publication_receipt,
+    ArtifactLinkBeadEndpointEvidenceWire, ArtifactLinkBeadEndpointOutcomeWire,
     ArtifactLinkOwnerRefWire, ArtifactLinkOwnerRequirementWire,
+    ArtifactLinkPublicationDispositionWire,
     ArtifactLinkPublicationEvidenceWire, ArtifactLinkPublicationReceiptWire,
     ARTIFACT_LINK_PUBLICATION_OWNERSHIP_WIRE_SCHEMA_VERSION,
 };

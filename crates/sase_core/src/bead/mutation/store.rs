@@ -610,6 +610,7 @@ pub(crate) fn outcome(
         unchanged_ids: Vec::new(),
         reopen_withheld: false,
         reopen_withheld_closed_at: None,
+        link_projection_outcomes: Vec::new(),
     }
 }
 

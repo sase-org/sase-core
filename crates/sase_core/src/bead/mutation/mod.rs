@@ -38,7 +38,9 @@ pub use links::{
 };
 pub use mutation_wire::{
     BeadCreateRequestWire, BeadLaunchClaimContextWire,
-    BeadLinkProjectionRequestWire, BeadMutationOutcomeWire,
+    BeadLinkProjectionMissingHolderWire, BeadLinkProjectionMissingKindWire,
+    BeadLinkProjectionOutcomeWire, BeadLinkProjectionRequestWire,
+    BeadLinkProjectionStatusWire, BeadMutationOutcomeWire,
     BeadPreclaimAssignmentWire, BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
 };
 pub use notes_update::{

@@ -882,6 +882,7 @@ fn cache_matches_replay_after_every_family_mutation() {
                     origin: Some(ArtifactLinkOriginWire::Manual),
                     uses: 1,
                     now: Some(stamp.clone()),
+                    missing_holder: Default::default(),
                 };
                 assert_family_step(
                     &stores,

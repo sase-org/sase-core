@@ -656,6 +656,7 @@ pub(super) fn cases() -> Vec<Case> {
                         origin: Some(ArtifactLinkOriginWire::Manual),
                         uses: 1,
                         now: some_now(),
+                        missing_holder: Default::default(),
                     },
                     BeadLinkProjectionRequestWire {
                         issue_id: s.beta.clone(),
@@ -669,6 +670,7 @@ pub(super) fn cases() -> Vec<Case> {
                         origin: Some(ArtifactLinkOriginWire::Manual),
                         uses: 1,
                         now: some_now(),
+                        missing_holder: Default::default(),
                     },
                 ],
             ))

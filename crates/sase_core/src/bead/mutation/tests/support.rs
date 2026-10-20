@@ -198,6 +198,7 @@ pub(super) fn projection_request(
         origin: Some(origin),
         uses,
         now: Some(now.to_string()),
+        missing_holder: Default::default(),
     }
 }
 

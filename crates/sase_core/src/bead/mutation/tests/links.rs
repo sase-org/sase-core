@@ -796,6 +796,153 @@ fn link_projection_batch_is_transactional_on_invalid_middle_request() {
 }
 
 #[test]
+fn link_projection_batch_skip_applies_valid_requests_and_reports_absent_holder()
+{
+    run_dual_mode_test(|_mode| {
+        let (_temp, beads_dir, first_id, second_id) = two_issue_store();
+        let mut missing = projection_request(
+            "sase-999",
+            "plan:202609/missing.md",
+            "related",
+            BeadLinkDirectionWire::Out,
+            true,
+            &hex_operation_id(24),
+            "missing holder",
+            ArtifactLinkOriginWire::Manual,
+            1,
+            "2026-01-01T00:02:00Z",
+        );
+        missing.missing_holder =
+            crate::bead::mutation::BeadLinkProjectionMissingHolderWire::Skip;
+
+        let result = set_bead_link_projections(
+            &beads_dir,
+            &[
+                projection_request(
+                    &first_id,
+                    "plan:202609/a.md",
+                    "related",
+                    BeadLinkDirectionWire::Out,
+                    true,
+                    &hex_operation_id(25),
+                    "applied before missing",
+                    ArtifactLinkOriginWire::Manual,
+                    1,
+                    "2026-01-01T00:01:00Z",
+                ),
+                missing,
+                projection_request(
+                    &second_id,
+                    "plan:202609/b.md",
+                    "related",
+                    BeadLinkDirectionWire::Out,
+                    true,
+                    &hex_operation_id(26),
+                    "applied after missing",
+                    ArtifactLinkOriginWire::Manual,
+                    1,
+                    "2026-01-01T00:03:00Z",
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert!(result.changed);
+        assert_eq!(
+            result
+                .link_projection_outcomes
+                .iter()
+                .map(|outcome| outcome.status)
+                .collect::<Vec<_>>(),
+            [
+                crate::bead::mutation::BeadLinkProjectionStatusWire::Applied,
+                crate::bead::mutation::BeadLinkProjectionStatusWire::Missing,
+                crate::bead::mutation::BeadLinkProjectionStatusWire::Applied,
+            ]
+        );
+        assert_eq!(result.link_projection_outcomes[1].index, 1);
+        assert_eq!(
+            result.link_projection_outcomes[1].missing_kind,
+            Some(crate::bead::mutation::BeadLinkProjectionMissingKindWire::Absent)
+        );
+        let issues = read_store_issues(&beads_dir).unwrap();
+        assert_eq!(
+            issues
+                .iter()
+                .find(|issue| issue.id == first_id)
+                .unwrap()
+                .links[0]
+                .target_ref,
+            "plan:202609/a.md"
+        );
+        assert_eq!(
+            issues
+                .iter()
+                .find(|issue| issue.id == second_id)
+                .unwrap()
+                .links[0]
+                .target_ref,
+            "plan:202609/b.md"
+        );
+        assert_dual_mode_parity_for_current_mode();
+    });
+}
+
+#[test]
+fn link_projection_skip_classifies_terminal_removed_holder() {
+    run_dual_mode_test(|_mode| {
+        let (_temp, beads_dir, first_id, second_id) = two_issue_store();
+        crate::bead::mutation::remove_issue(&beads_dir, &first_id).unwrap();
+        let mut removed = projection_request(
+            &first_id,
+            "plan:202609/removed.md",
+            "related",
+            BeadLinkDirectionWire::Out,
+            true,
+            &hex_operation_id(27),
+            "removed holder",
+            ArtifactLinkOriginWire::Manual,
+            1,
+            "2026-01-01T00:02:00Z",
+        );
+        removed.missing_holder =
+            crate::bead::mutation::BeadLinkProjectionMissingHolderWire::Skip;
+
+        let result = set_bead_link_projections(
+            &beads_dir,
+            &[
+                removed,
+                projection_request(
+                    &second_id,
+                    "plan:202609/live.md",
+                    "related",
+                    BeadLinkDirectionWire::Out,
+                    true,
+                    &hex_operation_id(28),
+                    "surviving holder",
+                    ArtifactLinkOriginWire::Manual,
+                    1,
+                    "2026-01-01T00:03:00Z",
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert!(result.changed);
+        assert_eq!(result.link_projection_outcomes[0].index, 0);
+        assert_eq!(
+            result.link_projection_outcomes[0].missing_kind,
+            Some(crate::bead::mutation::BeadLinkProjectionMissingKindWire::Removed)
+        );
+        assert_eq!(
+            result.link_projection_outcomes[1].status,
+            crate::bead::mutation::BeadLinkProjectionStatusWire::Applied
+        );
+        assert_dual_mode_parity_for_current_mode();
+    });
+}
+
+#[test]
 fn link_projection_batch_repairs_seen_receipt_then_replays_without_rewrite() {
     run_dual_mode_test(|_mode| {
         let (_temp, beads_dir, first_id, _second_id) = two_issue_store();

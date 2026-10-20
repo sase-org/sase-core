@@ -123,6 +123,43 @@ pub struct BeadLinkProjectionRequestWire {
     pub uses: u64,
     #[serde(default)]
     pub now: Option<String>,
+    /// Missing holders abort the batch by default; skip mode records a
+    /// per-request `missing` outcome while applying the other requests.
+    #[serde(default)]
+    pub missing_holder: BeadLinkProjectionMissingHolderWire,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BeadLinkProjectionMissingHolderWire {
+    #[default]
+    Abort,
+    Skip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeadLinkProjectionStatusWire {
+    Applied,
+    Unchanged,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeadLinkProjectionMissingKindWire {
+    Absent,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadLinkProjectionOutcomeWire {
+    pub index: usize,
+    pub status: BeadLinkProjectionStatusWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_kind: Option<BeadLinkProjectionMissingKindWire>,
 }
 
 impl Default for BeadLinkProjectionRequestWire {
@@ -138,6 +175,7 @@ impl Default for BeadLinkProjectionRequestWire {
             origin: None,
             uses: 1,
             now: None,
+            missing_holder: BeadLinkProjectionMissingHolderWire::Abort,
         }
     }
 }
@@ -214,4 +252,6 @@ pub struct BeadMutationOutcomeWire {
     pub reopen_withheld: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reopen_withheld_closed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_projection_outcomes: Vec<BeadLinkProjectionOutcomeWire>,
 }

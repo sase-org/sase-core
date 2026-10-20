@@ -1,5 +1,9 @@
 use super::mutation_wire::BeadLinkProjectionRequestWire;
 use super::mutation_wire::BeadMutationOutcomeWire;
+use super::mutation_wire::{
+    BeadLinkProjectionMissingHolderWire, BeadLinkProjectionMissingKindWire,
+    BeadLinkProjectionOutcomeWire, BeadLinkProjectionStatusWire,
+};
 use super::runner::run_mutation;
 use super::runner::MutationStep;
 use super::store::link_mutation_error;
@@ -247,6 +251,7 @@ pub fn set_bead_link_projection(
             origin,
             uses,
             now,
+            missing_holder: BeadLinkProjectionMissingHolderWire::Abort,
         }],
     )
 }
@@ -256,8 +261,9 @@ pub fn set_bead_link_projection(
 /// Loads the store once, applies every request with the same validation,
 /// canonicalization, holder selection, receipt, and event payload as
 /// [`set_bead_link_projection`], and saves once only when at least one
-/// request changed state. An invalid request leaves the event stream and
-/// `issues.jsonl` projection untouched.
+/// request changed state. Missing holders abort by default. A request with
+/// `missing_holder = skip` instead reports that request as missing and lets
+/// the valid requests proceed in the same mutation.
 pub fn set_bead_link_projections(
     beads_dir: &Path,
     requests: &[BeadLinkProjectionRequestWire],
@@ -279,6 +285,7 @@ struct PreparedLinkProjection {
     operation_id: String,
     desired: Option<(String, ArtifactLinkOriginWire, u64)>,
     now: Option<String>,
+    missing_holder: BeadLinkProjectionMissingHolderWire,
 }
 
 impl PreparedLinkProjection {
@@ -321,6 +328,7 @@ impl PreparedLinkProjection {
             operation_id,
             desired,
             now: request.now.clone(),
+            missing_holder: request.missing_holder,
         })
     }
 }
@@ -347,8 +355,50 @@ fn run_link_projections(
     // edge identity: the view's file-backed receipt check cannot see them
     // yet, while the replay oracle's in-memory streams could.
     let mut staged_receipts: BTreeSet<String> = BTreeSet::new();
-    for request in requests {
-        let source_id = view.resolve(&request.issue_id)?;
+    let mut link_projection_outcomes = Vec::with_capacity(requests.len());
+    for (index, request) in requests.iter().enumerate() {
+        let source_id = match view.resolve(&request.issue_id) {
+            Ok(source_id) => source_id,
+            Err(error)
+                if request.missing_holder
+                    == BeadLinkProjectionMissingHolderWire::Skip
+                    && error.kind == "not_found" =>
+            {
+                let missing_kind =
+                    if view.missing_issue_was_removed(&request.issue_id)? {
+                        BeadLinkProjectionMissingKindWire::Removed
+                    } else {
+                        BeadLinkProjectionMissingKindWire::Absent
+                    };
+                link_projection_outcomes.push(BeadLinkProjectionOutcomeWire {
+                    index,
+                    status: BeadLinkProjectionStatusWire::Missing,
+                    missing_kind: Some(missing_kind),
+                });
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = view.get(&source_id) {
+            if request.missing_holder
+                == BeadLinkProjectionMissingHolderWire::Skip
+                && error.kind == "not_found"
+            {
+                let missing_kind =
+                    if view.missing_issue_was_removed(&request.issue_id)? {
+                        BeadLinkProjectionMissingKindWire::Removed
+                    } else {
+                        BeadLinkProjectionMissingKindWire::Absent
+                    };
+                link_projection_outcomes.push(BeadLinkProjectionOutcomeWire {
+                    index,
+                    status: BeadLinkProjectionStatusWire::Missing,
+                    missing_kind: Some(missing_kind),
+                });
+                continue;
+            }
+            return Err(error);
+        }
         let target_ref =
             canonicalize_bead_link_target_via_view(view, &request.target_ref)?;
         let source_ref = canonical_bead_source_ref(&source_id);
@@ -422,6 +472,11 @@ fn run_link_projections(
             if !issue_ids.contains(&source_id) {
                 issue_ids.push(source_id.clone());
             }
+            link_projection_outcomes.push(BeadLinkProjectionOutcomeWire {
+                index,
+                status: BeadLinkProjectionStatusWire::Unchanged,
+                missing_kind: None,
+            });
             continue;
         }
         let timestamp = request.now.clone().unwrap_or_else(now_utc);
@@ -503,9 +558,15 @@ fn run_link_projections(
             issue_ids.push(holder_id.clone());
         }
         changed = true;
+        link_projection_outcomes.push(BeadLinkProjectionOutcomeWire {
+            index,
+            status: BeadLinkProjectionStatusWire::Applied,
+            missing_kind: None,
+        });
     }
     if !changed {
         let mut result = outcome("link_project", false, issue_ids);
+        result.link_projection_outcomes = link_projection_outcomes;
         if let Some(source_id) = source_ids.first() {
             result.issue = Some(view.get(source_id)?);
         }
@@ -515,6 +576,7 @@ fn run_link_projections(
         return Ok(MutationStep::NeedsReplay);
     };
     let mut result = outcome("link_project", true, issue_ids);
+    result.link_projection_outcomes = link_projection_outcomes;
     if let Some(source_id) = source_ids.first() {
         result.issue = Some(
             committed

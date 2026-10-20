@@ -42,7 +42,37 @@ pub struct ArtifactLinkPublicationEvidenceWire {
     pub durable_roots: Vec<String>,
     pub bead_owner: bool,
     pub bead_receipt: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bead_endpoints: Option<Vec<ArtifactLinkBeadEndpointEvidenceWire>>,
     pub local_receipt: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactLinkBeadEndpointEvidenceWire {
+    pub endpoint_ref: String,
+    pub outcome: ArtifactLinkBeadEndpointOutcomeWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactLinkBeadEndpointOutcomeWire {
+    Committed,
+    Removed,
+    Absent,
+    Foreign { owner_project: String },
+    Transient { detail: String },
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactLinkPublicationDispositionWire {
+    Acknowledged,
+    Parked,
+    #[default]
+    Pending,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +81,8 @@ pub struct ArtifactLinkPublicationReceiptWire {
     pub schema_version: u64,
     pub operation_id: String,
     pub acknowledged: bool,
+    #[serde(default)]
+    pub disposition: ArtifactLinkPublicationDispositionWire,
     pub pending_reasons: Vec<String>,
 }
 
@@ -113,12 +145,15 @@ pub fn artifact_link_publication_receipt(
     }
 
     let mut pending = Vec::new();
+    let mut has_blocking_pending = false;
+    let mut has_parkable_endpoint = false;
     for owner in &requirements.document_refs {
         if !evidence.resolved_roots.contains_key(&owner.kind) {
             pending.push(format!(
                 "artifact-link event owner {} of kind {} has no resolved sidecar root",
                 owner.reference, owner.kind
             ));
+            has_blocking_pending = true;
         }
     }
 
@@ -138,23 +173,105 @@ pub fn artifact_link_publication_receipt(
             pending.push(format!(
                 "artifact-link event required root {root} is not durable"
             ));
+            has_blocking_pending = true;
         }
     }
 
-    if evidence.bead_owner && !evidence.bead_receipt {
+    if let Some(endpoints) = &evidence.bead_endpoints {
+        let expected: BTreeSet<&str> =
+            requirements.bead_refs.iter().map(String::as_str).collect();
+        let mut by_ref =
+            BTreeMap::<String, Vec<&ArtifactLinkBeadEndpointOutcomeWire>>::new(
+            );
+        for endpoint in endpoints {
+            let endpoint_ref =
+                canonicalize_artifact_link_ref(&endpoint.endpoint_ref)?;
+            by_ref
+                .entry(endpoint_ref)
+                .or_default()
+                .push(&endpoint.outcome);
+        }
+        for endpoint_ref in &requirements.bead_refs {
+            match by_ref.get(endpoint_ref) {
+                None => {
+                    pending.push(format!(
+                        "artifact-link bead endpoint {endpoint_ref} outcome missing_evidence"
+                    ));
+                    has_blocking_pending = true;
+                }
+                Some(outcomes) if outcomes.len() != 1 => {
+                    pending.push(format!(
+                        "artifact-link bead endpoint {endpoint_ref} outcome duplicate_evidence"
+                    ));
+                    has_blocking_pending = true;
+                }
+                Some(outcomes) => match outcomes[0] {
+                    ArtifactLinkBeadEndpointOutcomeWire::Committed => {}
+                    ArtifactLinkBeadEndpointOutcomeWire::Removed => {
+                        pending.push(format!(
+                            "artifact-link bead endpoint {endpoint_ref} outcome removed"
+                        ));
+                        has_parkable_endpoint = true;
+                    }
+                    ArtifactLinkBeadEndpointOutcomeWire::Absent => {
+                        pending.push(format!(
+                            "artifact-link bead endpoint {endpoint_ref} outcome absent"
+                        ));
+                        has_parkable_endpoint = true;
+                    }
+                    ArtifactLinkBeadEndpointOutcomeWire::Foreign {
+                        owner_project,
+                    } => {
+                        pending.push(format!(
+                            "artifact-link bead endpoint {endpoint_ref} outcome foreign (owner project {owner_project})"
+                        ));
+                        has_parkable_endpoint = true;
+                    }
+                    ArtifactLinkBeadEndpointOutcomeWire::Transient {
+                        detail,
+                    } => {
+                        pending.push(format!(
+                            "artifact-link bead endpoint {endpoint_ref} outcome transient ({detail})"
+                        ));
+                        has_blocking_pending = true;
+                    }
+                },
+            }
+        }
+        for endpoint_ref in by_ref.keys() {
+            if !expected.contains(endpoint_ref.as_str()) {
+                pending.push(format!(
+                    "artifact-link bead endpoint {endpoint_ref} outcome is not required by this operation"
+                ));
+                has_blocking_pending = true;
+            }
+        }
+    } else if evidence.bead_owner && !evidence.bead_receipt {
         pending
             .push("artifact-link bead projection is not committed".to_string());
+        has_blocking_pending = true;
     }
     if required_roots.is_empty() && !evidence.local_receipt {
         pending.push(
             "artifact-link event has no durable owner receipt".to_string(),
         );
+        has_blocking_pending = true;
     }
+
+    let disposition = if has_blocking_pending {
+        ArtifactLinkPublicationDispositionWire::Pending
+    } else if has_parkable_endpoint {
+        ArtifactLinkPublicationDispositionWire::Parked
+    } else {
+        ArtifactLinkPublicationDispositionWire::Acknowledged
+    };
 
     Ok(ArtifactLinkPublicationReceiptWire {
         schema_version: ARTIFACT_LINK_PUBLICATION_OWNERSHIP_WIRE_SCHEMA_VERSION,
         operation_id: requirements.operation_id.clone(),
-        acknowledged: pending.is_empty(),
+        acknowledged: disposition
+            == ArtifactLinkPublicationDispositionWire::Acknowledged,
+        disposition,
         pending_reasons: pending,
     })
 }
@@ -262,6 +379,7 @@ mod tests {
             durable_roots: Vec::new(),
             bead_owner: false,
             bead_receipt: false,
+            bead_endpoints: None,
             local_receipt: false,
         }
     }
@@ -366,6 +484,10 @@ mod tests {
                 .unwrap();
         assert!(receipt.acknowledged);
         assert!(receipt.pending_reasons.is_empty());
+        assert_eq!(
+            receipt.disposition,
+            ArtifactLinkPublicationDispositionWire::Acknowledged
+        );
     }
 
     #[test]
@@ -442,5 +564,86 @@ mod tests {
             .unwrap_err()
             .message
             .contains("schema_version"));
+    }
+
+    #[test]
+    fn receipt_classifies_per_endpoint_outcomes() {
+        let requirements = artifact_link_event_owner_requirements(
+            &event("bead:sase-yy.8", "related", "agent:reader"),
+            &[],
+        )
+        .unwrap();
+        let endpoint_ref = requirements.bead_refs[0].clone();
+        let mut evidence = evidence_for(&requirements);
+        evidence.bead_owner = true;
+        evidence.local_receipt = true;
+        evidence.bead_endpoints =
+            Some(vec![ArtifactLinkBeadEndpointEvidenceWire {
+                endpoint_ref: endpoint_ref.clone(),
+                outcome: ArtifactLinkBeadEndpointOutcomeWire::Committed,
+            }]);
+
+        let receipt =
+            artifact_link_publication_receipt(&requirements, &evidence)
+                .unwrap();
+        assert!(receipt.acknowledged);
+        assert_eq!(
+            receipt.disposition,
+            ArtifactLinkPublicationDispositionWire::Acknowledged
+        );
+
+        for outcome in [
+            ArtifactLinkBeadEndpointOutcomeWire::Removed,
+            ArtifactLinkBeadEndpointOutcomeWire::Absent,
+            ArtifactLinkBeadEndpointOutcomeWire::Foreign {
+                owner_project: "bob-cli".to_string(),
+            },
+        ] {
+            evidence.bead_endpoints =
+                Some(vec![ArtifactLinkBeadEndpointEvidenceWire {
+                    endpoint_ref: endpoint_ref.clone(),
+                    outcome,
+                }]);
+            let receipt =
+                artifact_link_publication_receipt(&requirements, &evidence)
+                    .unwrap();
+            assert!(!receipt.acknowledged);
+            assert_eq!(
+                receipt.disposition,
+                ArtifactLinkPublicationDispositionWire::Parked
+            );
+            assert!(receipt.pending_reasons[0].contains(&endpoint_ref));
+        }
+        assert!(artifact_link_publication_receipt(
+            &requirements,
+            &ArtifactLinkPublicationEvidenceWire {
+                bead_endpoints: Some(vec![
+                    ArtifactLinkBeadEndpointEvidenceWire {
+                        endpoint_ref: endpoint_ref.clone(),
+                        outcome:
+                            ArtifactLinkBeadEndpointOutcomeWire::Transient {
+                                detail: "store lock unavailable".to_string(),
+                            },
+                    },
+                ]),
+                ..evidence.clone()
+            }
+        )
+        .unwrap()
+        .pending_reasons[0]
+            .contains("store lock unavailable"));
+        let pending = artifact_link_publication_receipt(
+            &requirements,
+            &ArtifactLinkPublicationEvidenceWire {
+                bead_endpoints: Some(Vec::new()),
+                ..evidence
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            pending.disposition,
+            ArtifactLinkPublicationDispositionWire::Pending
+        );
+        assert!(pending.pending_reasons[0].contains("missing_evidence"));
     }
 }

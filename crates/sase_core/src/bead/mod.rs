@@ -80,7 +80,9 @@ pub use mutation::{
     set_bead_link_projection, set_bead_link_projections, snooze_task,
     sync_is_clean, unmark_ready_to_work, update_issue, update_issues,
     BeadCreateRequestWire, BeadLaunchClaimContextWire,
-    BeadLinkProjectionRequestWire, BeadMutationOutcomeWire,
+    BeadLinkProjectionMissingHolderWire, BeadLinkProjectionMissingKindWire,
+    BeadLinkProjectionOutcomeWire, BeadLinkProjectionRequestWire,
+    BeadLinkProjectionStatusWire, BeadMutationOutcomeWire,
     BeadPreclaimAssignmentWire, BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
     CLOSED_BEAD_LAUNCH_NOTE_PREFIX,
 };
