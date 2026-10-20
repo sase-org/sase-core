@@ -1177,6 +1177,9 @@ fn launch_scratch_liveness_binding_round_trips_wire() {
         assert_eq!(result["candidates"].as_array().unwrap().len(), 1);
         assert_eq!(result["candidates"][0]["live"], json!(false));
         assert_eq!(result["candidates"][0]["complete"], json!(false));
+        assert_eq!(result["exempted_pre_launch"], json!(0));
+        assert_eq!(result["exempted_system_service"], json!(0));
+        assert_eq!(result["unreadable"], json!(0));
     });
 }
 

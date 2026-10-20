@@ -6,8 +6,8 @@
 //! descendants are stale, never follows symlinks, and refuses broad roots.
 
 use crate::launch_scratch_liveness::{
-    observe_launch_scratch_liveness, LaunchScratchCandidateLivenessWire,
-    LaunchScratchLivenessCandidateWire, LaunchScratchLivenessRequestWire,
+    observe_launch_scratch_liveness, LaunchScratchLivenessCandidateWire,
+    LaunchScratchLivenessRequestWire, LaunchScratchLivenessResultWire,
     LAUNCH_SCRATCH_LIVENESS_WIRE_SCHEMA_VERSION,
     LAUNCH_SCRATCH_OBSERVER_PROCFS, LAUNCH_SCRATCH_OBSERVER_UNOBSERVABLE,
 };
@@ -840,6 +840,7 @@ fn reap_dead_launch(
     result.observer = LAUNCH_SCRATCH_OBSERVER_PROCFS.to_string();
 
     let mut eligible: Vec<DeadLaunchEntry> = Vec::new();
+    let mut appended_pid_diagnostics = false;
     for (entry, verdict) in aged.into_iter().zip(observation.candidates.iter())
     {
         // The observer answers in request order; a mismatch fails closed.
@@ -870,6 +871,13 @@ fn reap_dead_launch(
                  incomplete",
                 entry.path.display()
             ));
+            if !appended_pid_diagnostics {
+                append_observer_pid_diagnostics(
+                    &mut result.skip_reasons,
+                    &observation.diagnostics,
+                );
+                appended_pid_diagnostics = true;
+            }
         } else {
             eligible.push(entry);
         }
@@ -1364,13 +1372,15 @@ fn apply_pressure_liveness(
     };
     let grace_cutoff =
         (request.now_epoch_seconds - dead.grace_seconds.max(0.0)).max(cutoff);
-    let Some(verdicts) = observe_pressure_liveness(&sized, dead) else {
+    let Some(observation) = observe_pressure_liveness(&sized, dead) else {
         for entry in sized {
             push_legacy(entry, &mut candidates);
         }
         return candidates;
     };
-    for (entry, verdict) in sized.into_iter().zip(verdicts) {
+    let mut appended_pid_diagnostics = false;
+    for (entry, verdict) in sized.into_iter().zip(observation.candidates.iter())
+    {
         // Like the dead-launch pass, a misaligned answer fails closed.
         let aligned = verdict.path == entry.path.to_string_lossy();
         if aligned && verdict.live {
@@ -1390,6 +1400,13 @@ fn apply_pressure_liveness(
                 ),
                 incomplete: true,
             });
+            if !appended_pid_diagnostics {
+                append_observer_pid_diagnostics(
+                    &mut diagnostics.skip_reasons,
+                    &observation.diagnostics,
+                );
+                appended_pid_diagnostics = true;
+            }
         } else if entry.latest_mtime < grace_cutoff {
             candidates.push(PressureCandidate {
                 path: entry.path,
@@ -1406,15 +1423,12 @@ fn apply_pressure_liveness(
 /// Batch-observe pressure entries through the launch-scratch observer.
 ///
 /// Returns `None` when the observer is unobservable so the caller falls
-/// back to the configured pressure age; otherwise one verdict per entry
-/// in candidate order.
+/// back to the configured pressure age; otherwise the full observation
+/// (verdicts in candidate order plus per-pid diagnostics).
 fn observe_pressure_liveness(
     sized: &[SizedPressureEntry],
     dead: &ManagedTmpDeadLaunchRequestWire,
-) -> Option<Vec<LaunchScratchCandidateLivenessWire>> {
-    if sized.is_empty() {
-        return Some(Vec::new());
-    }
+) -> Option<LaunchScratchLivenessResultWire> {
     let observation =
         observe_launch_scratch_liveness(&LaunchScratchLivenessRequestWire {
             schema_version: LAUNCH_SCRATCH_LIVENESS_WIRE_SCHEMA_VERSION,
@@ -1432,7 +1446,7 @@ fn observe_pressure_liveness(
     if observation.observer == LAUNCH_SCRATCH_OBSERVER_UNOBSERVABLE {
         return None;
     }
-    Some(observation.candidates)
+    Some(observation)
 }
 
 fn remove_if_stale(
@@ -1503,6 +1517,19 @@ fn remove_snapshot(
     if snapshot.is_dir {
         let status = match fs::remove_dir_all(path) {
             Ok(()) => RemovalStatus::Removed,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                repair_owner_write_in_tree(path);
+                match fs::remove_dir_all(path) {
+                    Ok(()) => RemovalStatus::Removed,
+                    Err(retry_error) => RemovalStatus::Failed(format!(
+                        "failed to remove directory {}: {error}; \
+                         retry: {retry_error}",
+                        path.display()
+                    )),
+                }
+            }
             Err(error) => RemovalStatus::Failed(format!(
                 "failed to remove directory {}: {error}",
                 path.display()
@@ -1632,6 +1659,78 @@ fn path_name(path: &Path) -> String {
         .unwrap_or_default()
         .to_string()
 }
+
+const MAX_APPENDED_LIVENESS_DIAGNOSTICS: usize = 8;
+
+fn append_observer_pid_diagnostics(
+    skip_reasons: &mut Vec<String>,
+    diagnostics: &[String],
+) {
+    let pid_lines: Vec<&String> = diagnostics
+        .iter()
+        .filter(|line| line.contains(" unreadable:"))
+        .collect();
+    if pid_lines.is_empty() {
+        return;
+    }
+    let cap = MAX_APPENDED_LIVENESS_DIAGNOSTICS;
+    if pid_lines.len() <= cap {
+        skip_reasons.extend(pid_lines.into_iter().cloned());
+        return;
+    }
+    skip_reasons.extend(pid_lines.iter().take(cap).map(|line| (*line).clone()));
+    skip_reasons.push(format!("and {} more", pid_lines.len() - cap));
+}
+
+#[cfg(unix)]
+fn repair_owner_write_in_tree(root: &Path) {
+    use std::os::unix::fs::MetadataExt;
+
+    let own_euid = unsafe { libc::geteuid() };
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        if metadata.uid() == own_euid && metadata.mode() & 0o300 != 0o300 {
+            let _ = fchmod_dir_add_owner_wx(&path, metadata.mode());
+        }
+        let Ok(entries) = fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            stack.push(entry.path());
+        }
+    }
+}
+
+#[cfg(unix)]
+fn fchmod_dir_add_owner_wx(
+    path: &Path,
+    current_mode: u32,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)?;
+    let new_mode = (current_mode & 0o7777) | 0o300;
+    let rc =
+        unsafe { libc::fchmod(file.as_raw_fd(), new_mode as libc::mode_t) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn repair_owner_write_in_tree(_root: &Path) {}
 
 fn is_build_target_residue_name(name: &str) -> bool {
     name.contains("cargo-target")
@@ -2458,6 +2557,13 @@ mod tests {
         assert_eq!(result.dead_launch_removed, 0);
         assert_eq!(result.dead_launch_preserved_incomplete, 1);
         assert_eq!(result.incomplete_observations, 1);
+        assert!(
+            result.skip_reasons.iter().any(|reason| {
+                reason.contains("9999 (fake-proc, ppid 1): environ unreadable:")
+            }),
+            "incomplete skip reasons must name the blocking process: {:?}",
+            result.skip_reasons
+        );
     }
 
     #[test]
@@ -2615,3 +2721,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod permission_repair;
