@@ -1331,8 +1331,8 @@ fn inspect_pressure_entry(
 ///
 /// When the dead-launch observer is available, a held entry is never a
 /// pressure candidate, an entry whose liveness is incomplete is preserved,
-/// and an unheld entry needs only the dead-launch grace rather than the
-/// configured pressure minimum age. Otherwise every entry keeps the
+/// and an unheld entry needs to exceed the shorter of the dead-launch grace
+/// and configured pressure minimum age. Otherwise every entry keeps the
 /// configured pressure cutoff. The reported
 /// `pressure_effective_min_age_seconds` still describes the configured
 /// policy; the grace shortcut for observed-unheld entries is documented,
@@ -1362,7 +1362,8 @@ fn apply_pressure_liveness(
         }
         return candidates;
     };
-    let grace_cutoff = request.now_epoch_seconds - dead.grace_seconds.max(0.0);
+    let grace_cutoff =
+        (request.now_epoch_seconds - dead.grace_seconds.max(0.0)).max(cutoff);
     let Some(verdicts) = observe_pressure_liveness(&sized, dead) else {
         for entry in sized {
             push_legacy(entry, &mut candidates);
@@ -2022,6 +2023,42 @@ mod tests {
             result.pressure_trigger.as_deref(),
             Some("size_and_free_space")
         );
+        assert_eq!(result.pressure_effective_min_age_seconds, Some(HOUR));
+    }
+
+    #[test]
+    fn low_free_space_age_applies_to_observed_unheld_pressure_entries() {
+        let temp = tempdir().unwrap();
+        let emergency_age_target = aged_dir(
+            temp.path(),
+            "cargo-targets/run-emergency",
+            1.5 * HOUR,
+            8192,
+        );
+        let grace_age_target =
+            aged_dir(temp.path(), "cargo-targets/run-grace", 0.5 * HOUR, 8192);
+        let proc_root = empty_proc_root(temp.path());
+        let mut req = request(temp.path());
+        req.age_reap = false;
+        req.pressure_max_bytes = Some(1024);
+        req.pressure_target_bytes = 0;
+        req.pressure_min_available_bytes = Some(10 * 1024);
+        req.pressure_recovery_available_bytes = 16 * 1024;
+        req.pressure_low_free_space_min_age_seconds = Some(HOUR);
+        req.filesystem_available_bytes = Some(8 * 1024);
+        req.dead_launch = Some(ManagedTmpDeadLaunchRequestWire {
+            enabled: true,
+            grace_seconds: DEAD_GRACE,
+            proc_root: proc_root.to_string_lossy().into_owned(),
+            current_pid: None,
+            exempt_pids: Vec::new(),
+        });
+
+        let result = reap_managed_tmpdir(&req).unwrap();
+
+        assert!(!emergency_age_target.exists());
+        assert!(grace_age_target.exists());
+        assert_eq!(result.pressure_removed, 1);
         assert_eq!(result.pressure_effective_min_age_seconds, Some(HOUR));
     }
 
