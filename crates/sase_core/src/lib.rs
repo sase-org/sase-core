@@ -127,6 +127,7 @@ pub mod query;
 pub mod queue_directive;
 mod reference_path;
 pub mod referenced_by;
+pub mod release_steward;
 pub mod repository_resolution;
 pub mod retryability;
 pub mod runner_capacity;

@@ -61,6 +61,7 @@ mod prompt_prediction;
 mod prose_diff;
 mod provider_policy;
 mod query;
+mod release_steward;
 mod sudo;
 mod telemetry;
 mod vcs;
@@ -77,6 +78,7 @@ pub use sase_core as core;
 #[pyo3(name = "sase_core_rs")]
 fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     query::register_query(m)?;
+    release_steward::register_release_steward(m)?;
     command_line::register_command_line(m)?;
     agent_identity::register_agent_identity(m)?;
     vcs::register_vcs(m)?;
