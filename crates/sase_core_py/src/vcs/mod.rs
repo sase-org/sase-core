@@ -521,6 +521,86 @@ fn py_classify_deferred_prompt_obligation<'py>(
     serialize_to_py(py, &result)
 }
 
+/// Classify sidecar paths as browsing, owner content, archive objects, or unknown.
+#[pyfunction]
+#[pyo3(name = "classify_replay_paths")]
+fn py_classify_replay_paths<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ReplayPathClassifyRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid ReplayPathClassifyRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_classify_replay_paths(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
+/// Decide whether same-run byte versions are a lossless prefix or must refuse.
+#[pyfunction]
+#[pyo3(name = "decide_replay_byte_divergence")]
+fn py_decide_replay_byte_divergence<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ReplayByteDivergenceRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid ReplayByteDivergenceRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_decide_replay_byte_divergence(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
+/// Decide whether a same-owner hood may merge through snapshot preservation.
+#[pyfunction]
+#[pyo3(name = "decide_replay_hood_merge")]
+fn py_decide_replay_hood_merge<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ReplayHoodMergeRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid ReplayHoodMergeRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_decide_replay_hood_merge(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
+/// Admit, refuse, or report a stale-replay apply against backup and HEAD facts.
+#[pyfunction]
+#[pyo3(name = "decide_replay_apply")]
+fn py_decide_replay_apply<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ReplayApplyDecisionRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid ReplayApplyDecisionRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_decide_replay_apply(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
 /// Derive the canonical file sets and classify one explicit manifest list.
 ///
 /// Mirrors the Python `SessionManifestSnapshotWire` dict shape. The response
@@ -800,6 +880,10 @@ pub(crate) fn register_vcs(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_classify_deferred_prompt_obligation,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_classify_replay_paths, m)?)?;
+    m.add_function(wrap_pyfunction!(py_decide_replay_byte_divergence, m)?)?;
+    m.add_function(wrap_pyfunction!(py_decide_replay_hood_merge, m)?)?;
+    m.add_function(wrap_pyfunction!(py_decide_replay_apply, m)?)?;
     m.add_function(wrap_pyfunction!(py_vcs_log_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_log, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_commit_presence, m)?)?;

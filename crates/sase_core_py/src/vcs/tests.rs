@@ -383,6 +383,98 @@ fn session_manifest_repair_binding_round_trips_policy_and_counts() {
 }
 
 #[test]
+fn replay_recovery_bindings_classify_and_admit() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let classified = {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "paths": [
+                        "README.md",
+                        "agents/alice.athena.foo/chat.md",
+                        "files/objects/sha256/ab/abc",
+                    ],
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_classify_replay_paths(py, request).unwrap();
+            py_to_json_value(result.bind(py)).unwrap()
+        };
+        assert_eq!(classified["browsing"], json!(["README.md"]));
+        assert_eq!(
+            classified["owner_content"],
+            json!(["agents/alice.athena.foo/chat.md"])
+        );
+        assert_eq!(
+            classified["archive_object"],
+            json!(["files/objects/sha256/ab/abc"])
+        );
+
+        let refused = {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "current_hex": "aaaaaaaaaa",
+                    "previous_hex": "bbbb",
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_decide_replay_byte_divergence(py, request).unwrap();
+            py_to_json_value(result.bind(py)).unwrap()
+        };
+        assert_eq!(refused["action"], json!("refuse"));
+        assert_eq!(refused["retained"], json!(false));
+
+        let merge = {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "local_owner_username": "alice",
+                    "local_owner_machine": "athena",
+                    "local_hood": "foo",
+                    "upstream_owner_username": "alice",
+                    "upstream_owner_machine": "athena",
+                    "upstream_hood": "foo",
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_decide_replay_hood_merge(py, request).unwrap();
+            py_to_json_value(result.bind(py)).unwrap()
+        };
+        assert_eq!(merge["action"], json!("merge"));
+
+        let admitted = {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "apply": true,
+                    "observed_head": "d7e06b77b42d89ecf4bb1538c6f89c6fe700124e",
+                    "expected_head": "d7e06b77b42d89ecf4bb1538c6f89c6fe700124e",
+                    "backup_complete": true,
+                    "backup_verified": true,
+                    "unreconcilable": false,
+                    "already_complete": false,
+                    "mutation_started": false,
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_decide_replay_apply(py, request).unwrap();
+            py_to_json_value(result.bind(py)).unwrap()
+        };
+        assert_eq!(admitted["action"], json!("apply"));
+    });
+}
+
+#[test]
 fn publication_recovery_bindings_select_and_complete() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

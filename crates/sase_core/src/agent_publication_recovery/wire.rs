@@ -260,3 +260,96 @@ pub struct DeferredPromptClassifyResponseWire {
     pub blocks_acknowledgment: bool,
     pub reason: String,
 }
+
+pub const REPLAY_PATH_BROWSING: &str = "browsing";
+pub const REPLAY_PATH_OWNER_CONTENT: &str = "owner_content";
+pub const REPLAY_PATH_ARCHIVE_OBJECT: &str = "archive_object";
+pub const REPLAY_PATH_UNKNOWN: &str = "unknown";
+
+pub const REPLAY_BYTES_KEEP_CURRENT: &str = "keep_current";
+pub const REPLAY_BYTES_KEEP_PREVIOUS: &str = "keep_previous";
+pub const REPLAY_BYTES_REFUSE: &str = "refuse";
+
+pub const REPLAY_APPLY_ACTION_REPORT: &str = "report";
+pub const REPLAY_APPLY_ACTION_APPLY: &str = "apply";
+pub const REPLAY_APPLY_ACTION_REFUSE: &str = "refuse";
+pub const REPLAY_APPLY_ACTION_ALREADY_COMPLETE: &str = "already_complete";
+
+pub const REPLAY_HOOD_ACTION_MERGE: &str = "merge";
+pub const REPLAY_HOOD_ACTION_REFUSE: &str = "refuse";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayPathClassifyRequestWire {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayPathClassWire {
+    pub path: String,
+    pub class: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayPathClassifyResponseWire {
+    pub schema_version: u32,
+    pub entries: Vec<ReplayPathClassWire>,
+    pub browsing: Vec<String>,
+    pub owner_content: Vec<String>,
+    pub archive_object: Vec<String>,
+    pub unknown: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayByteDivergenceRequestWire {
+    pub schema_version: u32,
+    pub current_hex: String,
+    pub previous_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayByteDivergenceResponseWire {
+    pub schema_version: u32,
+    pub action: String,
+    pub retained: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayHoodMergeRequestWire {
+    pub schema_version: u32,
+    pub local_owner_username: String,
+    pub local_owner_machine: String,
+    pub local_hood: String,
+    pub upstream_owner_username: String,
+    pub upstream_owner_machine: String,
+    pub upstream_hood: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayHoodMergeResponseWire {
+    pub schema_version: u32,
+    pub action: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayApplyDecisionRequestWire {
+    pub schema_version: u32,
+    pub apply: bool,
+    pub observed_head: String,
+    pub expected_head: String,
+    pub backup_complete: bool,
+    pub backup_verified: bool,
+    pub unreconcilable: bool,
+    pub already_complete: bool,
+    pub mutation_started: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayApplyDecisionResponseWire {
+    pub schema_version: u32,
+    pub action: String,
+    pub reason: String,
+}
