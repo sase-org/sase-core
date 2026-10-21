@@ -306,6 +306,8 @@ pub struct ReplayByteDivergenceRequestWire {
     pub schema_version: u32,
     pub current_hex: String,
     pub previous_hex: String,
+    #[serde(default)]
+    pub base_hex: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

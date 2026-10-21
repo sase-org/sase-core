@@ -430,6 +430,23 @@ fn replay_recovery_bindings_classify_and_admit() {
         assert_eq!(refused["action"], json!("refuse"));
         assert_eq!(refused["retained"], json!(false));
 
+        let merge_base = {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "current_hex": "6c6f63616c",
+                    "previous_hex": "62617365",
+                    "base_hex": "62617365",
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_decide_replay_byte_divergence(py, request).unwrap();
+            py_to_json_value(result.bind(py)).unwrap()
+        };
+        assert_eq!(merge_base["action"], json!("keep_current"));
+
         let merge = {
             let request = json_value_to_py(
                 py,

@@ -60,6 +60,31 @@ pub fn decide_replay_byte_divergence(
     require_schema(request.schema_version)?;
     let current = decode_hex(&request.current_hex, "current_hex")?;
     let previous = decode_hex(&request.previous_hex, "previous_hex")?;
+    let base = request
+        .base_hex
+        .as_deref()
+        .map(|value| decode_hex(value, "base_hex"))
+        .transpose()?;
+    if let Some(base) = base {
+        if previous == base {
+            return Ok(ReplayByteDivergenceResponseWire {
+                schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+                action: REPLAY_BYTES_KEEP_CURRENT.to_string(),
+                retained: true,
+                reason: "the previous bytes match the merge base, so the current change is retained"
+                    .to_string(),
+            });
+        }
+        if current == base {
+            return Ok(ReplayByteDivergenceResponseWire {
+                schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+                action: REPLAY_BYTES_KEEP_PREVIOUS.to_string(),
+                retained: true,
+                reason: "the current bytes match the merge base, so the previous change is retained"
+                    .to_string(),
+            });
+        }
+    }
     if current == previous {
         return Ok(ReplayByteDivergenceResponseWire {
             schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
@@ -361,6 +386,7 @@ mod tests {
                 schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
                 current_hex: hex_of(b"hello world"),
                 previous_hex: hex_of(b"hello"),
+                base_hex: None,
             })
             .unwrap();
         assert_eq!(keep_current.action, REPLAY_BYTES_KEEP_CURRENT);
@@ -371,6 +397,7 @@ mod tests {
                 schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
                 current_hex: hex_of(b"hello"),
                 previous_hex: hex_of(b"hello world"),
+                base_hex: None,
             })
             .unwrap();
         assert_eq!(keep_previous.action, REPLAY_BYTES_KEEP_PREVIOUS);
@@ -384,6 +411,44 @@ mod tests {
                 schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
                 current_hex: hex_of(b"aaaaaaaaaa"),
                 previous_hex: hex_of(b"bbbb"),
+                base_hex: None,
+            })
+            .unwrap();
+        assert_eq!(decision.action, REPLAY_BYTES_REFUSE);
+        assert!(!decision.retained);
+    }
+
+    #[test]
+    fn merge_base_keeps_the_side_changed_since_base() {
+        let local_change =
+            decide_replay_byte_divergence(&ReplayByteDivergenceRequestWire {
+                schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+                current_hex: hex_of(b"local\r\nchange"),
+                previous_hex: hex_of(b"base\r\n"),
+                base_hex: Some(hex_of(b"base\r\n")),
+            })
+            .unwrap();
+        assert_eq!(local_change.action, REPLAY_BYTES_KEEP_CURRENT);
+
+        let upstream_change =
+            decide_replay_byte_divergence(&ReplayByteDivergenceRequestWire {
+                schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+                current_hex: hex_of(b"base\r\n"),
+                previous_hex: hex_of(b"upstream\r\nchange"),
+                base_hex: Some(hex_of(b"base\r\n")),
+            })
+            .unwrap();
+        assert_eq!(upstream_change.action, REPLAY_BYTES_KEEP_PREVIOUS);
+    }
+
+    #[test]
+    fn merge_base_still_refuses_two_sided_non_prefix_changes() {
+        let decision =
+            decide_replay_byte_divergence(&ReplayByteDivergenceRequestWire {
+                schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+                current_hex: hex_of(b"local changed"),
+                previous_hex: hex_of(b"upstream changed"),
+                base_hex: Some(hex_of(b"base")),
             })
             .unwrap();
         assert_eq!(decision.action, REPLAY_BYTES_REFUSE);
