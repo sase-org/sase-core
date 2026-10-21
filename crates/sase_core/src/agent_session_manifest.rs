@@ -17,6 +17,10 @@ pub const SESSION_MANIFEST_CLASS_SUPPORTED_LEGACY: &str = "supported_legacy";
 pub const SESSION_MANIFEST_CLASS_SLIM: &str = "slim";
 pub const SESSION_MANIFEST_CLASS_INVALID: &str = "invalid";
 
+pub const SESSION_MANIFEST_REPAIR_NORMALIZE_SLIM: &str = "normalize_slim";
+pub const SESSION_MANIFEST_REPAIR_KEEP: &str = "keep";
+pub const SESSION_MANIFEST_REPAIR_SKIP: &str = "skip";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionManifestContainerWire {
     pub kind: String,
@@ -50,6 +54,16 @@ pub struct SessionManifestClassifyResponseWire {
     pub canonical_files: Vec<String>,
     pub legacy_files: Vec<String>,
     pub classification: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionManifestRepairResponseWire {
+    pub schema_version: u32,
+    pub action: String,
+    pub classification: String,
+    pub run_count: usize,
+    pub agent_session_count: usize,
     pub reason: String,
 }
 
@@ -169,6 +183,52 @@ pub fn classify_session_manifest_files(
         legacy,
         "explicit files match neither the current nor the supported legacy set",
     ))
+}
+
+/// Decide whether an owner-manifest entry can be normalized to the supported
+/// slim representation after the caller verifies the snapshot and payloads.
+/// Safe, sorted explicit lists that disagree with the snapshot are redundant
+/// metadata and may be dropped. Structurally unsafe lists must be left intact
+/// for diagnosis instead of being silently repaired.
+pub fn repair_session_manifest_entry(
+    request: &SessionManifestClassifyRequestWire,
+) -> Result<SessionManifestRepairResponseWire, SessionManifestError> {
+    let classification = classify_session_manifest_files(request)?;
+    let explicit_list_is_safe = request
+        .explicit_files
+        .as_ref()
+        .map(|files| {
+            is_sorted_unique(files)
+                && files.iter().all(|path| is_safe_relative_path(path))
+        })
+        .unwrap_or(true);
+    let action = match classification.classification.as_str() {
+        SESSION_MANIFEST_CLASS_SLIM | SESSION_MANIFEST_CLASS_INVALID
+            if explicit_list_is_safe =>
+        {
+            SESSION_MANIFEST_REPAIR_NORMALIZE_SLIM
+        }
+        SESSION_MANIFEST_CLASS_CURRENT
+        | SESSION_MANIFEST_CLASS_SUPPORTED_LEGACY => {
+            SESSION_MANIFEST_REPAIR_KEEP
+        }
+        _ => SESSION_MANIFEST_REPAIR_SKIP,
+    };
+    let snapshot = &request.snapshot;
+    Ok(SessionManifestRepairResponseWire {
+        schema_version: SESSION_MANIFEST_WIRE_SCHEMA_VERSION,
+        action: action.to_string(),
+        classification: classification.classification,
+        run_count: snapshot.run_global_names.len(),
+        agent_session_count: snapshot
+            .containers
+            .iter()
+            .filter(|container| {
+                container.kind == "session" || container.kind == "family"
+            })
+            .count(),
+        reason: classification.reason,
+    })
 }
 
 fn invalid_response(
@@ -418,5 +478,44 @@ mod tests {
         let mut bad_snapshot = request(None);
         bad_snapshot.snapshot = snap;
         assert!(classify_session_manifest_files(&bad_snapshot).is_err());
+    }
+
+    #[test]
+    fn repair_normalizes_safe_stale_lists_and_derives_snapshot_counts() {
+        let (canonical, _) =
+            canonical_session_manifest_files(&snapshot()).unwrap();
+        let mut stale = canonical;
+        stale.push("agents/alice.athena.foo.retired/README.md".to_string());
+        stale.sort();
+        let response =
+            repair_session_manifest_entry(&request(Some(stale))).unwrap();
+        assert_eq!(response.action, SESSION_MANIFEST_REPAIR_NORMALIZE_SLIM);
+        assert_eq!(response.classification, SESSION_MANIFEST_CLASS_INVALID);
+        assert_eq!(response.run_count, 1);
+        assert_eq!(response.agent_session_count, 1);
+    }
+
+    #[test]
+    fn repair_keeps_current_and_supported_legacy_lists() {
+        let (canonical, legacy) =
+            canonical_session_manifest_files(&snapshot()).unwrap();
+        for files in [canonical, legacy] {
+            let response =
+                repair_session_manifest_entry(&request(Some(files))).unwrap();
+            assert_eq!(response.action, SESSION_MANIFEST_REPAIR_KEEP);
+        }
+    }
+
+    #[test]
+    fn repair_skips_unsafe_or_ambiguous_lists() {
+        let (canonical, _) =
+            canonical_session_manifest_files(&snapshot()).unwrap();
+        let mut unsorted = canonical.clone();
+        unsorted.reverse();
+        for files in [unsorted, vec!["../escape".to_string()]] {
+            let response =
+                repair_session_manifest_entry(&request(Some(files))).unwrap();
+            assert_eq!(response.action, SESSION_MANIFEST_REPAIR_SKIP);
+        }
     }
 }

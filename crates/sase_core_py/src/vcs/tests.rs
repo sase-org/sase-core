@@ -346,6 +346,43 @@ fn session_manifest_binding_classifies_current_legacy_and_slim() {
 }
 
 #[test]
+fn session_manifest_repair_binding_round_trips_policy_and_counts() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let snapshot = json!({
+            "owner_username": "alice",
+            "owner_machine": "athena",
+            "local_hood": "foo",
+            "run_global_names": ["alice.athena.foo.bar"],
+            "run_file_paths": ["agents/alice.athena.foo.bar/meta.json"],
+            "containers": [
+                {"kind": "session", "global_name": "alice.athena.foo.bar.baz"}
+            ],
+        });
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "snapshot": snapshot,
+                "explicit_files": [
+                    "agents/alice.athena.foo.bar/README.md",
+                    "agents/alice.athena.foo.retired/README.md",
+                ],
+            }),
+        )
+        .unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_repair_session_manifest_entry(py, request).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["action"], json!("normalize_slim"));
+        assert_eq!(value["classification"], json!("invalid"));
+        assert_eq!(value["run_count"], json!(1));
+        assert_eq!(value["agent_session_count"], json!(1));
+        assert_eq!(value["schema_version"], json!(1));
+    });
+}
+
+#[test]
 fn publication_recovery_bindings_select_and_complete() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

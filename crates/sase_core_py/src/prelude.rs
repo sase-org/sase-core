@@ -224,6 +224,7 @@ pub(crate) use sase_core::agent_session::{
 };
 pub(crate) use sase_core::agent_session_manifest::{
     classify_session_manifest_files as core_classify_session_manifest_files,
+    repair_session_manifest_entry as core_repair_session_manifest_entry,
     SessionManifestClassifyRequestWire, SESSION_MANIFEST_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::agent_stats::{

@@ -546,6 +546,26 @@ fn py_classify_session_manifest_files<'py>(
     serialize_to_py(py, &result)
 }
 
+/// Decide whether a verified owner-manifest candidate can become a slim entry.
+#[pyfunction]
+#[pyo3(name = "repair_session_manifest_entry")]
+fn py_repair_session_manifest_entry<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: SessionManifestClassifyRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid SessionManifestClassifyRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_repair_session_manifest_entry(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
 // --- vcs_log parser + aggregator bindings --------------------------------
 /// Serialize a `VcsCommitWire` into a `PyDict` mirroring the Python
 /// `VcsCommitWire` dataclass JSON shape.
@@ -760,6 +780,7 @@ pub(crate) fn register_vcs(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_classify_session_manifest_files, m)?)?;
+    m.add_function(wrap_pyfunction!(py_repair_session_manifest_entry, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_publication_recovery_wire_schema_version,
         m

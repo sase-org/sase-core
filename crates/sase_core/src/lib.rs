@@ -423,11 +423,13 @@ pub use agent_session::{
 };
 pub use agent_session_manifest::{
     canonical_session_manifest_files, classify_session_manifest_files,
-    SessionManifestClassifyRequestWire, SessionManifestClassifyResponseWire,
-    SessionManifestContainerWire, SessionManifestError,
+    repair_session_manifest_entry, SessionManifestClassifyRequestWire,
+    SessionManifestClassifyResponseWire, SessionManifestContainerWire,
+    SessionManifestError, SessionManifestRepairResponseWire,
     SessionManifestSnapshotWire, SESSION_MANIFEST_CLASS_CURRENT,
     SESSION_MANIFEST_CLASS_INVALID, SESSION_MANIFEST_CLASS_SLIM,
-    SESSION_MANIFEST_CLASS_SUPPORTED_LEGACY,
+    SESSION_MANIFEST_CLASS_SUPPORTED_LEGACY, SESSION_MANIFEST_REPAIR_KEEP,
+    SESSION_MANIFEST_REPAIR_NORMALIZE_SLIM, SESSION_MANIFEST_REPAIR_SKIP,
     SESSION_MANIFEST_WIRE_SCHEMA_VERSION,
 };
 /// Legacy Rust alias retained for compatibility with older stats callers.
