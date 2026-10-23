@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.2](https://github.com/sase-org/sase-core/compare/v0.42.1...v0.42.2) - 2026-10-23
+
+### Added
+
+- *(sudo)* fit oversized ledgers to the settlement JSON budget
+- *(replay)* accept merge-base bytes in recovery policy
+- *(vcs)* add stale-replay conflict and preservation policy
+- *(vcs)* expose verified manifest repair policy
+- *(publication-recovery)* add failure accounting and bounded drain selection
+- *(artifact-links)* add partial projection receipts
+- *(continuation)* refuse unsatisfiable and repeated conditional completion seals
+- *(release_steward)* add typed release decision policy
+
+### Fixed
+
+- *(managed-tmp)* repair 0555 trees and exempt system-service sessions
+- *(managed-tmp)* honor emergency pressure age
+
 ## [0.42.1](https://github.com/sase-org/sase-core/compare/v0.42.0...v0.42.1) - 2026-10-19
 
 ### Added
