@@ -16,7 +16,7 @@ from typing import Any, Callable, Protocol
 PR_FILTER = (
     '[.[] | select(.headRefName | test("^release-plz-[0-9]{4}-[0-9]{2}-[0-9]{2}T'
     '[0-9]{2}-[0-9]{2}-[0-9]{2}Z$")) '
-    '| select(.title | test("^chore: release v[0-9]+\\.[0-9]+\\.[0-9]+$")) '
+    '| select(.title | test("^chore: release v[0-9]+[.][0-9]+[.][0-9]+$")) '
     '| select(.body | contains("generated with [release-plz]"))] | .[0] // empty'
 )
 CHECK_FIELDS = "bucket,state,link,name"

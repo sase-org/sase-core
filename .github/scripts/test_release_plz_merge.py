@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -195,6 +198,57 @@ class ReleasePlzMergeTests(unittest.TestCase):
         self.assertEqual(result.outcome, "CORE_CUT_RED")
         self.assertEqual(github.reruns, [])
         self.assertEqual(github.merges, [])
+
+
+class ReleasePrFilterTests(unittest.TestCase):
+    def test_filter_selects_only_release_plz_pr_with_semver_title(self) -> None:
+        jq = shutil.which("jq")
+        if jq is None:
+            self.skipTest("jq is required to exercise the release PR filter")
+
+        prs = [
+            {
+                "number": 1,
+                "headRefName": "release-plz-2026-10-23T12-34-56Z",
+                "title": "chore: release v0.42.2",
+                "body": "generated with [release-plz]",
+            },
+            {
+                "number": 2,
+                "headRefName": "release-plz-2026-10-23T12-34-56Z",
+                "title": "chore: release v0x42x2",
+                "body": "generated with [release-plz]",
+            },
+            {
+                "number": 3,
+                "headRefName": "feature/unrelated",
+                "title": "chore: release v0.42.2",
+                "body": "generated with [release-plz]",
+            },
+            {
+                "number": 4,
+                "headRefName": "release-plz-2026-10-23T12-34-56Z",
+                "title": "chore: release v0.42.2",
+                "body": "ordinary release notes",
+            },
+        ]
+        result = subprocess.run(
+            [jq, "-c", merge.PR_FILTER],
+            input=json.dumps(prs),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(json.loads(result.stdout), prs[0])
+
+        empty = subprocess.run(
+            [jq, "-c", merge.PR_FILTER],
+            input="[]",
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(empty.stdout, "")
 
 
 if __name__ == "__main__":

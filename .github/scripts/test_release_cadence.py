@@ -156,7 +156,7 @@ class MergeSafetyGuardTests(unittest.TestCase):
         self.assertIn('"--state",\n                "open"', script)
         self.assertIn('"--author",', script)
         self.assertIn("^release-plz-[0-9]{4}-[0-9]{2}-[0-9]{2}T", script)
-        self.assertIn("^chore: release v[0-9]+\\\\.", script)
+        self.assertIn("^chore: release v[0-9]+[.]", script)
         self.assertIn("generated with [release-plz]", script)
         self.assertIn('["pr", "checks", str(pr_number)', script)
         self.assertIn('["run", "rerun", run_id, "--failed"]', script)
