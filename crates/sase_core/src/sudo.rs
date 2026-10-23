@@ -1067,6 +1067,80 @@ pub fn truncate_sudo_output_tail(value: &str, max_bytes: usize) -> String {
     truncate_utf8_tail(value, max_bytes.min(SUDO_MAX_OUTPUT_TAIL_BYTES))
 }
 
+/// Fit a validated sudo ledger so its compact JSON encoding is at most
+/// `max_json_bytes`.
+///
+/// Unchanged when it already fits. Otherwise the algorithm shaves the
+/// longest `output_tail` values (max-min / water-filling on JSON-escaped
+/// length) and prefixes each trimmed tail with an explicit omission marker.
+/// Identity, status, exit code, duration, outcome, and diagnostic fields
+/// never change.
+pub fn fit_sudo_ledger_output(
+    ledger: &SudoLedgerWire,
+    max_json_bytes: usize,
+) -> Result<SudoLedgerWire, SudoWireError> {
+    let ledger = validate_sudo_ledger(ledger, None)?;
+    if sudo_ledger_json_len(&ledger)? <= max_json_bytes {
+        return Ok(ledger);
+    }
+    let mut fitted = ledger.clone();
+    for entry in &mut fitted.entries {
+        entry.output_tail.clear();
+    }
+    let overhead = sudo_ledger_json_len(&fitted)?;
+    if overhead > max_json_bytes {
+        return Err(SudoWireError::validation(
+            "output_tail",
+            format!(
+                "sudo ledger cannot fit within {max_json_bytes} bytes even with empty output tails"
+            ),
+        ));
+    }
+    let budget = max_json_bytes - overhead;
+    let mut escaped_lens = Vec::with_capacity(ledger.entries.len());
+    for entry in &ledger.entries {
+        escaped_lens.push(json_string_escaped_len(&entry.output_tail)?);
+    }
+    let allocations = water_fill_escaped_lens(&escaped_lens, budget);
+    for ((entry, original), (allocation, original_escaped)) in fitted
+        .entries
+        .iter_mut()
+        .zip(&ledger.entries)
+        .zip(std::iter::zip(allocations, escaped_lens))
+    {
+        if allocation >= original_escaped {
+            entry.output_tail.clone_from(&original.output_tail);
+        } else {
+            entry.output_tail =
+                fit_output_tail(&original.output_tail, allocation)?;
+        }
+    }
+    let fitted = validate_sudo_ledger(&fitted, None)?;
+    let fitted_len = sudo_ledger_json_len(&fitted)?;
+    if fitted_len > max_json_bytes {
+        return Err(SudoWireError::validation(
+            "output_tail",
+            format!(
+                "fitted sudo ledger is {fitted_len} bytes; at most {max_json_bytes} are allowed"
+            ),
+        ));
+    }
+    Ok(fitted)
+}
+
+pub fn sudo_fit_ledger_json_value(
+    ledger: &JsonValue,
+    max_json_bytes: usize,
+) -> Result<SudoLedgerWire, SudoWireError> {
+    let ledger: SudoLedgerWire = serde_json::from_value(ledger.clone())
+        .map_err(|error| {
+            SudoWireError::json(format!(
+                "sudo ledger JSON does not match wire contract: {error}"
+            ))
+        })?;
+    fit_sudo_ledger_output(&ledger, max_json_bytes)
+}
+
 fn sudo_liveness_decision(
     classification: SudoExecutorLivenessWire,
     reason: impl Into<String>,
@@ -1664,6 +1738,168 @@ fn truncate_utf8_tail(value: &str, max_bytes: usize) -> String {
         start += 1;
     }
     value[start..].to_string()
+}
+
+const SUDO_OMISSION_MARKER_PREFIX: &str = "[sase sudo: ";
+const SUDO_OMISSION_MARKER_SUFFIX: &str =
+    " earlier bytes omitted to fit the settlement budget]\n";
+
+fn omission_marker(omitted: usize) -> String {
+    format!(
+        "{SUDO_OMISSION_MARKER_PREFIX}{omitted}{SUDO_OMISSION_MARKER_SUFFIX}"
+    )
+}
+
+fn sudo_ledger_json_len(
+    ledger: &SudoLedgerWire,
+) -> Result<usize, SudoWireError> {
+    serde_json::to_vec(ledger)
+        .map(|bytes| bytes.len())
+        .map_err(|error| {
+            SudoWireError::json(format!(
+                "unable to encode sudo ledger: {error}"
+            ))
+        })
+}
+
+fn json_string_escaped_len(value: &str) -> Result<usize, SudoWireError> {
+    let encoded = serde_json::to_vec(value).map_err(|error| {
+        SudoWireError::json(format!(
+            "unable to encode sudo output tail: {error}"
+        ))
+    })?;
+    Ok(encoded.len().saturating_sub(2))
+}
+
+fn water_fill_escaped_lens(sizes: &[usize], budget: usize) -> Vec<usize> {
+    let total: usize = sizes.iter().copied().sum();
+    if total <= budget {
+        return sizes.to_vec();
+    }
+    let mut lo = 0usize;
+    let mut hi = sizes.iter().copied().max().unwrap_or(0);
+    let mut cap = 0usize;
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        let used: usize = sizes.iter().map(|size| (*size).min(mid)).sum();
+        if used <= budget {
+            cap = mid;
+            if mid == usize::MAX {
+                break;
+            }
+            lo = mid + 1;
+        } else if mid == 0 {
+            cap = 0;
+            break;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let mut allocations: Vec<usize> =
+        sizes.iter().map(|size| (*size).min(cap)).collect();
+    let used: usize = allocations.iter().copied().sum();
+    let mut leftover = budget.saturating_sub(used);
+    for (allocation, size) in allocations.iter_mut().zip(sizes.iter().copied())
+    {
+        if leftover == 0 {
+            break;
+        }
+        if *allocation < size {
+            *allocation += 1;
+            leftover -= 1;
+        }
+    }
+    allocations
+}
+
+fn marked_suffix(original: &str, start: usize) -> String {
+    let mut start = start.min(original.len());
+    while start < original.len() && !original.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut fitted = omission_marker(start);
+    fitted.push_str(&original[start..]);
+    fitted
+}
+
+fn marked_suffix_fits(
+    original: &str,
+    start: usize,
+    max_escaped: usize,
+) -> Result<bool, SudoWireError> {
+    let candidate = marked_suffix(original, start);
+    if candidate.len() > SUDO_MAX_OUTPUT_TAIL_BYTES {
+        return Ok(false);
+    }
+    Ok(json_string_escaped_len(&candidate)? <= max_escaped)
+}
+
+fn prev_char_boundary(value: &str, start: usize) -> Option<usize> {
+    if start == 0 {
+        return None;
+    }
+    let mut prev = start - 1;
+    while !value.is_char_boundary(prev) {
+        if prev == 0 {
+            return None;
+        }
+        prev -= 1;
+    }
+    Some(prev)
+}
+
+fn fit_output_tail(
+    original: &str,
+    max_escaped: usize,
+) -> Result<String, SudoWireError> {
+    let original_escaped = json_string_escaped_len(original)?;
+    if original_escaped <= max_escaped
+        && original.len() <= SUDO_MAX_OUTPUT_TAIL_BYTES
+    {
+        return Ok(original.to_string());
+    }
+    if max_escaped == 0 {
+        return Ok(String::new());
+    }
+    let mut best_start: Option<usize> = None;
+    let mut lo = 0usize;
+    let mut hi = original.len();
+    while lo <= hi {
+        let mut mid = lo + (hi - lo) / 2;
+        while mid < original.len() && !original.is_char_boundary(mid) {
+            mid += 1;
+        }
+        if marked_suffix_fits(original, mid, max_escaped)? {
+            best_start = Some(mid);
+            if mid == 0 {
+                break;
+            }
+            hi = mid - 1;
+            while hi > 0 && !original.is_char_boundary(hi) {
+                hi -= 1;
+            }
+        } else if mid >= original.len() {
+            break;
+        } else {
+            lo = mid + 1;
+            while lo < original.len() && !original.is_char_boundary(lo) {
+                lo += 1;
+            }
+        }
+        if lo > hi {
+            break;
+        }
+    }
+    let Some(mut start) = best_start else {
+        return Ok(String::new());
+    };
+    while let Some(prev) = prev_char_boundary(original, start) {
+        if !marked_suffix_fits(original, prev, max_escaped)? {
+            break;
+        }
+        start = prev;
+    }
+    Ok(marked_suffix(original, start))
 }
 
 #[cfg(test)]
@@ -2348,5 +2584,192 @@ mod tests {
     fn output_tail_does_not_split_utf8() {
         let value = "abcéxyz";
         assert_eq!(truncate_sudo_output_tail(value, 5), "éxyz");
+    }
+
+    fn ledger_with_tails(tails: &[&str]) -> SudoLedgerWire {
+        SudoLedgerWire {
+            schema_version: 1,
+            request_id: "req-1".to_string(),
+            manifest_sha256: "a".repeat(64),
+            outcome: SudoLedgerOutcomeWire::Completed,
+            entries: tails
+                .iter()
+                .enumerate()
+                .map(|(index, tail)| SudoLedgerEntryWire {
+                    id: format!("c{index}"),
+                    status: SudoLedgerEntryStatusWire::Ran,
+                    exit_code: Some(0),
+                    duration_seconds: 0.25,
+                    output_tail: (*tail).to_string(),
+                })
+                .collect(),
+            diagnostic: None,
+        }
+    }
+
+    fn assert_identity_fields_unchanged(
+        original: &SudoLedgerWire,
+        fitted: &SudoLedgerWire,
+    ) {
+        assert_eq!(fitted.request_id, original.request_id);
+        assert_eq!(fitted.manifest_sha256, original.manifest_sha256);
+        assert_eq!(fitted.outcome, original.outcome);
+        assert_eq!(fitted.diagnostic, original.diagnostic);
+        assert_eq!(fitted.entries.len(), original.entries.len());
+        for (fitted_entry, original_entry) in
+            fitted.entries.iter().zip(original.entries.iter())
+        {
+            assert_eq!(fitted_entry.id, original_entry.id);
+            assert_eq!(fitted_entry.status, original_entry.status);
+            assert_eq!(fitted_entry.exit_code, original_entry.exit_code);
+            assert_eq!(
+                fitted_entry.duration_seconds,
+                original_entry.duration_seconds
+            );
+        }
+    }
+
+    #[test]
+    fn fit_ledger_is_noop_when_it_already_fits() {
+        let ledger = ledger_with_tails(&["ok", ""]);
+        let size = sudo_ledger_json_len(&ledger).unwrap();
+        let fitted = fit_sudo_ledger_output(&ledger, size).unwrap();
+        assert_eq!(fitted, ledger);
+        let fitted = fit_sudo_ledger_output(&ledger, size + 64).unwrap();
+        assert_eq!(fitted, ledger);
+    }
+
+    #[test]
+    fn fit_ledger_is_idempotent() {
+        let large = "n".repeat(8 * 1024);
+        let ledger = ledger_with_tails(&["small", &large, &large]);
+        let empty = ledger_with_tails(&["", "", ""]);
+        let overhead = sudo_ledger_json_len(&empty).unwrap();
+        let max_json_bytes = overhead + 4 * 1024;
+        let fitted = fit_sudo_ledger_output(&ledger, max_json_bytes).unwrap();
+        assert!(sudo_ledger_json_len(&fitted).unwrap() <= max_json_bytes);
+        let again = fit_sudo_ledger_output(&fitted, max_json_bytes).unwrap();
+        assert_eq!(again, fitted);
+    }
+
+    #[test]
+    fn fit_ledger_water_fill_keeps_small_entries() {
+        let small = "systemctl show --property=Id";
+        let large_a = "A".repeat(12 * 1024);
+        let large_b = "B".repeat(10 * 1024);
+        let large_c = "C".repeat(8 * 1024);
+        let ledger = ledger_with_tails(&[small, &large_a, &large_b, &large_c]);
+        let empty = ledger_with_tails(&["", "", "", ""]);
+        let overhead = sudo_ledger_json_len(&empty).unwrap();
+        let max_json_bytes = overhead + small.len() + 6 * 1024;
+        assert!(sudo_ledger_json_len(&ledger).unwrap() > max_json_bytes);
+        let fitted = fit_sudo_ledger_output(&ledger, max_json_bytes).unwrap();
+        assert_identity_fields_unchanged(&ledger, &fitted);
+        assert_eq!(fitted.entries[0].output_tail, small);
+        for entry in &fitted.entries[1..] {
+            assert!(
+                entry.output_tail.starts_with(SUDO_OMISSION_MARKER_PREFIX),
+                "{}",
+                entry.output_tail
+            );
+            assert!(entry.output_tail.contains(SUDO_OMISSION_MARKER_SUFFIX));
+        }
+        let marker = omission_marker(1);
+        assert!(!marker.to_ascii_lowercase().contains("password="));
+        assert!(!marker.to_ascii_lowercase().contains("token="));
+        assert!(!marker.to_ascii_lowercase().contains("secret="));
+    }
+
+    #[test]
+    fn fit_ledger_marker_reports_omitted_utf8_bytes() {
+        let original =
+            "head-bytes-that-must-go".to_string() + &"z".repeat(2048);
+        let ledger = ledger_with_tails(&[&original]);
+        let empty = ledger_with_tails(&[""]);
+        let overhead = sudo_ledger_json_len(&empty).unwrap();
+        let max_json_bytes = overhead + 256;
+        let fitted = fit_sudo_ledger_output(&ledger, max_json_bytes).unwrap();
+        let tail = &fitted.entries[0].output_tail;
+        let suffix = tail
+            .strip_prefix(SUDO_OMISSION_MARKER_PREFIX)
+            .expect("marker prefix");
+        let (count, rest) = suffix
+            .split_once(SUDO_OMISSION_MARKER_SUFFIX)
+            .expect("marker suffix");
+        let omitted: usize = count.parse().unwrap();
+        assert_eq!(omitted + rest.len(), original.len());
+        assert!(original.ends_with(rest));
+        assert_eq!(&original[omitted..], rest);
+    }
+
+    #[test]
+    fn fit_ledger_respects_multibyte_utf8_and_escape_expansion() {
+        let utf8 = format!("{}{}", "é".repeat(200), "x".repeat(4000));
+        let controls = "\u{0001}".repeat(800);
+        let ledger = ledger_with_tails(&[&utf8, &controls]);
+        let empty = ledger_with_tails(&["", ""]);
+        let overhead = sudo_ledger_json_len(&empty).unwrap();
+        let max_json_bytes = overhead + 1200;
+        let fitted = fit_sudo_ledger_output(&ledger, max_json_bytes).unwrap();
+        assert!(sudo_ledger_json_len(&fitted).unwrap() <= max_json_bytes);
+        validate_sudo_ledger(&fitted, None).unwrap();
+        for entry in &fitted.entries {
+            assert!(entry.output_tail.starts_with(SUDO_OMISSION_MARKER_PREFIX));
+        }
+        let control_tail = &fitted.entries[1].output_tail;
+        let kept = control_tail
+            .rsplit_once(SUDO_OMISSION_MARKER_SUFFIX)
+            .map(|(_, rest)| rest)
+            .unwrap_or("");
+        assert!(kept.chars().all(|ch| ch == '\u{0001}'));
+        assert!(json_string_escaped_len(kept).unwrap() > kept.len());
+    }
+
+    #[test]
+    fn fit_ledger_is_deterministic() {
+        let ledger =
+            ledger_with_tails(&[&"p".repeat(3000), &"q".repeat(3000), "tiny"]);
+        let empty = ledger_with_tails(&["", "", ""]);
+        let overhead = sudo_ledger_json_len(&empty).unwrap();
+        let max_json_bytes = overhead + 1800;
+        let first = fit_sudo_ledger_output(&ledger, max_json_bytes).unwrap();
+        let second = fit_sudo_ledger_output(&ledger, max_json_bytes).unwrap();
+        assert_eq!(first, second);
+        let via_json = sudo_fit_ledger_json_value(
+            &serde_json::to_value(&ledger).unwrap(),
+            max_json_bytes,
+        )
+        .unwrap();
+        assert_eq!(via_json, first);
+    }
+
+    #[test]
+    fn fit_ledger_rejects_impossible_budget() {
+        let ledger = ledger_with_tails(&["ok"]);
+        let error = fit_sudo_ledger_output(&ledger, 8).unwrap_err();
+        assert_eq!(error.code, SudoErrorCodeWire::Validation);
+        assert!(error.message.contains("empty output tails"));
+        let invalid = json!({"not": "a ledger"});
+        assert!(sudo_fit_ledger_json_value(&invalid, 1024).is_err());
+    }
+
+    #[test]
+    fn fit_ledger_result_validates_and_fits() {
+        let ledger = ledger_with_tails(&[
+            &"n".repeat(26_900),
+            &"i".repeat(16_900),
+            &"6".repeat(14_600),
+            &"s".repeat(6_500),
+            &"u".repeat(375),
+            "",
+        ]);
+        let max_json_bytes = 48 * 1024;
+        assert!(sudo_ledger_json_len(&ledger).unwrap() > max_json_bytes);
+        let fitted = fit_sudo_ledger_output(&ledger, max_json_bytes).unwrap();
+        validate_sudo_ledger(&fitted, None).unwrap();
+        assert!(sudo_ledger_json_len(&fitted).unwrap() <= max_json_bytes);
+        assert_eq!(fitted.entries[4].output_tail, "u".repeat(375));
+        assert_eq!(fitted.entries[5].output_tail, "");
+        assert_identity_fields_unchanged(&ledger, &fitted);
     }
 }

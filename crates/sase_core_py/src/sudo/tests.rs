@@ -219,6 +219,53 @@ fn sudo_bindings_validate_manifest_risk_ledger_and_help() {
 }
 
 #[test]
+fn sudo_fit_ledger_binding_trims_oversize_tails() {
+    use serde_json::json;
+
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let large = "N".repeat(8 * 1024);
+        let ledger = json!({
+            "schema_version": 1,
+            "request_id": "sudo-fit",
+            "manifest_sha256": "a".repeat(64),
+            "outcome": "completed",
+            "entries": [
+                {
+                    "id": "small",
+                    "status": "ran",
+                    "exit_code": 0,
+                    "duration_seconds": 0.0,
+                    "output_tail": "ok"
+                },
+                {
+                    "id": "large",
+                    "status": "ran",
+                    "exit_code": 0,
+                    "duration_seconds": 0.0,
+                    "output_tail": large
+                }
+            ],
+            "diagnostic": null
+        });
+        let ledger_obj = json_value_to_py(py, &ledger).unwrap().into_bound(py);
+        let ledger_dict = ledger_obj.downcast::<PyDict>().unwrap();
+        let original_len = serde_json::to_vec(&ledger).unwrap().len();
+        let max_json_bytes = original_len / 2;
+        let fitted =
+            py_sudo_fit_ledger(py, ledger_dict, max_json_bytes).unwrap();
+        let fitted = py_to_json_value(fitted.bind(py)).unwrap();
+        assert_eq!(fitted["entries"][0]["output_tail"], json!("ok"));
+        let large_tail = fitted["entries"][1]["output_tail"].as_str().unwrap();
+        assert!(large_tail.starts_with("[sase sudo: "));
+        assert!(serde_json::to_vec(&fitted).unwrap().len() <= max_json_bytes);
+
+        let error = py_sudo_fit_ledger(py, ledger_dict, 8).unwrap_err();
+        assert!(error.to_string().contains("empty output tails"));
+    });
+}
+
+#[test]
 fn python_hosted_sudo_runner_launcher_uses_isolated_module_execution() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

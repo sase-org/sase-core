@@ -85,6 +85,22 @@ fn py_sudo_validate_ledger<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "sudo_fit_ledger", signature = (ledger, max_json_bytes))]
+fn py_sudo_fit_ledger<'py>(
+    py: Python<'py>,
+    ledger: &Bound<'py, PyDict>,
+    max_json_bytes: usize,
+) -> PyResult<PyObject> {
+    let ledger = py_to_json_value(ledger.as_any())?;
+    let fitted = py
+        .allow_threads(|| {
+            sase_core::sudo_fit_ledger_json_value(&ledger, max_json_bytes)
+        })
+        .map_err(sudo_error_to_pyerr)?;
+    sudo_wire_to_py(py, &fitted)
+}
+
+#[pyfunction]
 #[pyo3(name = "sudo_validate_handshake", signature = (handshake, manifest=None))]
 fn py_sudo_validate_handshake<'py>(
     py: Python<'py>,
@@ -189,6 +205,7 @@ pub(crate) fn register_sudo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_sudo_manifest_sha256, m)?)?;
     m.add_function(wrap_pyfunction!(py_sudo_derive_risk_badges, m)?)?;
     m.add_function(wrap_pyfunction!(py_sudo_validate_ledger, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sudo_fit_ledger, m)?)?;
     m.add_function(wrap_pyfunction!(py_sudo_validate_handshake, m)?)?;
     m.add_function(wrap_pyfunction!(py_sudo_classify_attempt_liveness, m)?)?;
     m.add_function(wrap_pyfunction!(py_sudo_authorize_settlement, m)?)?;

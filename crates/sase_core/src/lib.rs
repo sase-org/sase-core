@@ -1592,8 +1592,9 @@ pub use status::{
 };
 pub use sudo::{
     authorize_sudo_settlement_json_value, classify_sudo_executor_liveness,
-    derive_sudo_risk_badges, sudo_attempt_from_json_value,
-    sudo_exec_started_from_json_value, sudo_ledger_from_json_value,
+    derive_sudo_risk_badges, fit_sudo_ledger_output,
+    sudo_attempt_from_json_value, sudo_exec_started_from_json_value,
+    sudo_fit_ledger_json_value, sudo_ledger_from_json_value,
     sudo_manifest_canonical_json_bytes, sudo_manifest_from_json_slice,
     sudo_manifest_from_json_value, sudo_manifest_json_sha256,
     sudo_manifest_sha256, sudo_validate_exec_started_json_value,
