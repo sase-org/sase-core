@@ -142,6 +142,7 @@ pub mod snippet_variables;
 pub mod source_language;
 pub mod status;
 mod store_lock;
+pub mod stranded_work;
 pub mod sudo;
 pub mod suffix;
 pub mod task_type;

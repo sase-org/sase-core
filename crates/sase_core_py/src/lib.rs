@@ -62,6 +62,7 @@ mod prose_diff;
 mod provider_policy;
 mod query;
 mod release_steward;
+mod stranded_work;
 mod sudo;
 mod telemetry;
 mod vcs;
@@ -111,6 +112,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     provider_policy::register_provider_policy(m)?;
     axe::register_axe(m)?;
     wait_epic_follow::register_wait_epic_follow(m)?;
+    stranded_work::register_stranded_work(m)?;
     agent_holds::register_agent_holds(m)?;
     goals::register_goals(m)?;
     fleet::register_fleet(m)?;
