@@ -8,7 +8,7 @@ use super::wire::{
     PublicationRunObservationWire, PROMPT_STATUS_ALREADY_ARCHIVED,
     PROMPT_STATUS_FAILED, PROMPT_STATUS_NOT_APPLICABLE, PROMPT_STATUS_RESTORED,
     PROMPT_STATUS_UNAVAILABLE, PUBLICATION_KIND_RUN, PUBLICATION_KIND_SESSION,
-    PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+    PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION, PUBLICATION_SCOPE_LINKED,
 };
 
 const MEMBER_SEPARATOR: &str = "--";
@@ -43,6 +43,16 @@ pub fn decide_publication_request_completion(
             required_page,
             fulfilled: false,
             reason: "required publication page is absent".to_string(),
+        });
+    }
+    if is_linked_scope(&request.request.scope) {
+        return Ok(PublicationCompletionResponseWire {
+            schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+            kind: kind.to_string(),
+            required_page,
+            fulfilled: true,
+            reason: "required page exists for a linked-scope request"
+                .to_string(),
         });
     }
     if revision_associated(
@@ -185,6 +195,10 @@ fn revision_associated(
         (run.global_name == global_agent || run.local_name == local_agent)
             && sha_in(primary_revision, &run.commit_shas)
     })
+}
+
+fn is_linked_scope(scope: &str) -> bool {
+    scope == PUBLICATION_SCOPE_LINKED
 }
 
 fn sha_in(requested: &str, observed: &[String]) -> bool {

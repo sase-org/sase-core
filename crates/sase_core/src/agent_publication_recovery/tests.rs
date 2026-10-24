@@ -726,6 +726,7 @@ fn completion_requires_session_page_and_revision_not_an_unrelated_readme() {
             global_agent: "alice.athena.foo.bar".to_string(),
             local_agent: "foo.bar".to_string(),
             primary_revision: revision.clone(),
+            scope: String::new(),
         },
         pages: vec![
             PublicationPageObservationWire {
@@ -764,6 +765,7 @@ fn completion_rejects_preexisting_run_page_without_revision() {
             global_agent: "alice.athena.foo".to_string(),
             local_agent: "foo".to_string(),
             primary_revision: sha('a'),
+            scope: String::new(),
         },
         pages: vec![PublicationPageObservationWire {
             path: "agents/alice.athena.foo/README.md".to_string(),
@@ -792,6 +794,7 @@ fn historical_member_spelling_requires_the_run_page() {
             global_agent: "alice.athena.foo--code".to_string(),
             local_agent: "foo--code".to_string(),
             primary_revision: revision.clone(),
+            scope: String::new(),
         },
         pages: vec![
             PublicationPageObservationWire {
@@ -823,6 +826,68 @@ fn historical_member_spelling_requires_the_run_page() {
         "agents/alice.athena.foo--code/README.md"
     );
     assert!(decision.fulfilled);
+}
+
+#[test]
+fn omitted_scope_deserializes_as_revision_bound() {
+    let identity: PublicationRequestIdentityWire =
+        serde_json::from_value(serde_json::json!({
+            "global_agent": "alice.athena.foo",
+            "local_agent": "foo",
+            "primary_revision": sha('a'),
+        }))
+        .unwrap();
+    assert!(identity.scope.is_empty());
+}
+
+#[test]
+fn linked_scope_fulfills_when_the_required_page_exists_without_revision() {
+    let request = PublicationCompletionRequestWire {
+        schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+        request: PublicationRequestIdentityWire {
+            global_agent: "alice.athena.foo".to_string(),
+            local_agent: "foo".to_string(),
+            primary_revision: sha('a'),
+            scope: PUBLICATION_SCOPE_LINKED.to_string(),
+        },
+        pages: vec![PublicationPageObservationWire {
+            path: "agents/alice.athena.foo/README.md".to_string(),
+            exists: true,
+        }],
+        runs: vec![PublicationRunObservationWire {
+            global_name: "alice.athena.foo".to_string(),
+            local_name: "foo".to_string(),
+            commit_shas: vec![sha('b')],
+            has_prompt_file: false,
+        }],
+        containers: vec![],
+    };
+    let decision = decide_publication_request_completion(&request).unwrap();
+    assert_eq!(decision.kind, PUBLICATION_KIND_RUN);
+    assert!(decision.fulfilled);
+    assert!(decision.reason.contains("linked-scope"));
+}
+
+#[test]
+fn linked_scope_still_requires_the_publication_page() {
+    let request = PublicationCompletionRequestWire {
+        schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+        request: PublicationRequestIdentityWire {
+            global_agent: "alice.athena.foo".to_string(),
+            local_agent: "foo".to_string(),
+            primary_revision: sha('a'),
+            scope: PUBLICATION_SCOPE_LINKED.to_string(),
+        },
+        pages: vec![PublicationPageObservationWire {
+            path: "agents/alice.athena.foo/README.md".to_string(),
+            exists: false,
+        }],
+        runs: vec![],
+        containers: vec![],
+    };
+    let decision = decide_publication_request_completion(&request).unwrap();
+    assert!(!decision.fulfilled);
+    assert!(decision.reason.contains("absent"));
 }
 
 #[test]

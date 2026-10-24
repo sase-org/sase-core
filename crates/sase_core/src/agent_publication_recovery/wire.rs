@@ -8,6 +8,9 @@ pub const PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const PUBLICATION_KIND_RUN: &str = "run";
 pub const PUBLICATION_KIND_SESSION: &str = "session";
 
+pub const PUBLICATION_SCOPE_REVISION: &str = "revision";
+pub const PUBLICATION_SCOPE_LINKED: &str = "linked";
+
 pub const PROMPT_STATUS_RESTORED: &str = "restored";
 pub const PROMPT_STATUS_ALREADY_ARCHIVED: &str = "already_archived";
 pub const PROMPT_STATUS_NOT_APPLICABLE: &str = "not_applicable";
@@ -192,6 +195,11 @@ pub struct PublicationRequestIdentityWire {
     pub global_agent: String,
     pub local_agent: String,
     pub primary_revision: String,
+    /// Fulfillment scope. Empty or `"revision"` keeps today's exact SHA match.
+    /// `"linked"` fulfills when the required page exists, with no revision
+    /// association: linked-repo commits never appear in run `commit_shas`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scope: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

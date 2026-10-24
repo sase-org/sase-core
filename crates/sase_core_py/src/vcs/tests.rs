@@ -649,6 +649,41 @@ fn publication_recovery_bindings_select_and_complete() {
         let value = py_to_json_value(result.bind(py)).unwrap();
         assert_eq!(value["fulfilled"], json!(true));
         assert_eq!(value["kind"], json!("run"));
+
+        let linked = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "request": {
+                    "global_agent": "alice.athena.foo",
+                    "local_agent": "foo",
+                    "primary_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "scope": "linked"
+                },
+                "pages": [{
+                    "path": "agents/alice.athena.foo/README.md",
+                    "exists": true
+                }],
+                "runs": [{
+                    "global_name": "alice.athena.foo",
+                    "local_name": "foo",
+                    "commit_shas": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+                    "has_prompt_file": false
+                }],
+                "containers": []
+            }),
+        )
+        .unwrap();
+        let linked = linked.bind(py).downcast::<PyDict>().unwrap();
+        let linked_result =
+            py_decide_publication_request_completion(py, linked).unwrap();
+        let linked_value = py_to_json_value(linked_result.bind(py)).unwrap();
+        assert_eq!(linked_value["fulfilled"], json!(true));
+        assert_eq!(linked_value["kind"], json!("run"));
+        assert!(linked_value["reason"]
+            .as_str()
+            .unwrap()
+            .contains("linked-scope"));
     });
 }
 
