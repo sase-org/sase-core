@@ -249,6 +249,48 @@ pub struct PublicationCompletionResponseWire {
     pub reason: String,
 }
 
+pub const STALE_REPAIR_ACTION_UNCHANGED: &str = "unchanged";
+pub const STALE_REPAIR_ACTION_LINKED: &str = "linked";
+pub const STALE_REPAIR_ACTION_REPAIRED: &str = "repaired";
+pub const STALE_REPAIR_ACTION_UNRESOLVED: &str = "unresolved";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StalePublicationRepairRequestWire {
+    pub schema_version: u32,
+    pub requested_revision: String,
+    /// Fulfillment scope of the row under repair. Empty or `"revision"` keeps
+    /// revision-bound matching; `"linked"` already fulfills without revision
+    /// association, so the row classifies as unchanged.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scope: String,
+    /// Recorded run commit SHAs for the row's agent, earliest first.
+    #[serde(default)]
+    pub run_commit_shas: Vec<String>,
+    /// Subset of `run_commit_shas` the requested revision is an ancestor of.
+    /// Gathered by the host with `git merge-base --is-ancestor`; the core
+    /// only matches entries exactly so ordering stays the host's decision.
+    #[serde(default)]
+    pub ancestor_commit_shas: Vec<String>,
+    /// Whether the requested revision resolves to a linked-repo commit.
+    #[serde(default)]
+    pub linked_revision: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StalePublicationRepairResponseWire {
+    pub schema_version: u32,
+    pub action: String,
+    /// Present only for `repaired`: the earliest recorded run commit that
+    /// descends from the requested revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fulfilling_revision: Option<String>,
+    /// Present only for `repaired`: the descendant commit that proves the
+    /// ancestry claim. Today it always equals `fulfilling_revision`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_commit: Option<String>,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeferredPromptClassifyRequestWire {
     pub schema_version: u32,

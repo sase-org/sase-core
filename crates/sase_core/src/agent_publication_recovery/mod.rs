@@ -13,6 +13,7 @@ mod classify;
 mod complete;
 mod replay;
 mod select;
+mod stale;
 mod support;
 pub mod wire;
 
@@ -31,6 +32,7 @@ pub use replay::{
     decide_replay_byte_divergence, decide_replay_hood_merge,
 };
 pub use select::{select_publication_drain, select_publication_retries};
+pub use stale::classify_stale_publication_request;
 pub use wire::{
     DeferredPromptClassifyRequestWire, DeferredPromptClassifyResponseWire,
     PublicationCompletionRequestWire, PublicationCompletionResponseWire,
@@ -48,7 +50,8 @@ pub use wire::{
     ReplayByteDivergenceRequestWire, ReplayByteDivergenceResponseWire,
     ReplayHoodMergeRequestWire, ReplayHoodMergeResponseWire,
     ReplayPathClassWire, ReplayPathClassifyRequestWire,
-    ReplayPathClassifyResponseWire, PROMPT_STATUS_ALREADY_ARCHIVED,
+    ReplayPathClassifyResponseWire, StalePublicationRepairRequestWire,
+    StalePublicationRepairResponseWire, PROMPT_STATUS_ALREADY_ARCHIVED,
     PROMPT_STATUS_FAILED, PROMPT_STATUS_NOT_APPLICABLE, PROMPT_STATUS_RESTORED,
     PROMPT_STATUS_UNAVAILABLE, PUBLICATION_ERROR_INDEX_LOCK,
     PUBLICATION_ERROR_LOCK_BUSY, PUBLICATION_ERROR_MANIFEST_MISMATCH,
@@ -65,5 +68,7 @@ pub use wire::{
     REPLAY_BYTES_KEEP_CURRENT, REPLAY_BYTES_KEEP_PREVIOUS, REPLAY_BYTES_REFUSE,
     REPLAY_HOOD_ACTION_MERGE, REPLAY_HOOD_ACTION_REFUSE,
     REPLAY_PATH_ARCHIVE_OBJECT, REPLAY_PATH_BROWSING,
-    REPLAY_PATH_OWNER_CONTENT, REPLAY_PATH_UNKNOWN,
+    REPLAY_PATH_OWNER_CONTENT, REPLAY_PATH_UNKNOWN, STALE_REPAIR_ACTION_LINKED,
+    STALE_REPAIR_ACTION_REPAIRED, STALE_REPAIR_ACTION_UNCHANGED,
+    STALE_REPAIR_ACTION_UNRESOLVED,
 };

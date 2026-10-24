@@ -501,6 +501,26 @@ fn py_decide_publication_request_completion<'py>(
     serialize_to_py(py, &result)
 }
 
+/// Classify one stale publication revision for report-first outbox repair.
+#[pyfunction]
+#[pyo3(name = "classify_stale_publication_request")]
+fn py_classify_stale_publication_request<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: StalePublicationRepairRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid StalePublicationRepairRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    let result = core_classify_stale_publication_request(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
 /// Classify one deferred prompt as restored, archived, n/a, unavailable, or failed.
 #[pyfunction]
 #[pyo3(name = "classify_deferred_prompt_obligation")]
@@ -878,6 +898,10 @@ pub(crate) fn register_vcs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         py_classify_deferred_prompt_obligation,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_classify_stale_publication_request,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_classify_replay_paths, m)?)?;

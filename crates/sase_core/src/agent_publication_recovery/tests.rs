@@ -937,3 +937,114 @@ fn existing_archive_or_snapshot_without_prompt_file_are_not_losses() {
     assert_eq!(not_applicable.status, PROMPT_STATUS_NOT_APPLICABLE);
     assert!(!not_applicable.blocks_acknowledgment);
 }
+
+fn stale_request(
+    requested: &str,
+    scope: &str,
+    run_commits: &[String],
+    ancestors: &[String],
+    linked: bool,
+) -> StalePublicationRepairRequestWire {
+    StalePublicationRepairRequestWire {
+        schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+        requested_revision: requested.to_string(),
+        scope: scope.to_string(),
+        run_commit_shas: run_commits.to_vec(),
+        ancestor_commit_shas: ancestors.to_vec(),
+        linked_revision: linked,
+    }
+}
+
+#[test]
+fn stale_repair_keeps_rows_whose_revision_is_already_recorded() {
+    let decision = classify_stale_publication_request(&stale_request(
+        &sha('a'),
+        "revision",
+        &[sha('b'), sha('a')],
+        &[],
+        false,
+    ))
+    .unwrap();
+    assert_eq!(decision.action, STALE_REPAIR_ACTION_UNCHANGED);
+    assert_eq!(decision.fulfilling_revision, None);
+}
+
+#[test]
+fn stale_repair_keeps_linked_scope_rows_without_evidence() {
+    let decision = classify_stale_publication_request(&stale_request(
+        &sha('c'),
+        "linked",
+        &[],
+        &[],
+        false,
+    ))
+    .unwrap();
+    assert_eq!(decision.action, STALE_REPAIR_ACTION_UNCHANGED);
+}
+
+#[test]
+fn stale_repair_routes_linked_repo_revisions_to_linked_scope() {
+    let decision = classify_stale_publication_request(&stale_request(
+        &sha('c'),
+        "revision",
+        &[sha('a')],
+        &[],
+        true,
+    ))
+    .unwrap();
+    assert_eq!(decision.action, STALE_REPAIR_ACTION_LINKED);
+    assert_eq!(decision.fulfilling_revision, None);
+}
+
+#[test]
+fn stale_repair_selects_the_earliest_descendant_run_commit() {
+    let commits = vec![sha('x'), sha('b'), sha('y')];
+    let ancestors = vec![sha('y'), sha('b')];
+    let decision = classify_stale_publication_request(&stale_request(
+        &sha('a'),
+        "",
+        &commits,
+        &ancestors,
+        false,
+    ))
+    .unwrap();
+    assert_eq!(decision.action, STALE_REPAIR_ACTION_REPAIRED);
+    assert_eq!(decision.fulfilling_revision, Some(sha('b')));
+    assert_eq!(decision.evidence_commit, Some(sha('b')));
+}
+
+#[test]
+fn stale_repair_leaves_rows_without_evidence_untouched() {
+    let without_runs = classify_stale_publication_request(&stale_request(
+        &sha('a'),
+        "revision",
+        &[],
+        &[],
+        false,
+    ))
+    .unwrap();
+    assert_eq!(without_runs.action, STALE_REPAIR_ACTION_UNRESOLVED);
+    assert_eq!(without_runs.fulfilling_revision, None);
+
+    let without_ancestry = classify_stale_publication_request(&stale_request(
+        &sha('a'),
+        "revision",
+        &[sha('b')],
+        &[],
+        false,
+    ))
+    .unwrap();
+    assert_eq!(without_ancestry.action, STALE_REPAIR_ACTION_UNRESOLVED);
+}
+
+#[test]
+fn stale_repair_rejects_unknown_scopes() {
+    let result = classify_stale_publication_request(&stale_request(
+        &sha('a'),
+        "sidecar",
+        &[sha('a')],
+        &[],
+        false,
+    ));
+    assert!(result.is_err());
+}
