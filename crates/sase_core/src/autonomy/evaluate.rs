@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use super::profiles::required_option_ids;
+use super::profiles::{autonomy_effective_record, required_option_ids};
 use super::wires::{
     AutonomyDecisionWire, AutonomyEvaluateRequestWire, AutonomyRecordWire,
 };
@@ -58,6 +58,8 @@ pub fn evaluate(
     record: &AutonomyRecordWire,
     request: &AutonomyEvaluateRequestWire,
 ) -> AutonomyDecisionWire {
+    let effective = autonomy_effective_record(record);
+    let record = &effective;
     let key = match POLICY_KEYS
         .iter()
         .find(|(kind, _)| *kind == request.gate_kind.as_str())

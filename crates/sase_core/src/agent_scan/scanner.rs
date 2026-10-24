@@ -1602,6 +1602,7 @@ fn autonomy_record_from_value(
         Value::Object(obj.clone()),
     )
     .ok()
+    .map(|record| crate::autonomy::autonomy_effective_record(&record))
 }
 
 /// Fold the flat `monitor_*` / `gate_*` marker keys into one
@@ -3213,6 +3214,25 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn scanner_refreshes_stale_builtin_autonomy_policy() {
+        let mut record = crate::autonomy::resolve_autonomy_selection(
+            Some(""),
+            "prompt",
+            &crate::autonomy::AutonomyActorWire::default(),
+            "2026-10-09",
+        )
+        .unwrap();
+        record.policy.gates.question = Some("first".to_string());
+        record.digest = crate::autonomy::policy_digest(&record.policy);
+        let meta = meta_with_autonomy(serde_json::to_value(&record).unwrap());
+        assert_eq!(
+            meta.autonomy,
+            Some(crate::autonomy::autonomy_effective_record(&record))
+        );
+        assert!(meta.approve);
     }
 
     #[test]

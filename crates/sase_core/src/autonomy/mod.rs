@@ -24,7 +24,8 @@ pub use legacy::{
 };
 pub use mutate::{autonomy_inherit, mutate_autonomy};
 pub use profiles::{
-    builtin_profiles, policy_digest, profile_policy, required_option_ids,
+    autonomy_effective_record, builtin_profiles, policy_digest, profile_policy,
+    required_option_ids,
 };
 pub use resolve::{
     resolve_autonomy_selection, valid_actor_kinds, valid_sources, AutonomyError,

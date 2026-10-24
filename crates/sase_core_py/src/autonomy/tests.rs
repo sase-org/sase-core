@@ -144,7 +144,7 @@ fn autonomy_summary_and_sentence_bindings() {
         assert_eq!(summary["class"], json!("attended"));
         assert_eq!(
             summary["short"],
-            json!("tales ✓ · epics ✋ · questions first")
+            json!("tales ✓ · epics ✋ · questions ✋")
         );
         assert_eq!(
             summary["coverage"],
@@ -316,5 +316,35 @@ fn autonomy_decision_log_bindings_round_trip() {
             py_autonomy_read_decisions(py, home.into(), filtered.as_any()),
         );
         assert_eq!(none.as_array().unwrap().len(), 0);
+    });
+}
+
+#[test]
+fn autonomy_effective_record_binding_round_trip_and_registration() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "autonomy_test").unwrap();
+        register_autonomy(&module).unwrap();
+        let mut record = sase_core::autonomy::resolve_autonomy_selection(
+            Some(""),
+            "prompt",
+            &sase_core::autonomy::AutonomyActorWire::default(),
+            "2026-10-09",
+        )
+        .unwrap();
+        record.policy.gates.question = Some("first".to_string());
+        record.digest = sase_core::autonomy::policy_digest(&record.policy);
+        let expected = sase_core::autonomy::autonomy_effective_record(&record);
+        let arg = py_dict(py, &serde_json::to_value(&record).unwrap());
+        let result = module
+            .getattr("autonomy_effective_record")
+            .unwrap()
+            .call1((arg,))
+            .unwrap();
+        assert_eq!(
+            py_to_json_value(&result).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(expected.policy.gates.question.as_deref(), Some("ask"));
     });
 }

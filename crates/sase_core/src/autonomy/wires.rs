@@ -28,7 +28,7 @@ pub const AUTONOMY_VALUE_ASK: &str = "ask";
 pub const AUTONOMY_VALUE_APPROVE_ARCHIVE: &str = "approve_archive";
 /// Approve an epic plan and launch its clan.
 pub const AUTONOMY_VALUE_APPROVE: &str = "approve";
-/// Take the first question option.
+/// Take the first question option (explicit non-built-in policies only).
 pub const AUTONOMY_VALUE_FIRST: &str = "first";
 
 /// E1 parks on ask; `deny` arrives in E3.
@@ -243,7 +243,7 @@ pub struct AutonomySummaryWire {
     /// One human sentence describing the record.
     #[serde(default)]
     pub sentence: String,
-    /// The one-liner, e.g. `tales ✓ · epics ✓ · questions first`.
+    /// The one-liner, e.g. `tales ✓ · epics ✓ · questions ✋`.
     #[serde(default)]
     pub short: String,
     #[serde(default)]

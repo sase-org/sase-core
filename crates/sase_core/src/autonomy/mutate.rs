@@ -6,7 +6,9 @@
 //! always agent-authored, so inheritance narrows under agent semantics
 //! no matter which actor is recorded.
 
-use super::profiles::{policy_digest, profile_policy};
+use super::profiles::{
+    autonomy_effective_record, policy_digest, profile_policy,
+};
 use super::resolve::{valid_actor_kinds, AutonomyError};
 use super::wires::{
     AutonomyInheritResultWire, AutonomyLastWire, AutonomyMutateRequestWire,
@@ -179,6 +181,8 @@ pub fn mutate_autonomy(
     record: &AutonomyRecordWire,
     request: &AutonomyMutateRequestWire,
 ) -> Result<AutonomyMutateResultWire, AutonomyError> {
+    let effective = autonomy_effective_record(record);
+    let record = &effective;
     check_actor_kind(&request.actor.kind)?;
     if let Some(expected) = request.expected_revision {
         if expected != record.revision {
@@ -262,6 +266,7 @@ pub fn autonomy_inherit(
     actor: &super::wires::AutonomyActorWire,
     now: &str,
 ) -> Result<AutonomyInheritResultWire, AutonomyError> {
+    let predecessor = autonomy_effective_record(predecessor);
     check_actor_kind(&actor.kind)?;
     let base = AutonomyRecordWire {
         source: AUTONOMY_SOURCE_INHERITED.to_string(),

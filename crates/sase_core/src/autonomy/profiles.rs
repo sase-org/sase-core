@@ -2,14 +2,15 @@
 //!
 //! The four profiles are fixed core code, not configuration: a remote E1
 //! host resolves a dispatched prompt's `%auto` to the identical record.
-//! Config profiles arrive in E3.
+//! Every built-in profile waits for human answers to questions. Stored
+//! built-in policies are refreshed from core; config profiles arrive in E3.
 
 use sha2::{Digest, Sha256};
 
 use super::wires::{
-    AutonomyGatesWire, AutonomyPolicyWire, AUTONOMY_ON_ASK_PARK,
-    AUTONOMY_PROFILE_EPIC, AUTONOMY_PROFILE_MANUAL, AUTONOMY_PROFILE_STANDARD,
-    AUTONOMY_PROFILE_TALE, AUTONOMY_VALUE_APPROVE,
+    AutonomyGatesWire, AutonomyPolicyWire, AutonomyRecordWire,
+    AUTONOMY_ON_ASK_PARK, AUTONOMY_PROFILE_EPIC, AUTONOMY_PROFILE_MANUAL,
+    AUTONOMY_PROFILE_STANDARD, AUTONOMY_PROFILE_TALE, AUTONOMY_VALUE_APPROVE,
     AUTONOMY_VALUE_APPROVE_ARCHIVE, AUTONOMY_VALUE_ASK, AUTONOMY_VALUE_FIRST,
 };
 
@@ -25,23 +26,23 @@ pub fn required_option_ids(value: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-/// The policy block for one built-in profile name.
+/// The policy block for one built-in profile name. All questions wait.
 pub fn profile_policy(profile: &str) -> AutonomyPolicyWire {
     let gates = match profile {
         AUTONOMY_PROFILE_STANDARD => AutonomyGatesWire {
             plan: Some(AUTONOMY_VALUE_APPROVE_ARCHIVE.to_string()),
             epic: Some(AUTONOMY_VALUE_APPROVE.to_string()),
-            question: Some(AUTONOMY_VALUE_FIRST.to_string()),
+            question: Some(AUTONOMY_VALUE_ASK.to_string()),
         },
         AUTONOMY_PROFILE_TALE => AutonomyGatesWire {
             plan: Some(AUTONOMY_VALUE_APPROVE_ARCHIVE.to_string()),
             epic: Some(AUTONOMY_VALUE_ASK.to_string()),
-            question: Some(AUTONOMY_VALUE_FIRST.to_string()),
+            question: Some(AUTONOMY_VALUE_ASK.to_string()),
         },
         AUTONOMY_PROFILE_EPIC => AutonomyGatesWire {
             plan: Some(AUTONOMY_VALUE_ASK.to_string()),
             epic: Some(AUTONOMY_VALUE_APPROVE.to_string()),
-            question: Some(AUTONOMY_VALUE_FIRST.to_string()),
+            question: Some(AUTONOMY_VALUE_ASK.to_string()),
         },
         _ => AutonomyGatesWire {
             plan: Some(AUTONOMY_VALUE_ASK.to_string()),
@@ -53,6 +54,23 @@ pub fn profile_policy(profile: &str) -> AutonomyPolicyWire {
         gates,
         on_ask: AUTONOMY_ON_ASK_PARK.to_string(),
     }
+}
+
+/// Built-in profile policies are core code; a stored policy for a built-in
+/// profile is a cache refreshed on every read. Refresh only the policy and
+/// digest, preserving revision and all provenance: this is not a mutation.
+/// Unknown profiles and records with overrides retain their explicit policy.
+pub fn autonomy_effective_record(
+    record: &AutonomyRecordWire,
+) -> AutonomyRecordWire {
+    let mut effective = record.clone();
+    if builtin_profiles().contains(&record.profile.as_str())
+        && record.overrides.is_empty()
+    {
+        effective.policy = profile_policy(&record.profile);
+        effective.digest = policy_digest(&effective.policy);
+    }
+    effective
 }
 
 /// The four reserved E1 profile names.

@@ -5,7 +5,7 @@
 //! catalog, and (through the bindings) `sase autonomy show` and
 //! `sase agent show`.
 
-use super::profiles::profile_policy;
+use super::profiles::{autonomy_effective_record, profile_policy};
 use super::wires::{
     AutonomyPolicyWire, AutonomyProfileWire, AutonomyRecordWire,
     AutonomySummaryCellWire, AutonomySummaryWire, AUTONOMY_PROFILE_EPIC,
@@ -107,6 +107,8 @@ pub fn summary_cell(
 /// automatic, `unattended` when `on_ask` denies, `manual` for the
 /// `manual` profile, else `attended`.
 pub fn summary_class(record: &AutonomyRecordWire) -> &'static str {
+    let effective = autonomy_effective_record(record);
+    let record = &effective;
     if record.policy.on_ask == "deny" {
         return AUTONOMY_CLASS_UNATTENDED;
     }
@@ -134,7 +136,7 @@ fn short_token(kind: &str, value: Option<&str>) -> String {
 }
 
 /// The one-liner for a policy, e.g.
-/// `tales ✓ · epics ✓ · questions first`.
+/// `tales ✓ · epics ✓ · questions ✋`.
 pub fn summary_short(policy: &AutonomyPolicyWire) -> String {
     format!(
         "tales {} · epics {} · questions {}",
@@ -167,6 +169,8 @@ fn profile_display(profile: &str) -> &str {
 
 /// One human sentence describing a record.
 pub fn summary_sentence(record: &AutonomyRecordWire) -> String {
+    let effective = autonomy_effective_record(record);
+    let record = &effective;
     if record.profile == AUTONOMY_PROFILE_MANUAL {
         return "Manual: every plan, epic, and question waits for you."
             .to_string();
@@ -182,6 +186,8 @@ pub fn summary_sentence(record: &AutonomyRecordWire) -> String {
 
 /// Human-facing summary of one autonomy record.
 pub fn autonomy_summary(record: &AutonomyRecordWire) -> AutonomySummaryWire {
+    let effective = autonomy_effective_record(record);
+    let record = &effective;
     let cells = POLICY_KINDS
         .iter()
         .map(|kind| summary_cell(&record.policy, kind))

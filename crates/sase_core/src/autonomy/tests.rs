@@ -7,7 +7,9 @@ use super::evaluate::{evaluate, fleet_auto_approved};
 use super::legacy::{
     autonomy_legacy_projection, autonomy_record_from_legacy_meta,
 };
-use super::profiles::{policy_digest, profile_policy};
+use super::profiles::{
+    autonomy_effective_record, policy_digest, profile_policy,
+};
 use super::resolve::{resolve_autonomy_selection, AutonomyError};
 use super::wires::{
     AutonomyActorWire, AutonomyEvaluateRequestWire, AutonomyGatesWire,
@@ -131,25 +133,25 @@ fn compat_rows_give_contract_outcomes() {
             Some(""),
             ("auto", Some("approve_archive")),
             ("auto", Some("approve")),
-            ("auto", Some("first")),
+            ("ask", None),
         ),
         (
             Some("tale"),
             ("auto", Some("approve_archive")),
             ("ask", None),
-            ("auto", Some("first")),
+            ("ask", None),
         ),
         (
             Some("plan"),
             ("auto", Some("approve_archive")),
             ("ask", None),
-            ("auto", Some("first")),
+            ("ask", None),
         ),
         (
             Some("epic"),
             ("ask", None),
             ("auto", Some("approve")),
-            ("auto", Some("first")),
+            ("ask", None),
         ),
     ];
     for (selection, tale, epic, question) in rows {
@@ -179,7 +181,7 @@ fn approve_archive_carries_both_option_ids_in_canonical_order() {
     assert_eq!(decision.option_ids, vec!["approve", "commit"]);
     let epic = decide(Some(""), "epic_plan");
     assert_eq!(epic.option_ids, vec!["approve"]);
-    let question = decide(Some(""), "question");
+    let question = evaluate(&question_fixture(), &full_request("question"));
     assert_eq!(question.option_ids, vec!["submit"]);
 }
 
@@ -212,6 +214,7 @@ fn privileged_and_unknown_kinds_always_ask() {
 #[test]
 fn unmentioned_value_asks() {
     let mut record = resolve(Some(""));
+    record.profile = "custom_fixture".to_string();
     record.policy.gates.epic = None;
     let decision = evaluate(&record, &full_request("epic_plan"));
     assert_eq!(decision.outcome, "ask");
@@ -479,7 +482,7 @@ fn digest_golden_is_stable() {
     // Pinned so a silent canonicalization change fails loudly.
     assert_eq!(
         policy_digest(&profile_policy("standard")),
-        "7b415224b791b582b6cf614e869382d1cffb507432c5c1c0905834402dcbcfb7"
+        "09252de51a9ee3378edeeed6bbb3acd92907877760429010a508d26e004f77cf"
     );
     assert_eq!(
         policy_digest(&profile_policy("manual")),
@@ -559,16 +562,16 @@ fn summary_covers_every_profile() {
     // (selection, class, short)
     for (selection, class, short) in [
         (None, "manual", "tales ✋ · epics ✋ · questions ✋"),
-        (Some(""), "autopilot", "tales ✓ · epics ✓ · questions first"),
+        (Some(""), "attended", "tales ✓ · epics ✓ · questions ✋"),
         (
             Some("tale"),
             "attended",
-            "tales ✓ · epics ✋ · questions first",
+            "tales ✓ · epics ✋ · questions ✋",
         ),
         (
             Some("epic"),
             "attended",
-            "tales ✋ · epics ✓ · questions first",
+            "tales ✋ · epics ✓ · questions ✋",
         ),
     ] {
         let summary = autonomy_summary(&resolve(selection));
@@ -600,7 +603,7 @@ fn summary_covers_every_profile() {
         "Tales: approve + archive, then implement"
     );
     assert_eq!(standard.cells[1].effect, "Epics: archive + launch workers");
-    assert_eq!(standard.cells[2].effect, "Questions: take the first option");
+    assert_eq!(standard.cells[2].effect, "Waits for you");
     // Sentences are stable snapshots.
     assert_eq!(
         autonomy_summary(&resolve(None)).sentence,
@@ -608,18 +611,15 @@ fn summary_covers_every_profile() {
     );
     assert_eq!(
         standard.sentence,
-        "Standard: tales approve + archive; epics launch; questions take \
-         the first option."
+        "Standard: tales approve + archive; epics launch; questions wait."
     );
     assert_eq!(
         autonomy_summary(&resolve(Some("tale"))).sentence,
-        "Tale: tales approve + archive; epic plans wait; questions take \
-         the first option."
+        "Tale: tales approve + archive; epic plans wait; questions wait."
     );
     assert_eq!(
         autonomy_summary(&resolve(Some("epic"))).sentence,
-        "Epic: tale plans wait; epics launch; questions take the first \
-         option."
+        "Epic: tale plans wait; epics launch; questions wait."
     );
     // The catalog mirrors the summary builders.
     let catalog = autonomy_profiles();
@@ -672,10 +672,10 @@ fn decision_sentences_render_both_examples() {
     };
     assert_eq!(
         autonomy_decision_sentence(
-            &decide(Some("epic"), "question"),
+            &evaluate(&question_fixture(), &full_request("question")),
             &question
         ),
-        "✓ question answered with the first option · epic · gates.question"
+        "✓ question answered with the first option · question_fixture · gates.question"
     );
     assert_eq!(
         autonomy_decision_sentence(&decide(None, "question"), &question),
@@ -917,4 +917,110 @@ fn decision_log_round_trips_filters_and_rotates() {
             .expect("read");
     assert!(rotated.iter().any(|item| item.agent == "c"));
     assert!(rotated.iter().any(|item| item.agent == "a"));
+}
+
+fn stale_standard() -> AutonomyRecordWire {
+    let mut record = resolve(Some(""));
+    record.policy.gates.question = Some("first".to_string());
+    record.digest = policy_digest(&record.policy);
+    record.revision = 7;
+    record.inherited_from = Some("pre-upgrade".to_string());
+    record
+}
+
+fn question_fixture() -> AutonomyRecordWire {
+    let mut record = stale_standard();
+    record.profile = "question_fixture".to_string();
+    record
+}
+
+#[test]
+fn stale_builtin_refresh_preserves_identity_and_plan_outcomes() {
+    let record = stale_standard();
+    let effective = autonomy_effective_record(&record);
+    let mut expected = record.clone();
+    expected.policy = profile_policy("standard");
+    expected.digest = policy_digest(&expected.policy);
+    assert_eq!(effective, expected);
+    assert_ne!(effective.digest, record.digest);
+    let question = evaluate(&record, &full_request("question"));
+    assert_eq!(question.outcome, "ask");
+    assert_eq!(question.rule, "gates.question");
+    assert_eq!(question.digest, expected.digest);
+    assert_eq!(question.revision, record.revision);
+    assert_eq!(
+        evaluate(&record, &full_request("plan")).value.as_deref(),
+        Some("approve_archive")
+    );
+    assert_eq!(
+        evaluate(&record, &full_request("epic_plan"))
+            .value
+            .as_deref(),
+        Some("approve")
+    );
+    assert_eq!(super::summary_class(&record), "attended");
+    assert_eq!(
+        super::summary_sentence(&record),
+        "Standard: tales approve + archive; epics launch; questions wait."
+    );
+    assert_eq!(
+        super::autonomy_summary(&record),
+        super::autonomy_summary(&effective)
+    );
+}
+
+#[test]
+fn explicit_profile_and_overrides_keep_their_policy() {
+    let custom = question_fixture();
+    let mut overridden = stale_standard();
+    overridden
+        .overrides
+        .insert("question".to_string(), json!("first"));
+    for record in [custom, overridden] {
+        assert_eq!(autonomy_effective_record(&record), record);
+        let decision = evaluate(&record, &full_request("question"));
+        assert_eq!(decision.outcome, "auto");
+        assert_eq!(decision.option_ids, vec!["submit"]);
+        assert_eq!(
+            super::autonomy_summary(&record).cells[2].effect,
+            super::AUTONOMY_EFFECT_QUESTION_AUTO
+        );
+    }
+}
+
+#[test]
+fn stale_builtin_inheritance_and_mutation_use_effective_policy() {
+    let record = stale_standard();
+    let inherited =
+        super::autonomy_inherit(&record, "predecessor", None, &actor(), "")
+            .unwrap();
+    assert_eq!(inherited.record.policy, profile_policy("standard"));
+    assert_eq!(
+        inherited.record.digest,
+        policy_digest(&inherited.record.policy)
+    );
+    assert_eq!(inherited.record.revision, record.revision);
+    let mutation = |record: &AutonomyRecordWire, selection: &str| {
+        super::mutate_autonomy(
+            record,
+            &super::AutonomyMutateRequestWire {
+                selection: selection.to_string(),
+                expected_revision: Some(record.revision),
+                actor: actor(),
+                now: "2026-10-24".to_string(),
+            },
+        )
+        .unwrap()
+    };
+    let unchanged = mutation(&record, "");
+    assert_eq!(unchanged.status, "unchanged");
+    assert_eq!(unchanged.record, autonomy_effective_record(&record));
+    let off = mutation(&record, "manual");
+    let restored = mutation(&off.record, "restore");
+    assert_eq!(restored.record.policy, profile_policy("standard"));
+    assert_eq!(
+        restored.record.digest,
+        policy_digest(&restored.record.policy)
+    );
+    assert_eq!(restored.record.revision, record.revision + 2);
 }

@@ -175,6 +175,18 @@ fn py_autonomy_wire_schema_version() -> u32 {
     sase_core::autonomy::AUTONOMY_WIRE_SCHEMA_VERSION
 }
 
+/// Refresh a stored built-in policy while preserving record provenance.
+#[pyfunction]
+#[pyo3(name = "autonomy_effective_record")]
+fn py_autonomy_effective_record<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyAny>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(record)?;
+    let parsed = parse_record(&value)?;
+    to_py(py, &sase_core::autonomy::autonomy_effective_record(&parsed))
+}
+
 /// Human-facing summary of one autonomy record: profile, class,
 /// sentence, one-liner, per-kind cells, coverage, and revision.
 #[pyfunction]
@@ -342,6 +354,7 @@ pub(crate) fn register_autonomy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_autonomy_evaluate, m)?)?;
     m.add_function(wrap_pyfunction!(py_autonomy_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_autonomy_summary, m)?)?;
+    m.add_function(wrap_pyfunction!(py_autonomy_effective_record, m)?)?;
     m.add_function(wrap_pyfunction!(py_autonomy_decision_sentence, m)?)?;
     m.add_function(wrap_pyfunction!(py_autonomy_mutate, m)?)?;
     m.add_function(wrap_pyfunction!(py_autonomy_inherit, m)?)?;
