@@ -24,7 +24,7 @@ use crate::project_stats::wire::{
 
 use super::FacetContext;
 
-const PLANS_CACHE_SCHEMA_VERSION: u32 = 2;
+const PLANS_CACHE_SCHEMA_VERSION: u32 = 3;
 const MAX_PLAN_COMMITS: usize = 500_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,17 +121,26 @@ pub(crate) fn measure(context: &FacetContext<'_>) -> PlanMeasurement {
             "plan store plans_dir is not a safe git pathspec",
         );
     }
-    let (records, mut issues, truncated) =
-        load_records(context, store, &resolved, plans_dir);
-    if truncated {
-        issues.push(ProjectStatsIssueWire {
-            project: Some(context.project.key.clone()),
-            repo: Some(spec.name.clone()),
-            code: "plans_truncated".to_owned(),
-            message: "plan-store history walk exceeded its budget".to_owned(),
-            hint: None,
-        });
-    }
+    let (records, issues) =
+        match load_records(context, store, &resolved, plans_dir) {
+            LoadRecords::Failed { message, repo } => {
+                return unavailable_at(context, &repo, &message);
+            }
+            LoadRecords::Ready { records, truncated } => {
+                let mut issues = Vec::new();
+                if truncated {
+                    issues.push(ProjectStatsIssueWire {
+                        project: Some(context.project.key.clone()),
+                        repo: Some(spec.name.clone()),
+                        code: "plans_truncated".to_owned(),
+                        message: "plan-store history walk exceeded its budget"
+                            .to_owned(),
+                        hint: None,
+                    });
+                }
+                (records, issues)
+            }
+        };
     let in_range: Vec<&CachedPlanRecord> = records
         .iter()
         .filter(|record| {
@@ -216,12 +225,23 @@ pub(crate) fn combine(parts: &[PlanMeasurement]) -> Option<PlanMeasurement> {
     })
 }
 
+enum LoadRecords {
+    Ready {
+        records: Vec<CachedPlanRecord>,
+        truncated: bool,
+    },
+    Failed {
+        message: String,
+        repo: String,
+    },
+}
+
 fn load_records(
     context: &FacetContext<'_>,
     store: &ProjectStatsPlanStoreWire,
     resolved: &ResolvedRepo,
     plans_dir: &str,
-) -> (Vec<CachedPlanRecord>, Vec<ProjectStatsIssueWire>, bool) {
+) -> LoadRecords {
     let key = plans_cache_key(store, resolved, plans_dir);
     let cache_path = (!context.request.cache_dir.is_empty())
         .then(|| cache::kind_path(&context.request.cache_dir, "plans", &key));
@@ -231,7 +251,10 @@ fn load_records(
                 && entry.key == key
                 && entry.tip == resolved.tip
             {
-                return (entry.records, Vec::new(), false);
+                return LoadRecords::Ready {
+                    records: entry.records,
+                    truncated: false,
+                };
             }
         }
     }
@@ -247,26 +270,27 @@ fn load_records(
     ) {
         Ok(index) => index,
         Err(error) => {
-            return (
-                Vec::new(),
-                vec![ProjectStatsIssueWire {
-                    project: Some(context.project.key.clone()),
-                    repo: Some(resolved.canonical_path.clone()),
-                    code: "plans_unavailable".to_owned(),
-                    message: error.to_string(),
-                    hint: None,
-                }],
-                false,
-            );
+            return LoadRecords::Failed {
+                message: error.to_string(),
+                repo: resolved.canonical_path.clone(),
+            };
         }
     };
     let truncated = index.health.truncated;
-    let records = records_from_index(
+    let records = match records_from_index(
         Path::new(&resolved.canonical_path),
         &index,
         plans_dir,
         &context.request.budget,
-    );
+    ) {
+        Ok(records) => records,
+        Err(error) => {
+            return LoadRecords::Failed {
+                message: error,
+                repo: resolved.canonical_path.clone(),
+            };
+        }
+    };
     if let Some(path) = cache_path.as_deref() {
         if !truncated {
             cache::persist_json(
@@ -280,7 +304,7 @@ fn load_records(
             );
         }
     }
-    (records, Vec::new(), truncated)
+    LoadRecords::Ready { records, truncated }
 }
 
 fn records_from_index(
@@ -288,7 +312,7 @@ fn records_from_index(
     index: &FileHistoryIndexWire,
     plans_dir: &str,
     budget: &crate::project_stats::wire::ProjectStatsBudgetWire,
-) -> Vec<CachedPlanRecord> {
+) -> Result<Vec<CachedPlanRecord>, String> {
     let mut wanted: Vec<(&FileLineageWire, String, i64)> = Vec::new();
     for lineage in &index.lineages {
         if !is_plan_path(&lineage.current_path, plans_dir)
@@ -316,7 +340,7 @@ fn records_from_index(
     }
     let oids: Vec<String> =
         wanted.iter().map(|(_, oid, _)| oid.clone()).collect();
-    let blobs = git::read_blobs(repo, &oids, budget).unwrap_or_default();
+    let blobs = git::read_blobs(repo, &oids, budget)?;
     let mut records = Vec::new();
     for ((lineage, _, first_add_ts), blob) in wanted.into_iter().zip(blobs) {
         let Some(bytes) = blob else {
@@ -332,7 +356,7 @@ fn records_from_index(
         };
         records.push(record);
     }
-    records
+    Ok(records)
 }
 
 fn record_from_blob(
@@ -449,6 +473,23 @@ fn unavailable(
     code: &str,
     message: &str,
 ) -> PlanMeasurement {
+    unavailable_issue(context, None, code, message)
+}
+
+fn unavailable_at(
+    context: &FacetContext<'_>,
+    repo: &str,
+    message: &str,
+) -> PlanMeasurement {
+    unavailable_issue(context, Some(repo), "plans_unavailable", message)
+}
+
+fn unavailable_issue(
+    context: &FacetContext<'_>,
+    repo: Option<&str>,
+    code: &str,
+    message: &str,
+) -> PlanMeasurement {
     PlanMeasurement {
         counts: ProjectStatsPlanCountsWire::default(),
         attributions: Vec::new(),
@@ -459,6 +500,7 @@ fn unavailable(
         },
         issues: vec![ProjectStatsIssueWire {
             project: Some(context.project.key.clone()),
+            repo: repo.map(ToOwned::to_owned),
             code: code.to_owned(),
             message: message.to_owned(),
             ..ProjectStatsIssueWire::default()
@@ -532,5 +574,154 @@ fn plan_coverage(attributions: &[PlanAttribution]) -> ProjectStatsCoverageWire {
                 count,
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::Path;
+
+    use super::*;
+    use crate::file_history::{build_index, FileHistoryBudgetWire};
+    use crate::project_stats::directory::Directory;
+    use crate::project_stats::test_support::{
+        commit, init_repo, plan_markdown, spec,
+    };
+    use crate::project_stats::wire::{
+        ProjectStatsBudgetWire, ProjectStatsFacetWire,
+        ProjectStatsPlanStorageWire, ProjectStatsProjectSpecWire,
+        ProjectStatsProjectStateWire, ProjectStatsRequestWire,
+        ProjectStatsSelectionWire, PROJECT_STATS_WIRE_SCHEMA_VERSION,
+    };
+    use crate::project_stats::FacetContext;
+
+    fn sidecar_store(repo: &Path) -> ProjectStatsPlanStoreWire {
+        ProjectStatsPlanStoreWire {
+            storage: ProjectStatsPlanStorageWire::SidecarRepos,
+            repo_path: Some(repo.to_string_lossy().into_owned()),
+            plans_dir: ".".to_owned(),
+            project_filter: None,
+        }
+    }
+
+    fn project(
+        key: &str,
+        repo: &Path,
+        store: ProjectStatsPlanStoreWire,
+    ) -> ProjectStatsProjectSpecWire {
+        let mut spec = spec(repo);
+        spec.id = format!("{key}-code");
+        spec.name = key.to_owned();
+        ProjectStatsProjectSpecWire {
+            key: key.to_owned(),
+            label: format!("Project {key}"),
+            state: ProjectStatsProjectStateWire::Enabled,
+            selection: ProjectStatsSelectionWire::Always,
+            index_project_names: Vec::new(),
+            code_repos: vec![spec],
+            record_repos: Vec::new(),
+            not_counted: Vec::new(),
+            plan_store: store,
+        }
+    }
+
+    fn request(
+        projects: Vec<ProjectStatsProjectSpecWire>,
+        cache_dir: &str,
+    ) -> ProjectStatsRequestWire {
+        ProjectStatsRequestWire {
+            schema_version: PROJECT_STATS_WIRE_SCHEMA_VERSION,
+            start_ts: 0,
+            end_ts: 4_000_000_000,
+            now_ts: 4_000_000_000,
+            timezone: "America/New_York".to_owned(),
+            facets: vec![ProjectStatsFacetWire::Output],
+            cache_dir: cache_dir.to_owned(),
+            run_index_path: None,
+            agents_sidecars: Vec::new(),
+            local_agent_name_prefix: String::new(),
+            known_model_aliases: BTreeMap::new(),
+            record_repo_names: Vec::new(),
+            include_run_only_projects: false,
+            budget: ProjectStatsBudgetWire::default(),
+            projects,
+        }
+    }
+
+    #[test]
+    fn blob_read_failure_is_an_error_not_an_empty_list() {
+        let fixture = init_repo();
+        commit(
+            &fixture.repo,
+            "202610/plan.md",
+            &plan_markdown("tale", Some("openai/gpt"), None, None),
+            "add plan",
+        );
+        let index = build_index(
+            &fixture.repo,
+            &[".".to_owned()],
+            &FileHistoryBudgetWire::default(),
+        )
+        .expect("index");
+        let empty = tempfile::tempdir().unwrap();
+        let error = records_from_index(
+            empty.path(),
+            &index,
+            ".",
+            &ProjectStatsBudgetWire::default(),
+        )
+        .expect_err("cat-file cannot run outside a git repository");
+        assert!(!error.is_empty());
+    }
+
+    #[test]
+    fn build_index_failure_is_unmeasured_and_not_cached() {
+        let cache = tempfile::tempdir().unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        let store = sidecar_store(empty.path());
+        let project = project("alpha", empty.path(), store.clone());
+        let request =
+            request(vec![project.clone()], &cache.path().to_string_lossy());
+        let directory = Directory::default();
+        let context = FacetContext {
+            request: &request,
+            project: &project,
+            directory: &directory,
+            repos: &[],
+        };
+        let resolved = ResolvedRepo {
+            canonical_path: empty.path().to_string_lossy().into_owned(),
+            common_dir: empty.path().to_string_lossy().into_owned(),
+            identity: "test".to_owned(),
+            ref_name: "HEAD".to_owned(),
+            tip: "a".repeat(40),
+            shallow: false,
+            fetched_at: None,
+        };
+        let loaded = load_records(&context, &store, &resolved, ".");
+        let LoadRecords::Failed { message, repo } = loaded else {
+            panic!("expected a failed load, got a ready result");
+        };
+        assert!(!message.is_empty());
+        assert_eq!(repo, resolved.canonical_path);
+
+        let measurement = unavailable_at(&context, &repo, &message);
+        assert!(!measurement.measured);
+        assert_eq!(measurement.counts.plans_committed, None);
+        assert_eq!(measurement.counts.plans_epic, None);
+        assert_eq!(measurement.counts.plans_tale, None);
+        assert_eq!(measurement.coverage.unavailable_repos, 1);
+        assert_eq!(measurement.issues.len(), 1);
+        assert_eq!(measurement.issues[0].code, "plans_unavailable");
+        assert_eq!(measurement.issues[0].repo.as_deref(), Some(repo.as_str()));
+
+        let plans_cache = cache.path().join("v1").join("plans");
+        assert!(
+            !plans_cache.exists()
+                || fs::read_dir(&plans_cache).unwrap().next().is_none(),
+            "failed loads must not persist a plans cache"
+        );
     }
 }

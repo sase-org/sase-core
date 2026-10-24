@@ -243,26 +243,94 @@ pub(crate) fn run_unchecked_with_stdin(
     .map_err(|error| error.to_string())
 }
 
-/// Read blob contents for *oids* via `cat-file --batch`, feeding stdin
-/// on a dedicated thread so large batches cannot deadlock.
+/// Bytes `cat-file --batch` prefixes each object with, including
+/// SHA-256 OIDs and the trailing newline. Shared with the snapshot
+/// reader.
+pub(crate) const CAT_FILE_HEADER_OVERHEAD: u64 = 96;
+const MAX_BATCH_OIDS: usize = 65_536;
+const BATCH_CHECK_LINE_BUDGET: u64 = 128;
+
+/// Pack blobs so each `cat-file --batch` stdout stays at or under
+/// `max_output_bytes` and holds at most `max_oids_per_batch` objects.
+/// A blob whose own framed cost exceeds the budget is an error; callers
+/// that skip oversize blobs must filter first. Snapshot keeps its
+/// 256-OID cap and oversize-is-error behavior via this helper.
+pub(crate) fn pack_blob_batches(
+    wanted: &[(String, u64)],
+    max_output_bytes: u64,
+    max_oids_per_batch: usize,
+) -> Result<Vec<Vec<(String, u64)>>, String> {
+    let max_oids_per_batch = max_oids_per_batch.max(1);
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    let mut used = 0u64;
+    for (oid, size) in wanted {
+        let cost = size.saturating_add(CAT_FILE_HEADER_OVERHEAD);
+        if cost > max_output_bytes {
+            return Err(format!(
+                "blob {oid} plus framing exceeds the output budget"
+            ));
+        }
+        let would_overflow = !current.is_empty()
+            && (used.saturating_add(cost) > max_output_bytes
+                || current.len() >= max_oids_per_batch);
+        if would_overflow {
+            batches.push(std::mem::take(&mut current));
+            used = 0;
+        }
+        current.push((oid.clone(), *size));
+        used = used.saturating_add(cost);
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    Ok(batches)
+}
+
+/// Read blob contents for *oids* via size-probed `cat-file --batch`.
+///
+/// Probe sizes with `cat-file --batch-check` (chunked at 128 bytes per
+/// header so the probe stays under budget), then pack batches by real
+/// framed size (`size + 96` header overhead, at most 65,536 OIDs). A
+/// blob whose framed cost exceeds the budget is `None` and is never
+/// requested; remaining blobs still read. Results stay in input order.
+/// `None` means missing, non-blob, oversize, or unusable.
 pub(crate) fn read_blobs(
     repo: &Path,
     oids: &[String],
     budget: &ProjectStatsBudgetWire,
 ) -> Result<Vec<Option<Vec<u8>>>, String> {
-    // Size chunks so one cat-file stdout stays under the command budget.
-    // 1 KiB per oid covers typical agent page JSON with headroom.
-    let per_oid = 1024_u64;
-    let chunk = (budget.max_output_bytes / per_oid)
-        .clamp(64, 65_536)
-        .min(oids.len().max(1) as u64) as usize;
-    let mut out = Vec::with_capacity(oids.len());
-    for chunk in oids.chunks(chunk) {
-        if chunk.is_empty() {
+    if oids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let max_output_bytes = budget.max_output_bytes.max(1);
+    let sizes = probe_blob_sizes(repo, oids, budget)?;
+    let mut out = vec![None; oids.len()];
+    let mut packable = Vec::new();
+    for (index, (oid, size)) in oids.iter().zip(sizes).enumerate() {
+        let Some(size) = size else {
+            continue;
+        };
+        let cost = size.saturating_add(CAT_FILE_HEADER_OVERHEAD);
+        if cost > max_output_bytes {
             continue;
         }
+        packable.push((index, oid.clone(), size));
+    }
+    if packable.is_empty() {
+        return Ok(out);
+    }
+    let wanted: Vec<(String, u64)> = packable
+        .iter()
+        .map(|(_, oid, size)| (oid.clone(), *size))
+        .collect();
+    let batches = pack_blob_batches(&wanted, max_output_bytes, MAX_BATCH_OIDS)?;
+    let mut cursor = 0;
+    for batch in batches {
+        let batch_len = batch.len();
+        let slice = &packable[cursor..cursor + batch_len];
         let mut stdin = Vec::new();
-        for oid in chunk {
+        for (_, oid, _) in slice {
             stdin.extend_from_slice(oid.as_bytes());
             stdin.push(b'\n');
         }
@@ -280,7 +348,92 @@ pub(crate) fn read_blobs(
         if result.code != Some(0) {
             return Err("git cat-file --batch did not succeed".to_owned());
         }
-        out.extend(parse_cat_file_batch(&result.stdout, chunk.len())?);
+        let parsed = parse_cat_file_batch(&result.stdout, batch_len)?;
+        for ((index, _, _), blob) in slice.iter().zip(parsed) {
+            out[*index] = blob;
+        }
+        cursor += batch_len;
+    }
+    Ok(out)
+}
+
+fn probe_blob_sizes(
+    repo: &Path,
+    oids: &[String],
+    budget: &ProjectStatsBudgetWire,
+) -> Result<Vec<Option<u64>>, String> {
+    let max_output_bytes = budget.max_output_bytes.max(1);
+    let chunk = (max_output_bytes / BATCH_CHECK_LINE_BUDGET)
+        .clamp(1, MAX_BATCH_OIDS as u64) as usize;
+    let mut sizes = Vec::with_capacity(oids.len());
+    for chunk in oids.chunks(chunk) {
+        let mut stdin = Vec::new();
+        for oid in chunk {
+            stdin.extend_from_slice(oid.as_bytes());
+            stdin.push(b'\n');
+        }
+        let result = run_unchecked_with_stdin(
+            repo,
+            &["cat-file", "--batch-check"],
+            &stdin,
+            budget,
+        )?;
+        if result.truncated {
+            return Err(
+                "git cat-file --batch-check exceeded its command budget"
+                    .to_owned(),
+            );
+        }
+        if result.code != Some(0) {
+            return Err("git cat-file --batch-check did not succeed".to_owned());
+        }
+        sizes.extend(parse_batch_check(&result.stdout, chunk.len())?);
+    }
+    Ok(sizes)
+}
+
+fn parse_batch_check(
+    stdout: &[u8],
+    expected: usize,
+) -> Result<Vec<Option<u64>>, String> {
+    let text = std::str::from_utf8(stdout).map_err(|error| {
+        format!("git cat-file --batch-check is not UTF-8: {error}")
+    })?;
+    let mut out = Vec::with_capacity(expected);
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        if out.len() == expected {
+            return Err(
+                "git cat-file --batch-check returned extra objects".to_owned()
+            );
+        }
+        let parts: Vec<&str> = line.split(' ').collect();
+        if parts.len() >= 2 && parts[1] == "missing" {
+            out.push(None);
+            continue;
+        }
+        if parts.len() < 3 {
+            return Err(format!(
+                "git cat-file --batch-check returned a malformed header: {line}"
+            ));
+        }
+        if parts[1] != "blob" {
+            out.push(None);
+            continue;
+        }
+        let size: u64 = parts[2].parse().map_err(|_| {
+            format!("git cat-file --batch-check size is not an integer: {line}")
+        })?;
+        out.push(Some(size));
+    }
+    if out.len() != expected {
+        return Err(
+            "git cat-file --batch-check returned fewer objects than requested"
+                .to_owned(),
+        );
     }
     Ok(out)
 }
@@ -512,7 +665,9 @@ mod tests {
     use std::process::Command;
 
     use super::*;
-    use crate::project_stats::test_support::{commit, git, init_repo, spec};
+    use crate::project_stats::test_support::{
+        commit, commit_files, git, init_repo, spec,
+    };
 
     #[test]
     fn empty_repository_resolves_without_fabricating_head() {
@@ -611,5 +766,67 @@ mod tests {
             "child resolution failed: {}",
             String::from_utf8_lossy(&output.stdout)
         );
+    }
+
+    fn exact_invocations(commands: &[Vec<String>], needle: &[&str]) -> usize {
+        commands
+            .iter()
+            .filter(|args| {
+                args.len() == needle.len()
+                    && args.iter().zip(needle).all(|(got, want)| got == *want)
+            })
+            .count()
+    }
+
+    #[test]
+    fn read_blobs_packs_by_size_and_skips_missing_or_oversize() {
+        let fixture = init_repo();
+        commit_files(
+            &fixture.repo,
+            &[
+                ("small-a.txt", &"a".repeat(100)),
+                ("small-b.txt", &"b".repeat(100)),
+                ("small-c.txt", &"c".repeat(100)),
+                ("huge.txt", &"h".repeat(10_000)),
+            ],
+            "blobs",
+        );
+        let oid_a = git(&fixture.repo, &["rev-parse", "HEAD:small-a.txt"]);
+        let oid_b = git(&fixture.repo, &["rev-parse", "HEAD:small-b.txt"]);
+        let oid_c = git(&fixture.repo, &["rev-parse", "HEAD:small-c.txt"]);
+        let oid_huge = git(&fixture.repo, &["rev-parse", "HEAD:huge.txt"]);
+        let missing = "0".repeat(40);
+        let budget = ProjectStatsBudgetWire {
+            timeout_ms: 30_000,
+            max_output_bytes: 250,
+        };
+        let oids = vec![oid_a, missing, oid_b, oid_huge, oid_c];
+        let (result, commands) =
+            capture_git_commands(|| read_blobs(&fixture.repo, &oids, &budget));
+        let blobs = result.expect("size-aware blob read");
+        assert_eq!(blobs.len(), 5);
+        assert_eq!(blobs[0].as_deref(), Some("a".repeat(100).as_bytes()));
+        assert!(blobs[1].is_none());
+        assert_eq!(blobs[2].as_deref(), Some("b".repeat(100).as_bytes()));
+        assert!(blobs[3].is_none());
+        assert_eq!(blobs[4].as_deref(), Some("c".repeat(100).as_bytes()));
+        assert!(
+            exact_invocations(&commands, &["cat-file", "--batch"]) > 1,
+            "expected packed cat-file --batch calls, got {commands:?}"
+        );
+        assert!(
+            exact_invocations(&commands, &["cat-file", "--batch-check"]) > 0,
+            "expected a cat-file --batch-check probe, got {commands:?}"
+        );
+    }
+
+    #[test]
+    fn read_blobs_empty_oids_does_not_invoke_git() {
+        let fixture = init_repo();
+        let (result, commands) = capture_git_commands(|| {
+            read_blobs(&fixture.repo, &[], &ProjectStatsBudgetWire::default())
+        });
+        assert!(result.expect("empty read").is_empty());
+        assert!(commands.is_empty());
     }
 }

@@ -4,8 +4,8 @@ use std::path::Path;
 use crate::project_stats::aggregate::check_output_invariants;
 use crate::project_stats::query_project_stats;
 use crate::project_stats::test_support::{
-    commit, commit_all, commit_at, git, init_repo, plan_markdown, spec,
-    write_file,
+    commit, commit_all, commit_at, commit_files, git, init_repo, plan_markdown,
+    spec, write_file,
 };
 use crate::project_stats::wire::{
     ProjectStatsAgentSidecarSpecWire, ProjectStatsBudgetWire,
@@ -101,6 +101,43 @@ fn sidecar_root_counts_plans_without_a_directory_prefix() {
     let output = response.projects[0].output.as_ref().unwrap();
     assert_eq!(output.plans_committed, Some(1));
     assert_eq!(output.plans_epic, Some(1));
+}
+
+#[test]
+fn sidecar_root_counts_plans_that_exceed_one_blob_batch() {
+    let plans = init_repo();
+    let padding = "x".repeat(4000);
+    let files: Vec<(String, String)> = (0..6)
+        .map(|index| {
+            let tier = if index < 2 { "epic" } else { "tale" };
+            let mut text = plan_markdown(tier, Some("openai/gpt"), None, None);
+            text.push_str(&padding);
+            (format!("202610/plan-{index}.md"), text)
+        })
+        .collect();
+    let file_refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.as_str()))
+        .collect();
+    commit_files(&plans.repo, &file_refs, "add padded plans");
+    let code = init_repo();
+    commit(&code.repo, "code.txt", "c\n", "code");
+    let store = ProjectStatsPlanStoreWire {
+        storage: ProjectStatsPlanStorageWire::SidecarRepos,
+        repo_path: Some(plans.repo.to_string_lossy().into_owned()),
+        plans_dir: ".".to_owned(),
+        project_filter: None,
+    };
+    let mut req = request(vec![project("alpha", &code.repo, store)], "", None);
+    req.budget.max_output_bytes = 16 * 1024;
+    let response = query_project_stats(&req).unwrap();
+    let output = response.projects[0].output.as_ref().unwrap();
+    assert_eq!(output.plans_committed, Some(6));
+    assert_eq!(output.plans_epic, Some(2));
+    assert_eq!(output.plans_tale, Some(4));
+    assert!(response.issues.iter().all(|issue| {
+        issue.code != "plans_unavailable" && issue.code != "plans_truncated"
+    }));
 }
 
 #[test]

@@ -9,7 +9,6 @@ use crate::project_stats::wire::{
     ProjectStatsBudgetWire, ProjectStatsIssueWire, ProjectStatsRepoSpecWire,
 };
 
-const HEADER_OVERHEAD: u64 = 96;
 const MAX_OIDS_PER_BATCH: usize = 256;
 
 pub(crate) fn read_blobs(
@@ -74,30 +73,7 @@ pub(crate) fn pack_batches(
     wanted: &[(String, u64)],
     max_output_bytes: u64,
 ) -> Result<Vec<Vec<(String, u64)>>, String> {
-    let mut batches = Vec::new();
-    let mut current = Vec::new();
-    let mut used = 0u64;
-    for (oid, size) in wanted {
-        let cost = size.saturating_add(HEADER_OVERHEAD);
-        if cost > max_output_bytes {
-            return Err(format!(
-                "blob {oid} plus framing exceeds the output budget"
-            ));
-        }
-        let would_overflow = !current.is_empty()
-            && (used.saturating_add(cost) > max_output_bytes
-                || current.len() >= MAX_OIDS_PER_BATCH);
-        if would_overflow {
-            batches.push(std::mem::take(&mut current));
-            used = 0;
-        }
-        current.push((oid.clone(), *size));
-        used = used.saturating_add(cost);
-    }
-    if !current.is_empty() {
-        batches.push(current);
-    }
-    Ok(batches)
+    git::pack_blob_batches(wanted, max_output_bytes, MAX_OIDS_PER_BATCH)
 }
 
 pub(crate) fn parse_cat_file_batch(
