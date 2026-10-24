@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.5](https://github.com/sase-org/sase-core/compare/v0.42.4...v0.42.5) - 2026-10-24
+
+### Added
+
+- *(core)* classify stale publication requests for revision repair (sase-1nv.4)
+- *(autonomy)* built-in profiles make every question wait for a human
+- *(publication)* fulfill linked-scope rows when the page exists
+
 ## [0.42.3](https://github.com/sase-org/sase-core/compare/v0.42.2...v0.42.3) - 2026-10-23
 
 ### Added
