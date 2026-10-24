@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.4](https://github.com/sase-org/sase-core/compare/v0.42.3...v0.42.4) - 2026-10-24
+
+### Fixed
+
+- *(project_stats)* pack plan blob reads under the git command budget
+
 ## [0.42.3](https://github.com/sase-org/sase-core/compare/v0.42.2...v0.42.3) - 2026-10-23
 
 ### Added
