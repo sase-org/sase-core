@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.6](https://github.com/sase-org/sase-core/compare/v0.42.5...v0.42.6) - 2026-10-25
+
+### Added
+
+- *(question-round)* add pure question_round projection and project binding
+
 ## [0.42.5](https://github.com/sase-org/sase-core/compare/v0.42.4...v0.42.5) - 2026-10-24
 
 ### Added
