@@ -982,6 +982,10 @@ pub(crate) use sase_core::query::{
     CompiledQueryProfile, QueryCorpus as CoreQueryCorpus, QueryFieldValues,
     QueryPredicateFacts, QueryProgram as CoreQueryProgram, QueryRow,
 };
+pub(crate) use sase_core::question_round::{
+    project_question_round_from_json as core_project_question_round_from_json,
+    QuestionRoundError, QUESTION_ROUND_WIRE_SCHEMA_VERSION,
+};
 pub(crate) use sase_core::queue_directive::normalize_persisted_queue_capacity_with_multiplier as core_normalize_persisted_queue_capacity_with_multiplier;
 pub(crate) use sase_core::referenced_by::{
     parse_referenced_by_block as core_parse_referenced_by_block,

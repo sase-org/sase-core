@@ -1040,3 +1040,77 @@ fn task_type_spec_bindings_round_trip_validation_digest_and_snapshot() {
         assert_eq!(parsed["types"][0]["digest"], json!(digest));
     });
 }
+
+#[test]
+fn question_round_binding_round_trips_projection() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        for name in [
+            "question_round_wire_schema_version",
+            "project_question_round",
+        ] {
+            assert!(module.getattr(name).is_ok(), "missing {name}");
+        }
+        assert_eq!(
+            py_question_round_wire_schema_version(),
+            QUESTION_ROUND_WIRE_SCHEMA_VERSION
+        );
+
+        let request_value = json!({
+            "schema_version": QUESTION_ROUND_WIRE_SCHEMA_VERSION,
+            "gate": {
+                "gate_id": "gate-1",
+                "gate_state": "answered",
+                "asked_by": "lane--0",
+                "asked_at_unix": 1_792_243_181.0,
+                "round_index": 1,
+            },
+            "request": {
+                "payload": {"questions": [
+                    {"question": "Ship it?", "options": [
+                        {"label": "Yes"},
+                        {"label": "No"},
+                    ]},
+                ]},
+            },
+            "response": {
+                "source": "tui",
+                "responded_at_unix": 1_792_243_226.0,
+                "option_results": [
+                    {"id": "submit", "result": {"answers": [
+                        {"question": "Ship it?", "selected": ["Yes"],
+                         "custom_feedback": null},
+                    ]}},
+                ],
+            },
+        });
+        let request_obj = json_value_to_py(py, &request_value).unwrap();
+        let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_project_question_round(py, request).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["gate_id"], json!("gate-1"));
+        assert_eq!(value["status"], json!("answered"));
+        assert_eq!(value["data_state"], json!("complete"));
+        assert_eq!(
+            value["entries"][0]["recommendation_match"],
+            json!("followed")
+        );
+        assert_eq!(value["provenance"]["actor"], json!("human"),);
+
+        let mut bad_schema = request_value.clone();
+        bad_schema["schema_version"] =
+            json!(QUESTION_ROUND_WIRE_SCHEMA_VERSION + 1);
+        let bad_obj = json_value_to_py(py, &bad_schema).unwrap();
+        let bad = bad_obj.bind(py).downcast::<PyDict>().unwrap();
+        let error = py_project_question_round(py, bad).unwrap_err();
+        assert!(error.is_instance_of::<PyValueError>(py));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported_question_round_schema"),
+            "{error}"
+        );
+    });
+}

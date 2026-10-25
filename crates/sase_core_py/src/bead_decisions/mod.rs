@@ -455,6 +455,55 @@ fn py_validate_finalizer_assigned_bead_binding(
         .map_err(bead_action_error_to_pyerr)
 }
 
+fn question_round_error_to_pyerr(error: QuestionRoundError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn question_round_result_to_py<'py, T>(
+    py: Python<'py>,
+    result: Result<T, QuestionRoundError>,
+    operation: &str,
+) -> PyResult<PyObject>
+where
+    T: serde::Serialize,
+{
+    let projected = result.map_err(question_round_error_to_pyerr)?;
+    let value = serde_json::to_value(projected).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal question-round {operation} serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the question-round projection wire schema version.
+#[pyfunction]
+#[pyo3(name = "question_round_wire_schema_version")]
+fn py_question_round_wire_schema_version() -> u32 {
+    QUESTION_ROUND_WIRE_SCHEMA_VERSION
+}
+
+/// Project one question round's read model from host-collected bundle
+/// JSON: questions from `request.json`, answers from `response.json`, and
+/// the terminal record from `cancellation.json`.
+///
+/// The projection is pure and performs no I/O. Structurally invalid
+/// requests surface as `ValueError`; malformed bundle content degrades
+/// `data_state` instead of erroring.
+#[pyfunction]
+#[pyo3(name = "project_question_round")]
+fn py_project_question_round<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    question_round_result_to_py(
+        py,
+        core_project_question_round_from_json(&value),
+        "projection",
+    )
+}
+
 fn gate_decision_error_to_pyerr(error: GateDecisionError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
@@ -722,6 +771,11 @@ pub(crate) fn register_bead_decisions(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_validate_finalizer_assigned_bead_binding,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_question_round_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_project_question_round, m)?)?;
     m.add_function(wrap_pyfunction!(py_gate_decision_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_decide_gate_decision_acceptance, m)?)?;
     m.add_function(wrap_pyfunction!(py_claim_gate_decision_execution, m)?)?;
