@@ -71,6 +71,46 @@ fn mixed_language_counts_include_embedded_code_and_exclude_its_comments() {
 }
 
 #[test]
+fn every_source_suffix_resolves_to_a_tokei_language() {
+    use super::classify::{classify_file, CommittedAttributes};
+    use super::counter::code_language;
+    use crate::source_language::suffix_entries;
+    // tokei cannot count these ids today; they already count 0 SLOC.
+    let allowed_text = ["diff"];
+    let mut failures = Vec::new();
+    for (suffix, language) in suffix_entries() {
+        let Some(id) = language else { continue };
+        let path = format!("src/sample.{suffix}");
+        let classification = classify_file(
+            path.as_bytes(),
+            0o100644,
+            3,
+            CommittedAttributes::default(),
+            Some(b"x = 1\n"),
+        );
+        let is_source = matches!(
+            classification,
+            super::classify::Classification::Included {
+                role: super::wire::ProjectStatsFileRoleWire::Source,
+                ..
+            }
+        );
+        if !is_source {
+            continue;
+        }
+        let resolved = code_language(path.as_bytes(), Some(id));
+        if resolved == tokei::LanguageType::Text && !allowed_text.contains(&id)
+        {
+            failures.push(format!("{suffix} -> {id}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "suffixes with no tokei parser: {failures:?}"
+    );
+}
+
+#[test]
 fn extension_selects_parser_even_when_classifier_labels_are_equal() {
     let bytes = b"# comment\nvalue\n";
     let py = count_blob(

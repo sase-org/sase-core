@@ -790,3 +790,54 @@ fn shared_oid_retains_each_parser_and_attributes_reclassify_without_reread() {
         measure(&fixture.repo, cache_dir().path()).snapshot
     );
 }
+
+#[test]
+fn swift_package_snapshot_counts_swift_and_holds_partition() {
+    let fixture = init_repo();
+    commit(
+        &fixture.repo,
+        "Sources/App/Main.swift",
+        "let x = 1\n// comment\nlet y = 2\n",
+        "swift source",
+    );
+    commit(
+        &fixture.repo,
+        "Tests/AppTests/MainTests.swift",
+        "let t = 1\n",
+        "swift tests",
+    );
+    let cache = cache_dir();
+    let snapshot = measure(&fixture.repo, cache.path());
+    assert_partition(&snapshot.snapshot);
+    assert_eq!(
+        role_files(&snapshot.snapshot, ProjectStatsFileRoleWire::Source),
+        1
+    );
+    assert_eq!(
+        role_files(&snapshot.snapshot, ProjectStatsFileRoleWire::Tests),
+        1
+    );
+    assert_eq!(
+        role_files(&snapshot.snapshot, ProjectStatsFileRoleWire::Other),
+        0
+    );
+    let swift = snapshot
+        .snapshot
+        .languages
+        .as_ref()
+        .expect("languages")
+        .iter()
+        .find(|row| row.name == "swift")
+        .expect("swift language");
+    assert_eq!(swift.files, 2);
+    // SLOC excludes the `//` comment line.
+    assert_eq!(swift.lines, 3);
+    assert_eq!(
+        role_lines(&snapshot.snapshot, ProjectStatsFileRoleWire::Source),
+        2
+    );
+    assert_eq!(
+        role_lines(&snapshot.snapshot, ProjectStatsFileRoleWire::Tests),
+        1
+    );
+}

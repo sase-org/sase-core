@@ -365,6 +365,7 @@ fn is_config_data_path(path: &[u8]) -> bool {
             | b"makefile"
             | b"cmakelists.txt"
             | b".editorconfig"
+            | b"package.resolved"
     ) || is_requirements_or_constraints(name)
         || has_extension(
             name,
@@ -384,6 +385,16 @@ fn is_config_data_path(path: &[u8]) -> bool {
                 b"tsv",
                 b"ipynb",
                 b"lock",
+                b"plist",
+                b"entitlements",
+                b"xcconfig",
+                b"pbxproj",
+                b"xcscheme",
+                b"xcworkspacedata",
+                b"xcstrings",
+                b"strings",
+                b"storyboard",
+                b"xib",
             ],
         )
 }
@@ -423,6 +434,8 @@ fn is_test_path(path: &[u8]) -> bool {
         || name.ends_with(b".spec.jsx")
         || name.ends_with(b".spec.ts")
         || name.ends_with(b".spec.tsx")
+        || name.ends_with(b"tests.swift")
+        || name.ends_with(b"test.swift")
 }
 
 fn path_components(path: &[u8]) -> Vec<Vec<u8>> {
@@ -483,6 +496,27 @@ fn filename_hint(path: &[u8]) -> Option<String> {
     Some(format!("file.{extension}"))
 }
 
+pub(crate) const SHEBANG_INTERPRETERS: &[(&str, &str)] = &[
+    ("awk", "awk"),
+    ("bash", "bash"),
+    ("dash", "sh"),
+    ("deno", "typescript"),
+    ("fish", "fish"),
+    ("gawk", "awk"),
+    ("lua", "lua"),
+    ("node", "javascript"),
+    ("nodejs", "javascript"),
+    ("perl", "perl"),
+    ("php", "php"),
+    ("powershell", "powershell"),
+    ("pwsh", "powershell"),
+    ("Rscript", "r"),
+    ("ruby", "ruby"),
+    ("sh", "sh"),
+    ("swift", "swift"),
+    ("zsh", "zsh"),
+];
+
 fn shebang_language(blob: &[u8]) -> Option<String> {
     let prefix = &blob[..blob.len().min(SHEBANG_PREFIX_BYTES)];
     let first_line = prefix.split(|byte| *byte == b'\n').next()?;
@@ -497,31 +531,22 @@ fn shebang_language(blob: &[u8]) -> Option<String> {
         })?;
         interpreter = interpreter.rsplit('/').next()?;
     }
-    let language = match interpreter {
-        "bash" => "bash",
-        "sh" | "dash" => "sh",
-        "zsh" => "zsh",
-        "fish" => "fish",
-        "node" | "nodejs" => "javascript",
-        "deno" => "typescript",
-        "ruby" => "ruby",
-        "perl" => "perl",
-        "php" => "php",
-        "lua" => "lua",
-        "awk" | "gawk" => "awk",
-        "Rscript" => "r",
-        "pwsh" | "powershell" => "powershell",
-        name if name == "python" || name == "pypy" => "python",
-        name if name.starts_with("python")
-            && name[6..].chars().all(|character| {
-                character.is_ascii_digit() || character == '.'
-            }) =>
-        {
-            "python"
+    if interpreter == "python" || interpreter == "pypy" {
+        return Some("python".to_owned());
+    }
+    if interpreter.starts_with("python")
+        && interpreter["python".len()..]
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == '.')
+    {
+        return Some("python".to_owned());
+    }
+    for (name, language) in SHEBANG_INTERPRETERS {
+        if interpreter == *name {
+            return Some((*language).to_owned());
         }
-        _ => return None,
-    };
-    Some(language.to_owned())
+    }
+    None
 }
 
 fn is_lfs_pointer(blob: &[u8]) -> bool {

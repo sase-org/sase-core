@@ -422,6 +422,68 @@ fn safety_exclusions_and_skipped_entry_modes_cannot_be_overridden() {
 }
 
 #[test]
+fn swift_package_sources_tests_and_config_data() {
+    use super::classify::SHEBANG_INTERPRETERS;
+    let _ = SHEBANG_INTERPRETERS;
+    for (path, role) in [
+        ("Sources/App/Main.swift", Role::Source),
+        ("Tests/AppTests/MainTests.swift", Role::Tests),
+        ("AppTests/LoginTests.swift", Role::Tests),
+        ("Package.swift", Role::Source),
+    ] {
+        assert_eq!(
+            classify(path.as_bytes(), Some(b"let x = 1\n")),
+            Classification::Included {
+                role,
+                language: Some("swift".to_owned()),
+            },
+            "{path}"
+        );
+    }
+    for path in ["Package.resolved", "Resources/Info.plist"] {
+        assert_eq!(
+            classify(path.as_bytes(), Some(b"{}")),
+            Classification::Included {
+                role: Role::ConfigData,
+                language: None,
+            },
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn extensionless_swift_shebang_is_source() {
+    assert_eq!(
+        classify(b"scripts/run", Some(b"#!/usr/bin/env swift\nprint(1)")),
+        Classification::Included {
+            role: Role::Source,
+            language: Some("swift".to_owned()),
+        }
+    );
+}
+
+#[test]
+fn every_shebang_language_is_reachable_by_suffix() {
+    use crate::source_language::suffix_language_ids;
+    use std::collections::HashSet;
+    let suffix_ids: HashSet<&str> = suffix_language_ids().collect();
+    let mut missing = Vec::new();
+    for (_, language) in super::classify::SHEBANG_INTERPRETERS {
+        if !suffix_ids.contains(language) {
+            missing.push((*language).to_owned());
+        }
+    }
+    if !suffix_ids.contains("python") {
+        missing.push("python".to_owned());
+    }
+    assert!(
+        missing.is_empty(),
+        "shebang languages missing from suffix map: {missing:?}"
+    );
+}
+
+#[test]
 fn classification_preserves_non_utf8_paths_without_lossy_collisions() {
     let result = classify(b"src/lib\xff.rs", Some(b"fn main() {}"));
     assert_eq!(
