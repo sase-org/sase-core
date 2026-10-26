@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.7](https://github.com/sase-org/sase-core/compare/v0.42.6...v0.42.7) - 2026-10-26
+
+### Added
+
+- *(project-stats)* recognize Swift and other mainstream languages
+
+### Fixed
+
+- *(release-steward)* treat only the newest decisive core cut as red
+
 ## [0.42.6](https://github.com/sase-org/sase-core/compare/v0.42.5...v0.42.6) - 2026-10-25
 
 ### Added
