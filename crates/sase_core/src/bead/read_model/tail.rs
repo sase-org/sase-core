@@ -56,12 +56,13 @@ use super::resume::{
     tail_load_plan, tail_merge_key, IssueIndex, TailLoadPlan,
 };
 use super::store::{
-    bump_outcome_in_txn, drop_cache_file, fingerprint_manifest_config,
-    format_frontier, id_suffix, lineage_root, load_snapshot,
+    bump_outcome_in_txn, fingerprint_manifest_config, format_frontier,
+    id_suffix, invalidate_cache_and_report, lineage_root, load_snapshot,
     load_stored_stream_sigs, open_and_serve, parse_frontier,
     record_manifest_config_in_txn, record_refresh_in_txn,
-    update_token_and_sweep, wire_string, CacheMeta, CachedStoreSnapshot, Fault,
-    ManifestConfigFingerprint, ServeOutcome, StoredStreamSig, WriteFault,
+    run_cache_write_with_repair, update_token_and_sweep, wire_string,
+    CacheMeta, CachedStoreSnapshot, Fault, ManifestConfigFingerprint,
+    ServeOutcome, StoredStreamSig, WriteFault,
 };
 #[cfg(test)]
 use crate::bead::mutation::store_io_stats;
@@ -287,34 +288,42 @@ pub(super) fn try_tail_apply(
     // collapse winners. History bytes are never re-read.
     let plan = tail_load_plan(&merged);
     let index = if plan.needs_index() {
-        load_issue_index(connection).map_err(|_| {
-            drop_cache_file(cache_path);
-            Fault::Cache
+        load_issue_index(connection).map_err(|error| {
+            invalidate_cache_and_report(
+                cache_path,
+                format!("tail issue index unreadable: {error}"),
+            )
         })?
     } else {
         IssueIndex::empty()
     };
     let dependents =
-        query_dependents(connection, &plan.removed_ids).map_err(|_| {
-            drop_cache_file(cache_path);
-            Fault::Cache
+        query_dependents(connection, &plan.removed_ids).map_err(|error| {
+            invalidate_cache_and_report(
+                cache_path,
+                format!("tail dependents unreadable: {error}"),
+            )
         })?;
     let mut load_ids: BTreeSet<&str> =
         plan.touched_ids.iter().map(String::as_str).collect();
     load_ids.extend(dependents.iter().map(String::as_str));
     load_ids.extend(plan.dep_targets.iter().map(String::as_str));
-    let old_rows = load_rows(connection, &load_ids).map_err(|_| {
-        drop_cache_file(cache_path);
-        Fault::Cache
+    let old_rows = load_rows(connection, &load_ids).map_err(|error| {
+        invalidate_cache_and_report(
+            cache_path,
+            format!("tail rows unreadable: {error}"),
+        )
     })?;
     let mut partial: BTreeMap<String, IssueWire> = old_rows
         .iter()
         .map(|(id, (row, _))| {
             serde_json::from_str(row)
                 .map(|issue| (id.clone(), issue))
-                .map_err(|_| {
-                    drop_cache_file(cache_path);
-                    Fault::Cache
+                .map_err(|error| {
+                    invalidate_cache_and_report(
+                        cache_path,
+                        format!("tail cached row is invalid: {error}"),
+                    )
                 })
         })
         .collect::<Result<_, Fault>>()?;
@@ -501,50 +510,50 @@ pub(super) fn commit_sweep_refresh(
             );
         }
     }
-    connection
-        .execute_batch("BEGIN IMMEDIATE")
-        .map_err(|_| Fault::Cache)?;
-    let outcome = write_refreshed_streams(connection, &refreshed, tail_sigs)
-        .and_then(|()| {
-            update_token_and_sweep(connection, token, now)
-                .map_err(|_| WriteFault::Other)
-        })
-        .and_then(|()| {
-            let generation_held = connection
-                .execute(
-                    "UPDATE meta SET value = value WHERE key = 'generation' AND value = ?1",
-                    rusqlite::params![start_generation.to_string()],
-                )
-                .map_err(|_| WriteFault::Other)?;
-            if generation_held != 1 {
-                return Err(WriteFault::CasLost);
-            }
-            let new_content = start_content.saturating_add(1).to_string();
-            let content_held = connection
-                .execute(
-                    "UPDATE meta SET value = ?1 WHERE key = 'content_generation' AND value = ?2",
-                    rusqlite::params![new_content, start_content.to_string()],
-                )
-                .map_err(|_| WriteFault::Other)?;
-            if content_held != 1 {
-                return Err(WriteFault::CasLost);
-            }
-            Ok(())
-        });
-    match outcome {
-        Ok(()) => {
-            connection
-                .execute_batch("COMMIT")
-                .map_err(|_| Fault::Cache)?;
+    let outcome = run_cache_write_with_repair(cache_path, connection, || {
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(WriteFault::from_sqlite)?;
+        write_refreshed_streams(connection, &refreshed, tail_sigs)?;
+        update_token_and_sweep(connection, token, now)?;
+        let generation_held = connection
+            .execute(
+                "UPDATE meta SET value = value WHERE key = 'generation' AND value = ?1",
+                rusqlite::params![start_generation.to_string()],
+            )
+            .map_err(WriteFault::from_sqlite)?;
+        if generation_held != 1 {
+            return Err(WriteFault::CasLost);
         }
+        let new_content = start_content.saturating_add(1).to_string();
+        let content_held = connection
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'content_generation' AND value = ?2",
+                rusqlite::params![new_content, start_content.to_string()],
+            )
+            .map_err(WriteFault::from_sqlite)?;
+        if content_held != 1 {
+            return Err(WriteFault::CasLost);
+        }
+        connection
+            .execute_batch("COMMIT")
+            .map_err(WriteFault::from_sqlite)?;
+        Ok(())
+    });
+    match outcome {
+        Ok(()) => {}
         Err(WriteFault::CasLost) => {
             let _ = connection.execute_batch("ROLLBACK");
             return Err(Fault::Cache);
         }
-        Err(WriteFault::Other) => {
-            let _ = connection.execute_batch("ROLLBACK");
-            drop_cache_file(cache_path);
-            return Err(Fault::Cache);
+        Err(WriteFault::Recreated(reason)) => {
+            return Err(Fault::CacheDiagnostic(reason));
+        }
+        Err(error) => {
+            return Err(invalidate_cache_and_report(
+                cache_path,
+                format!("sweep refresh write failed: {error:?}"),
+            ));
         }
     }
     guard_committed_streams(
@@ -554,9 +563,11 @@ pub(super) fn commit_sweep_refresh(
     )?;
     let snapshot = match finish {
         RefreshFinish::Snapshot => {
-            Some(load_snapshot(connection).map_err(|_| {
-                drop_cache_file(cache_path);
-                Fault::Cache
+            Some(load_snapshot(connection).map_err(|error| {
+                invalidate_cache_and_report(
+                    cache_path,
+                    format!("tail snapshot unreadable: {error}"),
+                )
             })?)
         }
         RefreshFinish::Readiness => None,
@@ -812,22 +823,19 @@ fn commit_tail(
     let start_content = meta.content_generation;
     let now = now_ns();
     let refreshed = refreshed_streams(stored, tail_sigs, sweep);
-    connection
-        .execute_batch("BEGIN IMMEDIATE")
-        .map_err(|_| Fault::Cache)?;
-    let outcome = write_tail_rows(
-        connection,
-        resumed,
-        &parent_of,
-        &removed_bead_refs,
-        merged,
-    )
-    .and_then(|()| write_refreshed_streams(connection, &refreshed, tail_sigs))
-    .and_then(|()| {
-        update_token_and_sweep(connection, token, now)
-            .map_err(|_| WriteFault::Other)
-    })
-    .and_then(|()| {
+    let outcome = run_cache_write_with_repair(cache_path, connection, || {
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(WriteFault::from_sqlite)?;
+        write_tail_rows(
+            connection,
+            resumed,
+            &parent_of,
+            &removed_bead_refs,
+            merged,
+        )?;
+        write_refreshed_streams(connection, &refreshed, tail_sigs)?;
+        update_token_and_sweep(connection, token, now)?;
         meta_set(connection, "frontier", new_frontier)?;
         record_manifest_config_in_txn(connection, fingerprint)?;
         bump_outcome_in_txn(connection, "outcome_tail")?;
@@ -842,7 +850,7 @@ fn commit_tail(
                 "UPDATE meta SET value = value WHERE key = 'generation' AND value = ?1",
                 rusqlite::params![start_generation.to_string()],
             )
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
         if generation_held != 1 {
             return Err(WriteFault::CasLost);
         }
@@ -852,18 +860,17 @@ fn commit_tail(
                 "UPDATE meta SET value = ?1 WHERE key = 'content_generation' AND value = ?2",
                 rusqlite::params![new_content, start_content.to_string()],
             )
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
         if content_held != 1 {
             return Err(WriteFault::CasLost);
         }
+        connection
+            .execute_batch("COMMIT")
+            .map_err(WriteFault::from_sqlite)?;
         Ok(())
     });
     match outcome {
-        Ok(()) => {
-            connection
-                .execute_batch("COMMIT")
-                .map_err(|_| Fault::Cache)?;
-        }
+        Ok(()) => {}
         Err(WriteFault::CasLost) => {
             let _ = connection.execute_batch("ROLLBACK");
             return match open_and_serve(beads_dir, cache_path) {
@@ -873,10 +880,14 @@ fn commit_tail(
                 _ => Err(Fault::Cache),
             };
         }
-        Err(WriteFault::Other) => {
-            let _ = connection.execute_batch("ROLLBACK");
-            drop_cache_file(cache_path);
-            return Err(Fault::Cache);
+        Err(WriteFault::Recreated(reason)) => {
+            return Err(Fault::CacheDiagnostic(reason));
+        }
+        Err(error) => {
+            return Err(invalidate_cache_and_report(
+                cache_path,
+                format!("tail commit failed: {error:?}"),
+            ));
         }
     }
     guard_committed_streams(
@@ -886,9 +897,11 @@ fn commit_tail(
     )?;
     let snapshot = match finish {
         RefreshFinish::Snapshot => {
-            Some(load_snapshot(connection).map_err(|_| {
-                drop_cache_file(cache_path);
-                Fault::Cache
+            Some(load_snapshot(connection).map_err(|error| {
+                invalidate_cache_and_report(
+                    cache_path,
+                    format!("tail snapshot unreadable: {error}"),
+                )
             })?)
         }
         RefreshFinish::Readiness => None,
@@ -969,7 +982,7 @@ pub(super) fn write_refreshed_streams(
         .prepare(
             "INSERT INTO streams (stream_id, size, mtime_ns, inode, byte_len, content_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(stream_id) DO UPDATE SET size = excluded.size, mtime_ns = excluded.mtime_ns, inode = excluded.inode, byte_len = excluded.byte_len, content_hash = excluded.content_hash WHERE streams.size != excluded.size OR streams.mtime_ns != excluded.mtime_ns OR streams.inode != excluded.inode OR streams.byte_len != excluded.byte_len OR streams.content_hash != excluded.content_hash",
         )
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::from_sqlite)?;
     #[cfg(test)]
     let mut written = 0u64;
     for stream_id in tail_sigs.keys() {
@@ -987,7 +1000,7 @@ pub(super) fn write_refreshed_streams(
                 *byte_len as i64,
                 content_hash,
             ])
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
         #[cfg(test)]
         {
             written += 1;
@@ -1009,7 +1022,7 @@ pub(super) fn meta_set(
             "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             rusqlite::params![key, value],
         )
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::from_sqlite)?;
     Ok(())
 }
 
@@ -1032,14 +1045,14 @@ pub(super) fn write_tail_rows(
                     "DELETE FROM suffix_catalog WHERE suffix = ?1 AND issue_id = ?2",
                     rusqlite::params![id_suffix(id), id],
                 )
-                .map_err(|_| WriteFault::Other)?;
+                .map_err(WriteFault::from_sqlite)?;
         }
     }
     let mut issue_stmt = connection
         .prepare(
             "INSERT INTO issues (id, position, row, status, issue_type, tier, parent, stream, created_at, external_ref, task_type, plus_one, is_flag) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) ON CONFLICT(id) DO UPDATE SET position = excluded.position, row = excluded.row, status = excluded.status, issue_type = excluded.issue_type, tier = excluded.tier, parent = excluded.parent, stream = excluded.stream, created_at = excluded.created_at, external_ref = excluded.external_ref, task_type = excluded.task_type, plus_one = excluded.plus_one, is_flag = excluded.is_flag WHERE issues.row != excluded.row OR issues.position != excluded.position OR issues.status != excluded.status OR issues.issue_type != excluded.issue_type OR issues.tier != excluded.tier OR issues.parent != excluded.parent OR issues.stream != excluded.stream OR issues.created_at != excluded.created_at OR issues.external_ref != excluded.external_ref OR issues.task_type != excluded.task_type OR issues.plus_one != excluded.plus_one OR issues.is_flag != excluded.is_flag",
         )
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::from_sqlite)?;
     for (id, row, issue) in &resumed.upserts {
         let position = resumed.positions.get(id.as_str()).copied().unwrap_or(0);
         issue_stmt
@@ -1058,19 +1071,19 @@ pub(super) fn write_tail_rows(
                 issue.plus_one_count() as i64,
                 i64::from(issue.is_flag_task()),
             ])
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
     }
     drop(issue_stmt);
     if !resumed.moved.is_empty() {
         let mut position_stmt = connection
             .prepare("UPDATE issues SET position = ?1 WHERE id = ?2")
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
         for id in &resumed.moved {
             let position =
                 resumed.positions.get(id.as_str()).copied().unwrap_or(0);
             position_stmt
                 .execute(rusqlite::params![position, id])
-                .map_err(|_| WriteFault::Other)?;
+                .map_err(WriteFault::from_sqlite)?;
         }
     }
     if !resumed.added.is_empty() {
@@ -1078,11 +1091,11 @@ pub(super) fn write_tail_rows(
             .prepare(
                 "INSERT INTO suffix_catalog (suffix, issue_id) VALUES (?1, ?2)",
             )
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
         for id in &resumed.added {
             suffix_stmt
                 .execute(rusqlite::params![id_suffix(id), id])
-                .map_err(|_| WriteFault::Other)?;
+                .map_err(WriteFault::from_sqlite)?;
         }
     }
     // Rebuild edges from the upsert rows: every rescope survivor with a
@@ -1097,7 +1110,7 @@ pub(super) fn write_tail_rows(
         delete_ids(connection, "edges", &ids)?;
         let mut edge_stmt = connection
             .prepare("INSERT INTO edges (src, dst, kind) VALUES (?1, ?2, ?3)")
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
         for id in &resumed.edge_rescope {
             let Some(issue) = upsert_rows.get(id.as_str()) else {
                 continue;
@@ -1105,7 +1118,7 @@ pub(super) fn write_tail_rows(
             if let Some(parent) = issue.parent_id.as_deref() {
                 edge_stmt
                     .execute(rusqlite::params![issue.id, parent, "parent"])
-                    .map_err(|_| WriteFault::Other)?;
+                    .map_err(WriteFault::from_sqlite)?;
             }
             for dependency in &issue.dependencies {
                 edge_stmt
@@ -1114,15 +1127,15 @@ pub(super) fn write_tail_rows(
                         dependency.depends_on_id,
                         "depends_on"
                     ])
-                    .map_err(|_| WriteFault::Other)?;
+                    .map_err(WriteFault::from_sqlite)?;
             }
         }
     }
     for (id, _, _) in &resumed.upserts {
-        alloc::note_upsert(connection, id).map_err(|_| WriteFault::Other)?;
+        alloc::note_upsert(connection, id).map_err(WriteFault::other)?;
     }
     for id in &resumed.deletes {
-        alloc::note_delete(connection, id).map_err(|_| WriteFault::Other)?;
+        alloc::note_delete(connection, id).map_err(WriteFault::other)?;
     }
     apply_provenance_txn(connection, merged)?;
     // Provenance rows naming removed issues as targets go after the
@@ -1144,7 +1157,7 @@ pub(super) fn write_tail_rows(
                 ),
                 params.as_slice(),
             )
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
     }
     Ok(())
 }
@@ -1198,7 +1211,7 @@ fn delete_ids(
             &format!("DELETE FROM {table} WHERE {column} IN ({placeholders})"),
             params.as_slice(),
         )
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::from_sqlite)?;
     Ok(())
 }
 
@@ -1229,12 +1242,12 @@ fn apply_provenance_txn(
                 ..
             } => {
                 let canonical = canonicalize_artifact_link_ref(target_ref)
-                    .map_err(|_| WriteFault::Other)?;
+                    .map_err(WriteFault::other)?;
                 lookup_artifact_relation(relation)
-                    .map_err(|_| WriteFault::Other)?;
+                    .map_err(WriteFault::other)?;
                 let description =
                     validate_artifact_link_description(description)
-                        .map_err(|_| WriteFault::Other)?;
+                        .map_err(WriteFault::other)?;
                 connection
                     .execute(
                         "DELETE FROM link_provenance WHERE source_issue_id = ?1 AND relation = ?2 AND target_ref = ?3 AND direction = ?4",
@@ -1245,7 +1258,7 @@ fn apply_provenance_txn(
                             wire_string(direction),
                         ],
                     )
-                    .map_err(|_| WriteFault::Other)?;
+                    .map_err(WriteFault::from_sqlite)?;
                 connection
                     .execute(
                         "INSERT INTO link_provenance (target_ref, source_issue_id, relation, description, origin, direction, uses, actor, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -1261,7 +1274,7 @@ fn apply_provenance_txn(
                             event.timestamp,
                         ],
                     )
-                    .map_err(|_| WriteFault::Other)?;
+                    .map_err(WriteFault::from_sqlite)?;
             }
             BeadEventPayloadWire::LinkRemoved {
                 target_ref,
@@ -1282,7 +1295,7 @@ fn apply_provenance_txn(
                                 wire_string(direction),
                             ],
                         )
-                        .map_err(|_| WriteFault::Other)?;
+                        .map_err(WriteFault::from_sqlite)?;
                 }
             }
             BeadEventPayloadWire::IssueRemoved {
@@ -1304,7 +1317,7 @@ fn apply_provenance_txn(
                         ),
                         params.as_slice(),
                     )
-                    .map_err(|_| WriteFault::Other)?;
+                    .map_err(WriteFault::from_sqlite)?;
             }
             _ => {}
         }
@@ -1322,10 +1335,10 @@ fn guard_committed_streams(
 ) -> Result<(), Fault> {
     match sweep_store_signatures(beads_dir) {
         Ok(current) if current.streams == *committed => Ok(()),
-        _ => {
-            drop_cache_file(cache_path);
-            Err(Fault::Cache)
-        }
+        _ => Err(invalidate_cache_and_report(
+            cache_path,
+            "post-commit stream sweep changed",
+        )),
     }
 }
 

@@ -172,7 +172,8 @@ fn invalidated_cache_declines_cached_reads_and_mutation_succeeds() {
 
     // Invalidate under the admitted view: its next cached read must
     // decline instead of serving rows a rebuild is about to replace.
-    drop_cache_file(&read_model_cache_path_for_store(&beads_dir).unwrap());
+    drop_cache_file(&read_model_cache_path_for_store(&beads_dir).unwrap())
+        .unwrap();
     let fault = view.get(&task.id).unwrap_err();
     assert_eq!(
         fault.kind, "cache_fault",

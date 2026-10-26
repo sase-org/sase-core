@@ -1866,6 +1866,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "sase_workspace_hack",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",

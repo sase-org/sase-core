@@ -53,7 +53,9 @@ fn fresh_connection(
     let meta = match read_meta(&connection) {
         Ok(meta) => meta,
         Err(_) => {
-            drop_cache_file(cache_path);
+            if let Err(error) = drop_cache_file(cache_path) {
+                eprintln!("bead read-model invalidation failed: {error}");
+            }
             return Ok(None);
         }
     };
@@ -62,7 +64,9 @@ fn fresh_connection(
         || meta.crate_version != env!("CARGO_PKG_VERSION")
     {
         drop(connection);
-        drop_cache_file(cache_path);
+        if let Err(error) = drop_cache_file(cache_path) {
+            eprintln!("bead read-model invalidation failed: {error}");
+        }
         return Ok(None);
     }
     Ok(Some(connection))
@@ -97,7 +101,9 @@ pub fn with_fresh_cache_at<T>(
         Ok(value) => Ok(Some(value)),
         Err(_) => {
             drop(connection);
-            drop_cache_file(cache_path);
+            if let Err(error) = drop_cache_file(cache_path) {
+                eprintln!("bead read-model invalidation failed: {error}");
+            }
             Ok(None)
         }
     }

@@ -47,10 +47,10 @@ use super::resume::{
 };
 use super::store::{
     bump_outcome_in_txn, drop_cache_file, load_stored_stream_sigs,
-    open_read_write, parse_frontier, read_meta, rebuild_from_replay,
-    record_manifest_config_in_txn, record_refresh_in_txn, Fault,
-    ManifestConfigFingerprint, StoredStreamSig, WriteFault,
-    REBUILD_BUSY_TIMEOUT,
+    newer_cache_version_reason, open_read_write, parse_frontier, read_meta,
+    rebuild_from_replay, record_manifest_config_in_txn, record_refresh_in_txn,
+    run_cache_write_with_repair, Fault, ManifestConfigFingerprint,
+    StoredStreamSig, WriteFault, REBUILD_BUSY_TIMEOUT,
 };
 use super::tail::{
     meta_set, resume_from_partial, try_tail_apply, write_refreshed_streams,
@@ -144,7 +144,11 @@ pub(crate) fn publish_mutation_write(
     ) {
         Ok(outcome) => outcome,
         Err(reason) => {
-            drop_cache_file(cache_path);
+            let invalidation = drop_cache_file(cache_path);
+            let reason = match invalidation {
+                Ok(()) => reason,
+                Err(error) => format!("{reason}; {error}"),
+            };
             PublishOutcome::Invalidated { reason }
         }
     }
@@ -162,6 +166,9 @@ fn publish_inner(
     fingerprint: &ManifestConfigFingerprint,
     expected: &[(String, IssueWire)],
 ) -> PublishResult {
+    if newer_cache_version_reason(cache_path).is_some() {
+        return Ok(PublishOutcome::Skipped);
+    }
     let connection = match open_read_write(cache_path, REBUILD_BUSY_TIMEOUT) {
         Ok(connection) => connection,
         Err(_) => return Ok(PublishOutcome::Skipped),
@@ -298,6 +305,7 @@ fn publish_inner(
     };
     commit_published(
         beads_dir,
+        cache_path,
         &connection,
         witness,
         appended,
@@ -443,6 +451,7 @@ fn check_stream_set_unchanged(
 #[allow(clippy::too_many_arguments)]
 fn commit_published(
     beads_dir: &Path,
+    cache_path: &Path,
     connection: &Connection,
     witness: &CacheWitness,
     appended: &[AppendedStream],
@@ -542,21 +551,19 @@ fn commit_published(
         .map_err(|error| format!("unreadable freshness token: {error}"))?;
     let start_generation = witness.generation;
     let start_content = witness.content_generation;
-    connection
-        .execute_batch("BEGIN IMMEDIATE")
-        .map_err(|_| "unwritable read-model cache".to_string())?;
-    let outcome = write_tail_rows(
-        connection,
-        resumed,
-        &parent_of,
-        &removed_bead_refs,
-        merged,
-    )
-    .and_then(|()| {
-        write_refreshed_streams(connection, &refreshed, &tail_sigs)
-    })
-    .and_then(|()| set_token_in_txn(connection, &token))
-    .and_then(|()| {
+    let outcome = run_cache_write_with_repair(cache_path, connection, || {
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(WriteFault::from_sqlite)?;
+        write_tail_rows(
+            connection,
+            resumed,
+            &parent_of,
+            &removed_bead_refs,
+            merged,
+        )?;
+        write_refreshed_streams(connection, &refreshed, &tail_sigs)?;
+        set_token_in_txn(connection, &token)?;
         meta_set(connection, "frontier", new_frontier)?;
         record_manifest_config_in_txn(connection, fingerprint)?;
         bump_outcome_in_txn(connection, "outcome_tail")?;
@@ -571,7 +578,7 @@ fn commit_published(
                 "UPDATE meta SET value = value WHERE key = 'generation' AND value = ?1",
                 rusqlite::params![start_generation.to_string()],
             )
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
         if generation_held != 1 {
             return Err(WriteFault::CasLost);
         }
@@ -581,25 +588,27 @@ fn commit_published(
                 "UPDATE meta SET value = ?1 WHERE key = 'content_generation' AND value = ?2",
                 rusqlite::params![new_content, start_content.to_string()],
             )
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
         if content_held != 1 {
             return Err(WriteFault::CasLost);
         }
+        connection
+            .execute_batch("COMMIT")
+            .map_err(WriteFault::from_sqlite)?;
         Ok(())
     });
     match outcome {
-        Ok(()) => {
-            connection
-                .execute_batch("COMMIT")
-                .map_err(|_| "uncommittable publication".to_string())?;
-        }
+        Ok(()) => {}
         Err(WriteFault::CasLost) => {
             let _ = connection.execute_batch("ROLLBACK");
             return Ok(PublishOutcome::Skipped);
         }
-        Err(WriteFault::Other) => {
+        Err(WriteFault::Recreated(reason)) => {
+            return Ok(PublishOutcome::Invalidated { reason });
+        }
+        Err(error) => {
             let _ = connection.execute_batch("ROLLBACK");
-            return Err("unwritable publication".to_string());
+            return Err(format!("publication write failed: {error:?}"));
         }
     }
     #[cfg(test)]

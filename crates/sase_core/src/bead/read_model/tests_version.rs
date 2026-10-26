@@ -113,6 +113,9 @@ fn expect_ok<T>(result: Result<T, Fault>, what: &str) -> T {
     match result {
         Ok(value) => value,
         Err(Fault::Cache) => panic!("{what}: cache fault"),
+        Err(Fault::CacheDiagnostic(reason)) => {
+            panic!("{what}: cache diagnostic: {reason}")
+        }
         Err(Fault::Store(error)) => {
             panic!("{what}: store error: {}", error.message)
         }
@@ -251,7 +254,7 @@ fn stale_rebuild_losing_to_invalidation_is_not_a_publication() {
     let (beads_dir, cache_path, before) = seed_old_crate_version(&temp);
     let token = freshness_token(&beads_dir).unwrap();
 
-    drop_cache_file(&cache_path);
+    drop_cache_file(&cache_path).unwrap();
     let invalidated = committed_meta(&cache_path);
     assert_eq!(invalidated.generation, before.generation + 1);
     assert_eq!(invalidated.crate_version, crate_version());
@@ -321,6 +324,9 @@ fn stale_rebuild_losing_to_a_winner_does_not_overwrite_it() {
             serde_json::to_value(&winner.issues).unwrap()
         ),
         Err(Fault::Cache) => {}
+        Err(Fault::CacheDiagnostic(reason)) => {
+            panic!("loser cache diagnostic: {reason}")
+        }
         Err(Fault::Store(error)) => {
             panic!("loser must not surface a store error: {}", error.message)
         }

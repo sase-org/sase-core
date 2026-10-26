@@ -6,7 +6,7 @@
 use rusqlite::Connection;
 
 use super::store::{
-    crate_version, Fault, WriteFault, READ_MODEL_REDUCER_VERSION,
+    crate_version, WriteFault, READ_MODEL_REDUCER_VERSION,
     READ_MODEL_SCHEMA_VERSION,
 };
 
@@ -36,31 +36,34 @@ pub(super) fn tail_meta_defaults() -> [(&'static str, String); 17] {
 /// rows, counters, or generation. Runs on every read before the freshness
 /// decision, so a cache written by `read-model-store` gains tail support
 /// on its next read instead of rebuilding.
-pub(super) fn backfill_meta_keys(connection: &Connection) -> Result<(), Fault> {
+pub(super) fn backfill_meta_keys(
+    connection: &Connection,
+) -> Result<(), WriteFault> {
     let defaults = tail_meta_defaults();
-    let placeholders =
-        defaults.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::new();
-    for (key, _) in &defaults {
-        params.push(key);
+    let mut present = std::collections::BTreeSet::new();
+    let mut statement = connection
+        .prepare("SELECT key FROM meta NOT INDEXED")
+        .map_err(WriteFault::from_sqlite)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(WriteFault::from_sqlite)?;
+    for row in rows {
+        present.insert(row.map_err(WriteFault::from_sqlite)?);
     }
-    let present: i64 = connection
-        .query_row(
-            &format!("SELECT COUNT(*) FROM meta WHERE key IN ({placeholders})"),
-            params.as_slice(),
-            |row| row.get(0),
-        )
-        .map_err(|_| Fault::Cache)?;
-    if present as usize >= defaults.len() {
+    drop(statement);
+    if defaults.iter().all(|(key, _)| present.contains(*key)) {
         return Ok(());
     }
     for (key, value) in &defaults {
+        if present.contains(*key) {
+            continue;
+        }
         connection
             .execute(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING",
                 rusqlite::params![key, value],
             )
-            .map_err(|_| Fault::Cache)?;
+            .map_err(WriteFault::from_sqlite)?;
     }
     Ok(())
 }
@@ -77,6 +80,6 @@ pub(super) fn set_token_in_txn(
 ) -> Result<(), WriteFault> {
     connection
         .execute("UPDATE meta SET value = ?1 WHERE key = 'token'", [token])
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::from_sqlite)?;
     Ok(())
 }

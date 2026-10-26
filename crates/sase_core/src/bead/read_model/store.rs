@@ -42,12 +42,13 @@
 //! with no later trace could persist, and the next token change rebuilds
 //! over it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
@@ -98,6 +99,124 @@ const VERIFY_DIFF_ID_LIMIT: usize = 50;
 pub(super) const SERVE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 /// Bounded wait for a rebuild transaction before replaying instead.
 pub(super) const REBUILD_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// A cache that failed to rebuild is left to replay-only reads for this window.
+const FAILED_REBUILD_BACKOFF: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Default)]
+struct CacheProcessState {
+    failed_rebuilds: HashMap<PathBuf, Instant>,
+    diagnostics: HashMap<PathBuf, String>,
+    #[cfg(test)]
+    injected_rebuild_write_failures: HashMap<PathBuf, usize>,
+}
+
+static CACHE_PROCESS_STATE: OnceLock<Mutex<CacheProcessState>> =
+    OnceLock::new();
+
+fn cache_process_state() -> &'static Mutex<CacheProcessState> {
+    CACHE_PROCESS_STATE.get_or_init(|| Mutex::new(CacheProcessState::default()))
+}
+
+fn cache_diagnostic(cache_path: &Path) -> Option<String> {
+    cache_process_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .diagnostics
+        .get(cache_path)
+        .cloned()
+}
+
+fn set_cache_diagnostic(cache_path: &Path, message: impl Into<String>) {
+    cache_process_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .diagnostics
+        .insert(cache_path.to_path_buf(), message.into());
+}
+
+fn clear_cache_diagnostic(cache_path: &Path) {
+    cache_process_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .diagnostics
+        .remove(cache_path);
+}
+
+fn failed_rebuild_backoff_active(cache_path: &Path) -> bool {
+    let mut state = cache_process_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match state.failed_rebuilds.get(cache_path).copied() {
+        Some(failed_at) if failed_at.elapsed() < FAILED_REBUILD_BACKOFF => true,
+        Some(_) => {
+            state.failed_rebuilds.remove(cache_path);
+            false
+        }
+        None => false,
+    }
+}
+
+fn mark_failed_rebuild(cache_path: &Path) {
+    cache_process_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .failed_rebuilds
+        .insert(cache_path.to_path_buf(), Instant::now());
+}
+
+fn clear_failed_rebuild(cache_path: &Path) {
+    cache_process_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .failed_rebuilds
+        .remove(cache_path);
+}
+
+fn rebuild_backoff_fault(cache_path: &Path) -> Option<Fault> {
+    if !failed_rebuild_backoff_active(cache_path) {
+        return None;
+    }
+    let reason = format!(
+        "read-model rebuild is backed off after a previous cache failure for {} seconds; replay serves this read",
+        FAILED_REBUILD_BACKOFF.as_secs()
+    );
+    set_cache_diagnostic(cache_path, reason.clone());
+    Some(Fault::CacheDiagnostic(reason))
+}
+
+#[cfg(test)]
+pub(super) fn inject_persistent_rebuild_write_failure(cache_path: &Path) {
+    cache_process_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .injected_rebuild_write_failures
+        .insert(cache_path.to_path_buf(), 0);
+}
+
+#[cfg(test)]
+pub(super) fn injected_rebuild_write_attempts(cache_path: &Path) -> usize {
+    cache_process_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .injected_rebuild_write_failures
+        .get(cache_path)
+        .copied()
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn should_inject_rebuild_write_failure(cache_path: &Path) -> bool {
+    let mut state = cache_process_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(attempts) =
+        state.injected_rebuild_write_failures.get_mut(cache_path)
+    else {
+        return false;
+    };
+    *attempts = attempts.saturating_add(1);
+    true
+}
 
 /// Wire schema version for [`BeadReadModelStatusWire`].
 ///
@@ -228,29 +347,29 @@ pub fn read_model_status_at(
     if !event_store_present(beads_dir) {
         status.reason =
             "legacy store: plain replay serves the read".to_string();
-        return status;
+        return finish_status(cache_path, status);
     }
     if !cache_path.is_file() {
-        return status;
+        return finish_status(cache_path, status);
     }
     status.size_bytes = cache_file_size(cache_path);
     let connection = match open_read_only(cache_path, SERVE_BUSY_TIMEOUT) {
         Ok(connection) => connection,
         Err(reason) => {
             status.reason = reason;
-            return status;
+            return finish_status(cache_path, status);
         }
     };
     let meta = match read_meta(&connection) {
         Ok(meta) => meta,
         Err(reason) => {
             status.reason = reason;
-            return status;
+            return finish_status(cache_path, status);
         }
     };
     if let Some(reason) = version_mismatch_reason(&meta) {
         status.reason = reason;
-        return status;
+        return finish_status(cache_path, status);
     }
     status.generation = meta.generation;
     status.serve_count = meta.outcome_serve;
@@ -270,20 +389,20 @@ pub fn read_model_status_at(
         Err(error) => {
             status.reason =
                 format!("freshness token unreadable: {}", error.message);
-            return status;
+            return finish_status(cache_path, status);
         }
     };
     if token != meta.token {
         status.reason =
             "freshness token changed: the next read rebuilds".to_string();
-        return status;
+        return finish_status(cache_path, status);
     }
     if now_ns().saturating_sub(meta.last_sweep_ns)
         > READ_MODEL_SWEEP_INTERVAL_SECS as i64 * 1_000_000_000
     {
         status.reason =
             "last full sweep is stale: the next read re-sweeps".to_string();
-        return status;
+        return finish_status(cache_path, status);
     }
     match sweep_store_signatures(beads_dir) {
         Ok(current) => {
@@ -301,6 +420,18 @@ pub fn read_model_status_at(
         Err(error) => {
             status.reason = format!("full sweep unreadable: {}", error.message);
         }
+    }
+    finish_status(cache_path, status)
+}
+
+fn finish_status(
+    cache_path: &Path,
+    mut status: BeadReadModelStatusWire,
+) -> BeadReadModelStatusWire {
+    if status.fresh {
+        clear_cache_diagnostic(cache_path);
+    } else if let Some(diagnostic) = cache_diagnostic(cache_path) {
+        status.reason = diagnostic;
     }
     status
 }
@@ -428,6 +559,33 @@ pub(super) fn crate_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Do not mutate a cache written by a newer core. This check deliberately
+/// runs before schema healing, meta-key backfill, or invalidation.
+pub(super) fn newer_cache_version_reason(cache_path: &Path) -> Option<String> {
+    if !cache_path.is_file() {
+        return None;
+    }
+    let connection = Connection::open_with_flags(
+        cache_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()?;
+    let cached: String = connection
+        .query_row(
+            "SELECT value FROM meta NOT INDEXED WHERE key = 'crate_version'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    let cached = semver::Version::parse(&cached).ok()?;
+    let reader = semver::Version::parse(&crate_version()).ok()?;
+    (cached > reader).then(|| {
+        format!(
+            "cache crate version {cached} is newer than reader {reader}: replay without modifying the cache"
+        )
+    })
+}
+
 /// A never-fresh status report: no cache to describe.
 fn empty_status(
     location: Option<String>,
@@ -465,7 +623,7 @@ fn rebuild_catch_store_errors(
     }
     match rebuild(beads_dir, cache_path, force) {
         Ok(snapshot) => Ok(Some(snapshot)),
-        Err(Fault::Cache) => Ok(None),
+        Err(Fault::Cache | Fault::CacheDiagnostic(_)) => Ok(None),
         Err(Fault::Store(error)) => Err(error),
     }
 }
@@ -476,8 +634,12 @@ fn rebuild_catch_store_errors(
 /// routine fallbacks (missing file, busy cache, version drift) need no
 /// message, while surprising faults surface through the status and
 /// verify wires, which own their own reason strings.
+#[derive(Debug)]
 pub(super) enum Fault {
     Cache,
+    /// A cache fault whose repair or invalidation failure is useful to show
+    /// in `sase bead doctor` diagnostics.
+    CacheDiagnostic(String),
     Store(BeadError),
 }
 
@@ -499,11 +661,13 @@ pub(super) fn open_and_serve(
 ) -> Result<ServeOutcome, String> {
     let connection = open_read_only(cache_path, SERVE_BUSY_TIMEOUT)?;
     match probe_cache(&connection, beads_dir) {
-        Probe::Fresh => Ok(ServeOutcome::Hit(
-            load_snapshot(&connection).inspect_err(|_| {
-                drop_cache_file(cache_path);
-            })?,
-        )),
+        Probe::Fresh => match load_snapshot(&connection) {
+            Ok(snapshot) => Ok(ServeOutcome::Hit(snapshot)),
+            Err(reason) => match drop_cache_file(cache_path) {
+                Ok(()) => Err(reason),
+                Err(error) => Err(format!("{reason}; {error}")),
+            },
+        },
         Probe::Stale | Probe::Unusable(_) => Ok(ServeOutcome::Unusable),
     }
 }
@@ -568,17 +732,26 @@ fn rebuild(
     cache_path: &Path,
     force: bool,
 ) -> Result<CachedStoreSnapshot, Fault> {
+    if let Some(fault) = rebuild_backoff_fault(cache_path) {
+        return Err(fault);
+    }
+    if let Some(reason) = newer_cache_version_reason(cache_path) {
+        set_cache_diagnostic(cache_path, reason.clone());
+        return Err(Fault::CacheDiagnostic(reason));
+    }
     ensure_schema(cache_path)?;
     let mut connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
     let meta = read_meta(&connection).map_err(|_| Fault::Cache)?;
-    if version_mismatch_reason(&meta).is_some() {
+    if let Some(reason) = version_mismatch_reason(&meta) {
         drop(connection);
-        drop_cache_file(cache_path);
+        // A full rebuild can publish the running version even when cache
+        // invalidation fails; its generation CAS still protects the rows.
+        let _ = invalidate_cache_for_reason(cache_path, reason);
         ensure_schema(cache_path)?;
         connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
         return rebuild_cold(beads_dir, cache_path, connection);
     }
-    backfill_meta_keys(&connection)?;
+    backfill_meta_keys(&connection).map_err(WriteFault::into_fault)?;
     if !force {
         // Token-only fast path: a matching token with a recent sweep
         // serves without touching per-stream metadata.
@@ -591,20 +764,25 @@ fn rebuild(
         {
             let snapshot = match load_snapshot(&connection) {
                 Ok(snapshot) => snapshot,
-                Err(_) => {
+                Err(reason) => {
                     drop(connection);
-                    drop_cache_file(cache_path);
-                    return Err(Fault::Cache);
+                    return Err(invalidate_cache_and_report(
+                        cache_path,
+                        format!("cached snapshot unreadable: {reason}"),
+                    ));
                 }
             };
-            note_serve_outcome(&connection);
+            note_serve_outcome(cache_path, &connection);
             return Ok(snapshot);
         }
         let sweep = match sweep_store_signatures(beads_dir) {
             Ok(sweep) => sweep,
             Err(_) => {
                 drop(connection);
-                drop_cache_file(cache_path);
+                invalidate_cache_for_reason(
+                    cache_path,
+                    "store signature sweep unreadable",
+                )?;
                 ensure_schema(cache_path)?;
                 connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
                 return rebuild_cold(beads_dir, cache_path, connection);
@@ -612,19 +790,26 @@ fn rebuild(
         };
         match probe_with(&connection, &meta, &token, &sweep) {
             Probe::Fresh => {
-                if !stamp_freshness_if_current(&connection, &meta, &token, now)?
-                {
+                if !stamp_freshness_if_current(
+                    cache_path,
+                    &connection,
+                    &meta,
+                    &token,
+                    now,
+                )? {
                     return Err(Fault::Cache);
                 }
                 let snapshot = match load_snapshot(&connection) {
                     Ok(snapshot) => snapshot,
-                    Err(_) => {
+                    Err(reason) => {
                         drop(connection);
-                        drop_cache_file(cache_path);
-                        return Err(Fault::Cache);
+                        return Err(invalidate_cache_and_report(
+                            cache_path,
+                            format!("cached snapshot unreadable: {reason}"),
+                        ));
                     }
                 };
-                note_serve_outcome(&connection);
+                note_serve_outcome(cache_path, &connection);
                 return Ok(snapshot);
             }
             Probe::Stale => {
@@ -642,9 +827,9 @@ fn rebuild(
                     Err(fault) => Err(fault),
                 };
             }
-            Probe::Unusable(_) => {
+            Probe::Unusable(reason) => {
                 drop(connection);
-                drop_cache_file(cache_path);
+                invalidate_cache_for_reason(cache_path, reason)?;
                 ensure_schema(cache_path)?;
                 connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
                 return rebuild_cold(beads_dir, cache_path, connection);
@@ -690,7 +875,7 @@ pub fn ensure_cache_ready_at(
     }
     match ensure_fresh(beads_dir, cache_path) {
         Ok(ready) => Ok(ready),
-        Err(Fault::Cache) => Ok(false),
+        Err(Fault::Cache | Fault::CacheDiagnostic(_)) => Ok(false),
         Err(Fault::Store(error)) => Err(error),
     }
 }
@@ -726,7 +911,7 @@ pub fn ensure_cache_ready_for_mutation_at(
     }
     match ensure_fresh_forced(beads_dir, cache_path) {
         Ok(ready) => Ok(ready),
-        Err(Fault::Cache) => Ok(false),
+        Err(Fault::Cache | Fault::CacheDiagnostic(_)) => Ok(false),
         Err(Fault::Store(error)) => Err(error),
     }
 }
@@ -763,7 +948,10 @@ fn rebuild_not_a_database(
     connection: Connection,
 ) -> Result<bool, Fault> {
     drop(connection);
-    drop_cache_file(cache_path);
+    invalidate_cache_for_reason(
+        cache_path,
+        "cache file is not a SQLite database",
+    )?;
     ensure_schema(cache_path)?;
     let connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
     rebuild_cold_discard(beads_dir, cache_path, connection)
@@ -780,7 +968,10 @@ fn open_or_heal_for_freshness(cache_path: &Path) -> Result<Connection, Fault> {
     match open_read_write(cache_path, REBUILD_BUSY_TIMEOUT) {
         Ok(connection) => Ok(connection),
         Err(_) if cache_file_is_not_a_database(cache_path) => {
-            drop_cache_file(cache_path);
+            invalidate_cache_for_reason(
+                cache_path,
+                "cache file is not a SQLite database",
+            )?;
             ensure_schema(cache_path)?;
             open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)
         }
@@ -789,6 +980,13 @@ fn open_or_heal_for_freshness(cache_path: &Path) -> Result<Connection, Fault> {
 }
 
 fn ensure_fresh(beads_dir: &Path, cache_path: &Path) -> Result<bool, Fault> {
+    if let Some(fault) = rebuild_backoff_fault(cache_path) {
+        return Err(fault);
+    }
+    if let Some(reason) = newer_cache_version_reason(cache_path) {
+        set_cache_diagnostic(cache_path, reason.clone());
+        return Err(Fault::CacheDiagnostic(reason));
+    }
     if ensure_schema(cache_path).is_err() {
         return Err(Fault::Cache);
     }
@@ -800,14 +998,16 @@ fn ensure_fresh(beads_dir: &Path, cache_path: &Path) -> Result<bool, Fault> {
         }
         Err(_) => return Err(Fault::Cache),
     };
-    if version_mismatch_reason(&meta).is_some() {
+    if let Some(reason) = version_mismatch_reason(&meta) {
         drop(connection);
-        drop_cache_file(cache_path);
+        // Keep the cache's generation CAS as the publication guard if
+        // invalidation itself is unavailable.
+        let _ = invalidate_cache_for_reason(cache_path, reason);
         ensure_schema(cache_path)?;
         connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
         return rebuild_cold_discard(beads_dir, cache_path, connection);
     }
-    backfill_meta_keys(&connection)?;
+    backfill_meta_keys(&connection).map_err(WriteFault::into_fault)?;
     // Token-only fast path: a matching token with a recent sweep serves
     // without touching per-stream metadata, exactly as in `rebuild`.
     let meta = read_meta(&connection).map_err(|_| Fault::Cache)?;
@@ -817,14 +1017,17 @@ fn ensure_fresh(beads_dir: &Path, cache_path: &Path) -> Result<bool, Fault> {
         && now.saturating_sub(meta.last_sweep_ns)
             < READ_MODEL_SWEEP_INTERVAL_SECS as i64 * 1_000_000_000
     {
-        note_serve_outcome(&connection);
+        note_serve_outcome(cache_path, &connection);
         return Ok(true);
     }
     let sweep = match sweep_store_signatures(beads_dir) {
         Ok(sweep) => sweep,
         Err(_) => {
             drop(connection);
-            drop_cache_file(cache_path);
+            invalidate_cache_for_reason(
+                cache_path,
+                "store signature sweep unreadable",
+            )?;
             ensure_schema(cache_path)?;
             connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
             return rebuild_cold_discard(beads_dir, cache_path, connection);
@@ -832,10 +1035,16 @@ fn ensure_fresh(beads_dir: &Path, cache_path: &Path) -> Result<bool, Fault> {
     };
     match probe_with(&connection, &meta, &token, &sweep) {
         Probe::Fresh => {
-            if !stamp_freshness_if_current(&connection, &meta, &token, now)? {
+            if !stamp_freshness_if_current(
+                cache_path,
+                &connection,
+                &meta,
+                &token,
+                now,
+            )? {
                 return Err(Fault::Cache);
             }
-            note_serve_outcome(&connection);
+            note_serve_outcome(cache_path, &connection);
             Ok(true)
         }
         Probe::Stale => {
@@ -855,9 +1064,9 @@ fn ensure_fresh(beads_dir: &Path, cache_path: &Path) -> Result<bool, Fault> {
                 Err(fault) => Err(fault),
             }
         }
-        Probe::Unusable(_) => {
+        Probe::Unusable(reason) => {
             drop(connection);
-            drop_cache_file(cache_path);
+            invalidate_cache_for_reason(cache_path, reason)?;
             ensure_schema(cache_path)?;
             connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
             rebuild_cold_discard(beads_dir, cache_path, connection)
@@ -874,6 +1083,13 @@ fn ensure_fresh_forced(
     beads_dir: &Path,
     cache_path: &Path,
 ) -> Result<bool, Fault> {
+    if let Some(fault) = rebuild_backoff_fault(cache_path) {
+        return Err(fault);
+    }
+    if let Some(reason) = newer_cache_version_reason(cache_path) {
+        set_cache_diagnostic(cache_path, reason.clone());
+        return Err(Fault::CacheDiagnostic(reason));
+    }
     if ensure_schema(cache_path).is_err() {
         return Err(Fault::Cache);
     }
@@ -885,14 +1101,16 @@ fn ensure_fresh_forced(
         }
         Err(_) => return Err(Fault::Cache),
     };
-    if version_mismatch_reason(&meta).is_some() {
+    if let Some(reason) = version_mismatch_reason(&meta) {
         drop(connection);
-        drop_cache_file(cache_path);
+        // Keep the cache's generation CAS as the publication guard if
+        // invalidation itself is unavailable.
+        let _ = invalidate_cache_for_reason(cache_path, reason);
         ensure_schema(cache_path)?;
         connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
         return rebuild_cold_discard(beads_dir, cache_path, connection);
     }
-    backfill_meta_keys(&connection)?;
+    backfill_meta_keys(&connection).map_err(WriteFault::into_fault)?;
     let meta = read_meta(&connection).map_err(|_| Fault::Cache)?;
     let token = freshness_token(beads_dir).map_err(|_| Fault::Cache)?;
     let now = now_ns();
@@ -900,7 +1118,10 @@ fn ensure_fresh_forced(
         Ok(sweep) => sweep,
         Err(_) => {
             drop(connection);
-            drop_cache_file(cache_path);
+            invalidate_cache_for_reason(
+                cache_path,
+                "store signature sweep unreadable",
+            )?;
             ensure_schema(cache_path)?;
             connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
             return rebuild_cold_discard(beads_dir, cache_path, connection);
@@ -908,10 +1129,16 @@ fn ensure_fresh_forced(
     };
     match probe_with(&connection, &meta, &token, &sweep) {
         Probe::Fresh => {
-            if !stamp_freshness_if_current(&connection, &meta, &token, now)? {
+            if !stamp_freshness_if_current(
+                cache_path,
+                &connection,
+                &meta,
+                &token,
+                now,
+            )? {
                 return Err(Fault::Cache);
             }
-            note_serve_outcome(&connection);
+            note_serve_outcome(cache_path, &connection);
             Ok(true)
         }
         Probe::Stale => {
@@ -932,9 +1159,9 @@ fn ensure_fresh_forced(
                 Err(fault) => Err(fault),
             }
         }
-        Probe::Unusable(_) => {
+        Probe::Unusable(reason) => {
             drop(connection);
-            drop_cache_file(cache_path);
+            invalidate_cache_for_reason(cache_path, reason)?;
             ensure_schema(cache_path)?;
             connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
             rebuild_cold_discard(beads_dir, cache_path, connection)
@@ -995,6 +1222,62 @@ pub(super) fn rebuild_from_replay(
     start_generation: u64,
     reason: &str,
 ) -> Result<CachedStoreSnapshot, Fault> {
+    if let Some(fault) = rebuild_backoff_fault(cache_path) {
+        return Err(fault);
+    }
+    if let Some(reason) = newer_cache_version_reason(cache_path) {
+        set_cache_diagnostic(cache_path, reason.clone());
+        return Err(Fault::CacheDiagnostic(reason));
+    }
+    let result = rebuild_from_replay_inner(
+        beads_dir,
+        cache_path,
+        token,
+        start_generation,
+        reason,
+    );
+    match &result {
+        Ok(_) => {
+            clear_failed_rebuild(cache_path);
+            clear_cache_diagnostic(cache_path);
+        }
+        Err(Fault::Cache)
+            if another_writer_advanced_cache(cache_path, start_generation) => {}
+        Err(Fault::Cache) => {
+            mark_failed_rebuild(cache_path);
+            set_cache_diagnostic(
+                cache_path,
+                "read-model rebuild failed; replay served this read",
+            );
+        }
+        Err(Fault::CacheDiagnostic(reason)) => {
+            mark_failed_rebuild(cache_path);
+            set_cache_diagnostic(cache_path, reason.clone());
+        }
+        Err(Fault::Store(_)) => {}
+    }
+    result
+}
+
+/// A generation change while replay was in progress is a lost race, not a
+/// failed rebuild; let the next freshness pass inspect the winning cache.
+fn another_writer_advanced_cache(
+    cache_path: &Path,
+    start_generation: u64,
+) -> bool {
+    let Ok(connection) = open_read_only(cache_path, SERVE_BUSY_TIMEOUT) else {
+        return false;
+    };
+    read_meta(&connection).is_ok_and(|meta| meta.generation != start_generation)
+}
+
+fn rebuild_from_replay_inner(
+    beads_dir: &Path,
+    cache_path: &Path,
+    token: &str,
+    start_generation: u64,
+    reason: &str,
+) -> Result<CachedStoreSnapshot, Fault> {
     let (streams, signatures) =
         match read_event_store_with_stream_signatures(beads_dir) {
             Ok((_, streams, signatures)) => (streams, signatures),
@@ -1014,25 +1297,35 @@ pub(super) fn rebuild_from_replay(
         Err(error) => return Err(Fault::Store(error)),
     };
     let connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
-    connection
-        .execute_batch("BEGIN IMMEDIATE")
-        .map_err(|_| Fault::Cache)?;
-    let outcome = write_snapshot_in_txn(
-        &connection,
-        &snapshot,
-        &signature_map,
-        token,
-        &frontier,
-        start_generation,
-    )
-    .and_then(|()| record_manifest_config_in_txn(&connection, &fingerprint))
-    .and_then(|()| bump_outcome_in_txn(&connection, "outcome_rebuild"))
-    .and_then(|()| record_refresh_in_txn(&connection, "rebuild", reason));
+    let outcome = run_cache_write_with_repair(cache_path, &connection, || {
+        #[cfg(test)]
+        if should_inject_rebuild_write_failure(cache_path) {
+            return Err(WriteFault::other(
+                "injected persistent read-model cache write fault",
+            ));
+        }
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(WriteFault::from_sqlite)?;
+        write_snapshot_in_txn(
+            &connection,
+            &snapshot,
+            &signature_map,
+            token,
+            &frontier,
+            start_generation,
+        )?;
+        record_manifest_config_in_txn(&connection, &fingerprint)?;
+        bump_outcome_in_txn(&connection, "outcome_rebuild")?;
+        record_refresh_in_txn(&connection, "rebuild", reason)?;
+        connection
+            .execute_batch("COMMIT")
+            .map_err(WriteFault::from_sqlite)?;
+        Ok(())
+    });
     match outcome {
         Ok(()) => {
-            connection
-                .execute_batch("COMMIT")
-                .map_err(|_| Fault::Cache)?;
+            clear_cache_diagnostic(cache_path);
         }
         Err(WriteFault::CasLost) => {
             let _ = connection.execute_batch("ROLLBACK");
@@ -1044,11 +1337,15 @@ pub(super) fn rebuild_from_replay(
                 _ => Err(Fault::Cache),
             };
         }
-        Err(WriteFault::Other) => {
-            let _ = connection.execute_batch("ROLLBACK");
+        Err(WriteFault::Recreated(reason)) => {
             drop(connection);
-            drop_cache_file(cache_path);
-            return Err(Fault::Cache);
+            set_cache_diagnostic(cache_path, reason.clone());
+            return Err(Fault::CacheDiagnostic(reason));
+        }
+        Err(fault @ (WriteFault::Other(_) | WriteFault::Corrupt(_))) => {
+            let message = format!("read-model rebuild write failed: {fault:?}");
+            drop(connection);
+            return Err(invalidate_cache_and_report(cache_path, message));
         }
     }
     drop(connection);
@@ -1061,13 +1358,17 @@ pub(super) fn rebuild_from_replay(
                 .map_err(|_| Fault::Cache)?;
             if load_stream_signatures(&connection) != current.streams {
                 drop(connection);
-                drop_cache_file(cache_path);
-                return Err(Fault::Cache);
+                return Err(invalidate_cache_and_report(
+                    cache_path,
+                    "post-rebuild stream sweep changed",
+                ));
             }
         }
         Err(_) => {
-            drop_cache_file(cache_path);
-            return Err(Fault::Cache);
+            return Err(invalidate_cache_and_report(
+                cache_path,
+                "post-rebuild stream sweep unreadable",
+            ));
         }
     }
     Ok(snapshot)
@@ -1207,13 +1508,36 @@ fn version_mismatch_reason(meta: &CacheMeta) -> Option<String> {
 /// Best-effort and non-blocking: the counter update runs with a zero
 /// wait, so a serve never stalls behind a concurrent rebuild's write
 /// transaction. A lost bump only undercounts telemetry, never content.
-pub(super) fn note_serve_outcome(connection: &Connection) {
+pub(super) fn note_serve_outcome(cache_path: &Path, connection: &Connection) {
     let _ = connection.busy_timeout(Duration::ZERO);
-    let _ = connection.execute(
+    let result = connection.execute(
         "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'outcome_serve'",
         [],
     );
     let _ = connection.busy_timeout(REBUILD_BUSY_TIMEOUT);
+    if let Err(error) = result {
+        if let WriteFault::Corrupt(reason) = WriteFault::from_sqlite(error) {
+            let outcome = run_cache_write_with_repair(
+                cache_path,
+                connection,
+                || {
+                    connection
+                    .execute(
+                        "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'outcome_serve'",
+                        [],
+                    )
+                    .map_err(WriteFault::from_sqlite)?;
+                    Ok(())
+                },
+            );
+            if let Err(repair_error) = outcome {
+                set_cache_diagnostic(
+                    cache_path,
+                    format!("serve outcome write failed ({reason}); repair failed: {repair_error:?}"),
+                );
+            }
+        }
+    }
 }
 
 /// Bump one outcome counter inside the caller's open write transaction.
@@ -1226,7 +1550,7 @@ pub(super) fn bump_outcome_in_txn(
             "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = ?1",
             rusqlite::params![key],
         )
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::from_sqlite)?;
     Ok(())
 }
 
@@ -1244,7 +1568,7 @@ pub(super) fn record_refresh_in_txn(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 rusqlite::params![key, value],
             )
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
     }
     Ok(())
 }
@@ -1253,16 +1577,16 @@ pub(super) fn update_token_and_sweep(
     connection: &Connection,
     token: &str,
     now_ns: i64,
-) -> Result<(), Fault> {
+) -> Result<(), WriteFault> {
     connection
         .execute("UPDATE meta SET value = ?1 WHERE key = 'token'", [token])
-        .map_err(|_| Fault::Cache)?;
+        .map_err(WriteFault::from_sqlite)?;
     connection
         .execute(
             "UPDATE meta SET value = ?1 WHERE key = 'last_sweep_ns'",
             [now_ns.to_string()],
         )
-        .map_err(|_| Fault::Cache)?;
+        .map_err(WriteFault::from_sqlite)?;
     Ok(())
 }
 
@@ -1275,21 +1599,22 @@ pub(super) fn update_token_and_sweep(
 /// fast path and must never re-arm a cache that was invalidated in
 /// place. Write faults surface as [`Fault::Cache`].
 pub(super) fn stamp_freshness_if_current(
+    cache_path: &Path,
     connection: &Connection,
     meta: &CacheMeta,
     token: &str,
     now_ns: i64,
 ) -> Result<bool, Fault> {
-    connection
-        .execute_batch("BEGIN IMMEDIATE")
-        .map_err(|_| Fault::Cache)?;
-    let outcome = (|| {
+    let outcome = run_cache_write_with_repair(cache_path, connection, || {
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(WriteFault::from_sqlite)?;
         let generation_held = connection
             .execute(
                 "UPDATE meta SET value = value WHERE key = 'generation' AND value = ?1",
                 rusqlite::params![meta.generation.to_string()],
             )
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
         if generation_held != 1 {
             return Err(WriteFault::CasLost);
         }
@@ -1298,7 +1623,7 @@ pub(super) fn stamp_freshness_if_current(
                 "UPDATE meta SET value = value WHERE key = 'content_generation' AND value = ?1",
                 rusqlite::params![meta.content_generation.to_string()],
             )
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
         if content_held != 1 {
             return Err(WriteFault::CasLost);
         }
@@ -1307,7 +1632,7 @@ pub(super) fn stamp_freshness_if_current(
                 "UPDATE meta SET value = value WHERE key = 'streams_known'",
                 [],
             )
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
         if streams_held != 1 {
             return Err(WriteFault::CasLost);
         }
@@ -1316,7 +1641,7 @@ pub(super) fn stamp_freshness_if_current(
                 "UPDATE meta SET value = ?1 WHERE key = 'token' AND value = ?2",
                 rusqlite::params![token, meta.token],
             )
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
         if token_held != 1 {
             return Err(WriteFault::CasLost);
         }
@@ -1325,33 +1650,267 @@ pub(super) fn stamp_freshness_if_current(
                 "UPDATE meta SET value = ?1 WHERE key = 'last_sweep_ns'",
                 [now_ns.to_string()],
             )
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
+        connection
+            .execute_batch("COMMIT")
+            .map_err(WriteFault::from_sqlite)?;
         Ok(())
-    })();
+    });
     match outcome {
-        Ok(()) => {
-            connection
-                .execute_batch("COMMIT")
-                .map_err(|_| Fault::Cache)?;
-            Ok(true)
-        }
+        Ok(()) => Ok(true),
         Err(WriteFault::CasLost) => {
             let _ = connection.execute_batch("ROLLBACK");
             Ok(false)
         }
-        Err(WriteFault::Other) => {
+        Err(error) => {
             let _ = connection.execute_batch("ROLLBACK");
-            Err(Fault::Cache)
+            let reason = format!("freshness stamp failed: {error:?}");
+            set_cache_diagnostic(cache_path, reason.clone());
+            Err(Fault::CacheDiagnostic(reason))
         }
     }
 }
 
 /// Why a snapshot write failed: a lost generation race versus a fault.
+#[derive(Debug)]
 pub(super) enum WriteFault {
     /// Another rebuild committed first; serve what it wrote.
     CasLost,
-    /// Any other write fault; the file is dropped and reads replay.
-    Other,
+    /// SQLite reported a damaged database or a non-database file.
+    Corrupt(String),
+    /// A non-corruption write fault; reads replay after invalidation.
+    Other(String),
+    /// Repair recreated all cache tables; the next read must rebuild.
+    Recreated(String),
+}
+
+impl WriteFault {
+    pub(super) fn from_sqlite(error: rusqlite::Error) -> Self {
+        let message = error.to_string();
+        match error {
+            rusqlite::Error::SqliteFailure(ref code, _)
+                if matches!(
+                    code.code,
+                    rusqlite::ErrorCode::DatabaseCorrupt
+                        | rusqlite::ErrorCode::NotADatabase
+                ) =>
+            {
+                Self::Corrupt(message)
+            }
+            _ => Self::Other(message),
+        }
+    }
+
+    pub(super) fn other(message: impl std::fmt::Display) -> Self {
+        Self::Other(message.to_string())
+    }
+
+    pub(super) fn into_fault(self) -> Fault {
+        match self {
+            Self::CasLost => Fault::Cache,
+            Self::Corrupt(message)
+            | Self::Other(message)
+            | Self::Recreated(message) => Fault::CacheDiagnostic(message),
+        }
+    }
+}
+
+/// Run a complete write transaction, repairing a corrupt index once and
+/// falling back to a fresh empty cache if the retry cannot commit.
+pub(super) fn run_cache_write_with_repair<T>(
+    cache_path: &Path,
+    connection: &Connection,
+    mut operation: impl FnMut() -> Result<T, WriteFault>,
+) -> Result<T, WriteFault> {
+    match operation() {
+        Ok(value) => {
+            clear_cache_diagnostic(cache_path);
+            Ok(value)
+        }
+        Err(WriteFault::CasLost) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(WriteFault::CasLost)
+        }
+        Err(WriteFault::Other(reason)) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(WriteFault::Other(reason))
+        }
+        Err(WriteFault::Recreated(reason)) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(WriteFault::Recreated(reason))
+        }
+        Err(WriteFault::Corrupt(first_error)) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            match reindex_and_check(connection) {
+                Ok(true) => match operation() {
+                    Ok(value) => {
+                        clear_cache_diagnostic(cache_path);
+                        Ok(value)
+                    }
+                    Err(WriteFault::CasLost) => {
+                        let _ = connection.execute_batch("ROLLBACK");
+                        Err(WriteFault::CasLost)
+                    }
+                    Err(retry_error) => {
+                        let _ = connection.execute_batch("ROLLBACK");
+                        recreate_after_corruption(
+                            cache_path,
+                            connection,
+                            first_error,
+                            format!("retry failed: {retry_error:?}"),
+                        )
+                    }
+                },
+                Ok(false) => recreate_after_corruption(
+                    cache_path,
+                    connection,
+                    first_error,
+                    "integrity_check failed after REINDEX".to_string(),
+                ),
+                Err(reindex_error) => recreate_after_corruption(
+                    cache_path,
+                    connection,
+                    first_error,
+                    format!("REINDEX failed: {reindex_error:?}"),
+                ),
+            }
+        }
+    }
+}
+
+fn recreate_after_corruption<T>(
+    cache_path: &Path,
+    connection: &Connection,
+    original_error: String,
+    repair_failure: String,
+) -> Result<T, WriteFault> {
+    match recreate_cache_tables_in_place(connection) {
+        Ok(()) => {
+            let message = format!(
+                "read-model cache repaired by table recreation after {original_error}; {repair_failure}"
+            );
+            set_cache_diagnostic(cache_path, message.clone());
+            Err(WriteFault::Recreated(message))
+        }
+        Err(error) => {
+            let message = format!(
+                "read-model cache corruption ({original_error}); {repair_failure}; table recreation failed: {error:?}"
+            );
+            set_cache_diagnostic(cache_path, message.clone());
+            Err(WriteFault::Other(message))
+        }
+    }
+}
+
+fn reindex_and_check(connection: &Connection) -> Result<bool, WriteFault> {
+    connection
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(WriteFault::from_sqlite)?;
+    let reindexed = connection.execute_batch("REINDEX");
+    if let Err(error) = reindexed {
+        let fault = WriteFault::from_sqlite(error);
+        let _ = connection.execute_batch("ROLLBACK");
+        return Err(fault);
+    }
+    if let Err(error) = connection.execute_batch("COMMIT") {
+        let fault = WriteFault::from_sqlite(error);
+        let _ = connection.execute_batch("ROLLBACK");
+        return Err(fault);
+    }
+    let mut statement = connection
+        .prepare("PRAGMA integrity_check")
+        .map_err(WriteFault::from_sqlite)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(WriteFault::from_sqlite)?;
+    let mut saw_ok = false;
+    for row in rows {
+        let result = row.map_err(WriteFault::from_sqlite)?;
+        if result != "ok" {
+            return Ok(false);
+        }
+        saw_ok = true;
+    }
+    Ok(saw_ok)
+}
+
+fn recreate_cache_tables_in_place(
+    connection: &Connection,
+) -> Result<(), WriteFault> {
+    connection
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(WriteFault::from_sqlite)?;
+    let outcome = (|| {
+        let mut counters = BTreeMap::new();
+        let mut statement = connection
+            .prepare("SELECT key, value FROM meta NOT INDEXED")
+            .map_err(WriteFault::from_sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(WriteFault::from_sqlite)?;
+        for row in rows {
+            let (key, value) = row.map_err(WriteFault::from_sqlite)?;
+            if matches!(
+                key.as_str(),
+                "generation" | "content_generation" | "invalidated_generation"
+            ) {
+                counters.insert(key, value.parse::<u64>().unwrap_or(0));
+            }
+        }
+        drop(statement);
+        for table in [
+            "alloc_child",
+            "alloc_top",
+            "suffix_catalog",
+            "link_provenance",
+            "edges",
+            "issues",
+            "streams",
+            "meta",
+        ] {
+            connection
+                .execute_batch(&format!("DROP TABLE IF EXISTS {table}"))
+                .map_err(WriteFault::from_sqlite)?;
+        }
+        connection
+            .execute_batch(CACHE_SCHEMA_DDL)
+            .map_err(WriteFault::from_sqlite)?;
+        for (key, value) in super::meta_keys::tail_meta_defaults() {
+            connection
+                .execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![key, value],
+                )
+                .map_err(WriteFault::from_sqlite)?;
+        }
+        for key in
+            ["generation", "content_generation", "invalidated_generation"]
+        {
+            let value = counters
+                .get(key)
+                .copied()
+                .unwrap_or_default()
+                .saturating_add(1);
+            connection
+                .execute(
+                    "UPDATE meta SET value = ?1 WHERE key = ?2",
+                    rusqlite::params![value.to_string(), key],
+                )
+                .map_err(WriteFault::from_sqlite)?;
+        }
+        Ok::<(), WriteFault>(())
+    })();
+    match outcome {
+        Ok(()) => connection
+            .execute_batch("COMMIT")
+            .map_err(WriteFault::from_sqlite),
+        Err(error) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 /// Manifest content plus parsed config the tail gate compares.
@@ -1455,7 +2014,7 @@ pub(super) fn record_manifest_config_in_txn(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 rusqlite::params![key, value],
             )
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
     }
     Ok(())
 }
@@ -1474,7 +2033,7 @@ pub(super) fn insert_link_provenance(
         .prepare(
             "INSERT INTO link_provenance (target_ref, source_issue_id, relation, description, origin, direction, uses, actor, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::from_sqlite)?;
     // The map key duplicates the row fields and stays in memory only.
     for provenance in provenance.values() {
         link_stmt
@@ -1489,7 +2048,7 @@ pub(super) fn insert_link_provenance(
                 provenance.actor,
                 provenance.timestamp,
             ])
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
     }
     Ok(())
 }
@@ -1514,7 +2073,7 @@ fn write_snapshot_in_txn(
             "UPDATE meta SET value = ?1 WHERE key = 'generation' AND value = ?2",
             rusqlite::params![new_generation, start_generation.to_string()],
         )
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::from_sqlite)?;
     if changed != 1 {
         return Err(WriteFault::CasLost);
     }
@@ -1529,17 +2088,16 @@ fn write_snapshot_in_txn(
     ] {
         connection
             .execute(&format!("DELETE FROM {table}"), [])
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
     }
-    super::alloc::ensure_alloc_schema(connection)
-        .map_err(|_| WriteFault::Other)?;
+    super::alloc::ensure_alloc_schema(connection).map_err(WriteFault::other)?;
     let alloc_ids: Vec<&str> = snapshot
         .issues
         .iter()
         .map(|issue| issue.id.as_str())
         .collect();
     super::alloc::rebuild_allocation(connection, alloc_ids)
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::other)?;
     let parent_of: BTreeMap<&str, &str> = snapshot
         .issues
         .iter()
@@ -1554,18 +2112,17 @@ fn write_snapshot_in_txn(
         .prepare(
             "INSERT INTO issues (id, position, row, status, issue_type, tier, parent, stream, created_at, external_ref, task_type, plus_one, is_flag) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::from_sqlite)?;
     let mut edge_stmt = connection
         .prepare("INSERT INTO edges (src, dst, kind) VALUES (?1, ?2, ?3)")
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::from_sqlite)?;
     let mut suffix_stmt = connection
         .prepare(
             "INSERT INTO suffix_catalog (suffix, issue_id) VALUES (?1, ?2)",
         )
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::from_sqlite)?;
     for (position, issue) in snapshot.issues.iter().enumerate() {
-        let row =
-            serde_json::to_string(issue).map_err(|_| WriteFault::Other)?;
+        let row = serde_json::to_string(issue).map_err(WriteFault::other)?;
         issue_stmt
             .execute(rusqlite::params![
                 issue.id,
@@ -1582,11 +2139,11 @@ fn write_snapshot_in_txn(
                 issue.plus_one_count() as i64,
                 i64::from(issue.is_flag_task()),
             ])
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
         if let Some(parent) = issue.parent_id.as_deref() {
             edge_stmt
                 .execute(rusqlite::params![issue.id, parent, "parent"])
-                .map_err(|_| WriteFault::Other)?;
+                .map_err(WriteFault::from_sqlite)?;
         }
         for dependency in &issue.dependencies {
             edge_stmt
@@ -1595,11 +2152,11 @@ fn write_snapshot_in_txn(
                     dependency.depends_on_id,
                     "depends_on"
                 ])
-                .map_err(|_| WriteFault::Other)?;
+                .map_err(WriteFault::from_sqlite)?;
         }
         suffix_stmt
             .execute(rusqlite::params![id_suffix(&issue.id), issue.id])
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
     }
     drop(issue_stmt);
     drop(edge_stmt);
@@ -1609,7 +2166,7 @@ fn write_snapshot_in_txn(
         .prepare(
             "INSERT INTO streams (stream_id, size, mtime_ns, inode, byte_len, content_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::from_sqlite)?;
     for (stream_id, signature) in signatures {
         stream_stmt
             .execute(rusqlite::params![
@@ -1620,7 +2177,7 @@ fn write_snapshot_in_txn(
                 signature.size as i64,
                 signature.content_hash,
             ])
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
     }
     drop(stream_stmt);
     let now = now_ns().to_string();
@@ -1637,20 +2194,20 @@ fn write_snapshot_in_txn(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 rusqlite::params![key, value],
             )
-            .map_err(|_| WriteFault::Other)?;
+            .map_err(WriteFault::from_sqlite)?;
     }
     connection
         .execute(
             "INSERT INTO meta (key, value) VALUES ('streams_known', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [],
         )
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::from_sqlite)?;
     connection
         .execute(
             "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'content_generation'",
             [],
         )
-        .map_err(|_| WriteFault::Other)?;
+        .map_err(WriteFault::from_sqlite)?;
     Ok(())
 }
 
@@ -2068,22 +2625,22 @@ const CACHE_SCHEMA_DDL: &str = "
 ///
 /// Additive (`IF NOT EXISTS`): safe on healthy, schema-less, and
 /// partially initialized files alike, and never touches existing rows.
-fn apply_schema_ddl(connection: &Connection) -> Result<(), Fault> {
+fn apply_schema_ddl(connection: &Connection) -> Result<(), WriteFault> {
     connection
         .execute_batch(CACHE_SCHEMA_DDL)
-        .map_err(|_| Fault::Cache)?;
+        .map_err(WriteFault::from_sqlite)?;
     Ok(())
 }
 
 /// Insert any missing meta default without touching existing keys.
-fn insert_meta_defaults(connection: &Connection) -> Result<(), Fault> {
+fn insert_meta_defaults(connection: &Connection) -> Result<(), WriteFault> {
     for (key, value) in tail_meta_defaults() {
         connection
             .execute(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING",
                 rusqlite::params![key, value],
             )
-            .map_err(|_| Fault::Cache)?;
+            .map_err(WriteFault::from_sqlite)?;
     }
     Ok(())
 }
@@ -2152,8 +2709,8 @@ fn create_cache_atomically(cache_path: &Path) -> Result<(), Fault> {
     let created = (|| {
         let connection =
             Connection::open(&temp_path).map_err(|_| Fault::Cache)?;
-        apply_schema_ddl(&connection)?;
-        insert_meta_defaults(&connection)?;
+        apply_schema_ddl(&connection).map_err(WriteFault::into_fault)?;
+        insert_meta_defaults(&connection).map_err(WriteFault::into_fault)?;
         drop(connection);
         match fs::hard_link(&temp_path, cache_path) {
             Ok(()) => Ok(()),
@@ -2175,21 +2732,42 @@ fn create_cache_atomically(cache_path: &Path) -> Result<(), Fault> {
 /// hold the file open.
 fn heal_schema_in_place(cache_path: &Path) -> Result<(), Fault> {
     let connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
-    apply_schema_ddl(&connection)?;
-    backfill_meta_keys(&connection)?;
-    Ok(())
+    match run_cache_write_with_repair(cache_path, &connection, || {
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(WriteFault::from_sqlite)?;
+        apply_schema_ddl(&connection)?;
+        backfill_meta_keys(&connection)?;
+        connection
+            .execute_batch("COMMIT")
+            .map_err(WriteFault::from_sqlite)?;
+        Ok(())
+    }) {
+        Ok(()) => Ok(()),
+        Err(WriteFault::Recreated(reason)) => {
+            set_cache_diagnostic(cache_path, reason);
+            Ok(())
+        }
+        Err(error) => {
+            let reason = format!("cache schema healing failed: {error:?}");
+            set_cache_diagnostic(cache_path, reason);
+            Err(error.into_fault())
+        }
+    }
 }
 
 /// Read one meta counter, defaulting to zero when absent.
 fn meta_counter_value(
     connection: &Connection,
     key: &str,
-) -> Result<u64, Fault> {
+) -> Result<u64, WriteFault> {
     let value: Option<String> = connection
-        .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
-            row.get(0)
-        })
-        .map_err(|_| Fault::Cache)?;
+        .query_row(
+            "SELECT value FROM meta NOT INDEXED WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        )
+        .map_err(WriteFault::from_sqlite)?;
     Ok(value.and_then(|value| value.parse().ok()).unwrap_or(0))
 }
 
@@ -2204,16 +2782,19 @@ fn meta_counter_value(
 /// the running version here, the way file recreation used to reset
 /// them, so the rebuild the next pass runs commits under a matching
 /// version instead of mismatching forever.
-fn invalidate_cache_in_place(cache_path: &Path) -> Result<(), Fault> {
+fn invalidate_cache_in_place(cache_path: &Path) -> Result<(), WriteFault> {
     #[cfg(test)]
     if rebuild_write_stats::take_invalidation_fault() {
-        return Err(Fault::Cache);
+        return Err(WriteFault::other("injected cache invalidation fault"));
     }
-    let connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
-    connection
-        .execute_batch("BEGIN IMMEDIATE")
-        .map_err(|_| Fault::Cache)?;
-    let outcome = (|| {
+    let connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)
+        .map_err(|_| {
+            WriteFault::other("cache could not be opened for invalidation")
+        })?;
+    run_cache_write_with_repair(cache_path, &connection, || {
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(WriteFault::from_sqlite)?;
         apply_schema_ddl(&connection)?;
         backfill_meta_keys(&connection)?;
         let generation = meta_counter_value(&connection, "generation")?;
@@ -2238,25 +2819,16 @@ fn invalidate_cache_in_place(cache_path: &Path) -> Result<(), Fault> {
                     "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     rusqlite::params![key, value],
                 )
-                .map_err(|_| Fault::Cache)?;
+                .map_err(WriteFault::from_sqlite)?;
         }
         connection
             .execute("DELETE FROM meta WHERE key = 'streams_known'", [])
-            .map_err(|_| Fault::Cache)?;
-        Ok::<(), Fault>(())
-    })();
-    match outcome {
-        Ok(()) => {
-            connection
-                .execute_batch("COMMIT")
-                .map_err(|_| Fault::Cache)?;
-        }
-        Err(_) => {
-            let _ = connection.execute_batch("ROLLBACK");
-            return Err(Fault::Cache);
-        }
-    }
-    Ok(())
+            .map_err(WriteFault::from_sqlite)?;
+        connection
+            .execute_batch("COMMIT")
+            .map_err(WriteFault::from_sqlite)?;
+        Ok(())
+    })
 }
 
 /// Ensure a usable cache file exists, healing in place when it does.
@@ -2363,18 +2935,56 @@ fn cache_file_size(cache_path: &Path) -> u64 {
 /// invalidated in place inside a write transaction: rows stay readable,
 /// the generation moves so in-flight compare-and-swaps lose, and the
 /// next freshness pass rebuilds.
-pub(crate) fn drop_cache_file(cache_path: &Path) {
+pub(crate) fn drop_cache_file(cache_path: &Path) -> Result<(), String> {
+    if newer_cache_version_reason(cache_path).is_some() {
+        return Ok(());
+    }
     if !cache_path.is_file() {
         // No live connection can hold an absent path: clear stale
         // companions so the next atomic create starts clean.
         remove_cache_companions(cache_path);
-        return;
+        return Ok(());
     }
     if cache_file_is_not_a_database(cache_path) {
         remove_cache_files(cache_path);
-        return;
+        return Ok(());
     }
-    let _ = invalidate_cache_in_place(cache_path);
+    match invalidate_cache_in_place(cache_path) {
+        Ok(()) => Ok(()),
+        Err(WriteFault::Recreated(reason)) => {
+            set_cache_diagnostic(cache_path, reason);
+            Ok(())
+        }
+        Err(error) => {
+            let reason = format!("cache invalidation failed: {error:?}");
+            set_cache_diagnostic(cache_path, reason.clone());
+            Err(reason)
+        }
+    }
+}
+
+pub(super) fn invalidate_cache_and_report(
+    cache_path: &Path,
+    cause: impl std::fmt::Display,
+) -> Fault {
+    let cause = cause.to_string();
+    let message = match drop_cache_file(cache_path) {
+        Ok(()) => cause,
+        Err(error) => format!("{cause}; {error}"),
+    };
+    set_cache_diagnostic(cache_path, message.clone());
+    Fault::CacheDiagnostic(message)
+}
+
+pub(super) fn invalidate_cache_for_reason(
+    cache_path: &Path,
+    cause: impl std::fmt::Display,
+) -> Result<(), Fault> {
+    drop_cache_file(cache_path).map_err(|error| {
+        let reason = format!("{}; {error}", cause);
+        set_cache_diagnostic(cache_path, reason.clone());
+        Fault::CacheDiagnostic(reason)
+    })
 }
 
 /// Test-only rebuild write counters and invalidation-fault injection.

@@ -550,9 +550,11 @@ impl MutationView {
     /// Only ever built before the first durable write; the runner
     /// refuses a decline afterwards, so a cache fault can never retry
     /// or double-append a mutation.
-    fn cache_fault(&self, message: String) -> BeadError {
+    fn cache_fault(&self, mut message: String) -> BeadError {
         if let MutationViewBacking::Cached { cache_path, .. } = &self.backing {
-            drop_cache_file(cache_path);
+            if let Err(error) = drop_cache_file(cache_path) {
+                message = format!("{message}; {error}");
+            }
         }
         BeadError::cache_fault(message)
     }

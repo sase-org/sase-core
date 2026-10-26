@@ -47,7 +47,7 @@ pub(super) fn refresh_changed_store(
         finish,
     ) {
         Ok(tail::TailDecision::Served(snapshot)) => {
-            note_serve_outcome(&connection);
+            note_serve_outcome(cache_path, &connection);
             Ok(snapshot)
         }
         Ok(tail::TailDecision::Tailed(snapshot)) => Ok(snapshot),

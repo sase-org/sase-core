@@ -1,7 +1,8 @@
 //! Unit tests for the read-model substrate: location, freshness, and
 //! rebuild/serve semantics on small synthetic event stores.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use super::location::read_model_cache_path_for_store;
@@ -33,6 +34,14 @@ fn test_store_path(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
     (beads_dir, cache_path)
 }
 
+fn test_git_store_path(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+    fs::create_dir_all(temp.path().join(".git")).unwrap();
+    let beads_dir = temp.path().join("beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    let cache_path = read_model_cache_path_for_store(&beads_dir).unwrap();
+    (beads_dir, cache_path)
+}
+
 fn seed_event_store(beads_dir: &Path) {
     fs::create_dir_all(beads_dir.join("events/streams")).unwrap();
     fs::write(beads_dir.join("config.json"), "{}\n").unwrap();
@@ -41,6 +50,191 @@ fn seed_event_store(beads_dir: &Path) {
     let streams = import_issues_to_event_streams(&outcome.issues).unwrap();
     assert!(!streams.is_empty());
     write_event_store(beads_dir, &streams).unwrap();
+}
+
+/// Reproduce athena's orphaned `streams_known` entry in the `meta` primary
+/// key index, preserving the old root page over a valid table update.
+fn corrupt_meta_primary_key_index(
+    cache_path: &Path,
+    crate_version: &str,
+    stale_token: bool,
+) {
+    let connection = rusqlite::Connection::open(cache_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;",
+        )
+        .unwrap();
+    let page_size: u32 = connection
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .unwrap();
+    let root_page: u32 = connection
+        .query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name = 'sqlite_autoindex_meta_1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let page_offset = u64::from(root_page - 1) * u64::from(page_size);
+    let bytes = fs::read(cache_path).unwrap();
+    let saved_page = bytes
+        [page_offset as usize..(page_offset + u64::from(page_size)) as usize]
+        .to_vec();
+
+    connection
+        .execute("DELETE FROM meta WHERE key = 'streams_known'", [])
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'crate_version'",
+            [crate_version],
+        )
+        .unwrap();
+    if stale_token {
+        connection
+            .execute(
+                "UPDATE meta SET value = 'stale-token' WHERE key = 'token'",
+                [],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let mut file = OpenOptions::new().write(true).open(cache_path).unwrap();
+    file.seek(SeekFrom::Start(page_offset)).unwrap();
+    file.write_all(&saved_page).unwrap();
+    file.sync_all().unwrap();
+}
+
+fn integrity_check(cache_path: &Path) -> String {
+    rusqlite::Connection::open(cache_path)
+        .unwrap()
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn corrupt_meta_index_is_reindexed_and_rebuilt_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let (beads_dir, cache_path) = test_git_store_path(&temp);
+    seed_event_store(&beads_dir);
+    rebuild_read_model_at(&beads_dir, &cache_path).unwrap();
+    let before = read_model_status_at(&beads_dir, &cache_path);
+    assert!(before.fresh, "{}", before.reason);
+
+    corrupt_meta_primary_key_index(&cache_path, "0.40.0", false);
+    let corrupted = integrity_check(&cache_path);
+    assert!(
+        corrupted
+            .contains("wrong # of entries in index sqlite_autoindex_meta_1"),
+        "expected athena's meta index corruption, got {corrupted}"
+    );
+
+    let served = crate::bead::read::read_store_issues(&beads_dir).unwrap();
+    assert_eq!(served.len(), 2);
+    assert_eq!(integrity_check(&cache_path), "ok");
+    let after = read_model_status_at(&beads_dir, &cache_path);
+    assert!(after.fresh, "{}", after.reason);
+    assert_eq!(after.crate_version, super::store::crate_version());
+    assert_eq!(after.rebuild_count, before.rebuild_count + 1);
+    let generation = after.generation;
+
+    assert_eq!(
+        crate::bead::read::read_store_issues(&beads_dir).unwrap(),
+        served
+    );
+    let second = read_model_status_at(&beads_dir, &cache_path);
+    assert_eq!(second.generation, generation);
+    assert_eq!(second.rebuild_count, after.rebuild_count);
+}
+
+#[test]
+fn corrupt_meta_index_with_matching_version_repairs_stale_rebuild() {
+    let temp = tempfile::tempdir().unwrap();
+    let (beads_dir, cache_path) = test_git_store_path(&temp);
+    seed_event_store(&beads_dir);
+    rebuild_read_model_at(&beads_dir, &cache_path).unwrap();
+    let before = read_model_status_at(&beads_dir, &cache_path);
+
+    corrupt_meta_primary_key_index(
+        &cache_path,
+        &super::store::crate_version(),
+        true,
+    );
+    let corrupted = integrity_check(&cache_path);
+    assert!(corrupted.contains("wrong # of entries in index"));
+
+    let served = crate::bead::read::read_store_issues(&beads_dir).unwrap();
+    assert_eq!(served.len(), 2);
+    assert_eq!(integrity_check(&cache_path), "ok");
+    let after = read_model_status_at(&beads_dir, &cache_path);
+    assert!(after.fresh, "{}", after.reason);
+    assert_eq!(after.rebuild_count, before.rebuild_count + 1);
+    assert_eq!(
+        crate::bead::read::read_store_issues(&beads_dir).unwrap(),
+        served
+    );
+}
+
+#[test]
+fn newer_cache_version_replays_without_modifying_the_cache() {
+    let temp = tempfile::tempdir().unwrap();
+    let (beads_dir, cache_path) = test_git_store_path(&temp);
+    seed_event_store(&beads_dir);
+    rebuild_read_model_at(&beads_dir, &cache_path).unwrap();
+    let expected =
+        crate::bead::read::read_event_store_issues(&beads_dir).unwrap();
+
+    let mut newer =
+        semver::Version::parse(&super::store::crate_version()).unwrap();
+    newer.patch += 1;
+    let connection = rusqlite::Connection::open(&cache_path).unwrap();
+    connection
+        .execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'crate_version'",
+            [newer.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    let before_bytes = fs::read(&cache_path).unwrap();
+    let before_modified =
+        fs::metadata(&cache_path).unwrap().modified().unwrap();
+
+    let actual = crate::bead::read::read_store_issues(&beads_dir).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(fs::read(&cache_path).unwrap(), before_bytes);
+    assert_eq!(
+        fs::metadata(&cache_path).unwrap().modified().unwrap(),
+        before_modified
+    );
+}
+
+#[test]
+fn failed_rebuild_backs_off_for_the_process_window() {
+    let temp = tempfile::tempdir().unwrap();
+    let (beads_dir, cache_path) = test_git_store_path(&temp);
+    seed_event_store(&beads_dir);
+    rebuild_read_model_at(&beads_dir, &cache_path).unwrap();
+    let expected =
+        crate::bead::read::read_event_store_issues(&beads_dir).unwrap();
+    super::store::inject_persistent_rebuild_write_failure(&cache_path);
+
+    assert!(rebuild_read_model_at(&beads_dir, &cache_path)
+        .unwrap()
+        .is_none());
+    let after_failure = fs::read(&cache_path).unwrap();
+    assert!(rebuild_read_model_at(&beads_dir, &cache_path)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        super::store::injected_rebuild_write_attempts(&cache_path),
+        1
+    );
+    assert_eq!(fs::read(&cache_path).unwrap(), after_failure);
+    assert_eq!(
+        crate::bead::read::read_store_issues(&beads_dir).unwrap(),
+        expected
+    );
 }
 
 #[test]
@@ -525,7 +719,7 @@ fn invalidation_never_unlinks_a_live_cache() {
         .unwrap();
     assert_eq!(held_rows, 2);
 
-    super::store::drop_cache_file(&cache_path);
+    super::store::drop_cache_file(&cache_path).unwrap();
 
     // The file was never unlinked, so the held connection still reads
     // the intact rows instead of failing.
@@ -605,12 +799,13 @@ fn freshness_stamp_loses_to_in_place_invalidation() {
     assert!(meta.streams_known);
     drop(connection);
 
-    super::store::drop_cache_file(&cache_path);
+    super::store::drop_cache_file(&cache_path).unwrap();
 
     let connection =
         super::store::open_read_write(&cache_path, Duration::from_secs(5))
             .unwrap_or_else(|_| panic!("invalidated cache must still open"));
     let held = super::store::stamp_freshness_if_current(
+        &cache_path,
         &connection,
         &meta,
         &token,
