@@ -266,6 +266,32 @@ CDN-cached for a short while after an upload (right after the `0.34.48` heal it 
 so re-query before concluding a heal failed. Healing does not add versions: it can only add the missing files of a
 version that already exists.
 
+## Runner starvation
+
+A job GitHub never assigned a runner to looks like this: the check-run annotation says
+`The job was not acquired by Runner of type hosted even after multiple attempts`, the job concludes `cancelled` with
+no steps and no runner (`runner_id: 0`, `runner_name: ""`), the run concludes `failure`, and `twine check`/`publish`
+are skipped. That is what Release-plz run `40346929251` did to `v0.42.7`: only `macos universal2` went red, the other
+four builds succeeded, and the version stayed unpublished for 4.5+ hours until an unrelated push healed it.
+
+`.github/workflows/runner-starvation-retry.yml` watches the `Release-plz` and `CI` workflows for completed `failure`
+runs and reruns the run once when **every** red job is starved in that sense. Mixed failures are never rerun: a job
+that ran and failed may already have uploaded an artifact, and a rerun would rerun that real failure too. A cancelled
+run is never rerun either: cancellation means a person or a concurrency group stopped it. The next push or the
+six-hourly heal stays the backstop, so a rerun that is itself starved is left alone, never rerun a second time.
+
+Manual remedy for one run:
+
+```bash
+gh run rerun <run id> --repo sase-org/sase-core --failed
+```
+
+Live behaviour verified against run `40346929251`: `gh run rerun --failed` does rerun a job whose conclusion was
+`cancelled`, so the helper reruns with `--failed` (attempt 2 picked the macOS job straight up with a real runner).
+Cross-attempt artifacts were still being verified when this shipped: attempt 2 reuses attempt 1's successful jobs, and
+run-scoped artifacts should make `dist/` whole for `twine check`, but confirm on the next starvation rerun by checking
+that its `twine check` step lists all five files.
+
 ## Core backfill
 
 A heal can only top up a version PyPI already knows. When a supported consumer's window holds **no** complete version at

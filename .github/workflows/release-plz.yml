@@ -7,7 +7,9 @@ name: Release-plz
 # than "a release was created in this exact run", so a run that dies between
 # tagging and publishing (runner starvation, discarded queued jobs, transient
 # failures) is retried automatically by the next run instead of leaving the
-# version tagged but unpublished forever (which is how v0.6.0 got stuck).
+# version tagged but unpublished forever (which is how v0.6.0 got stuck). A run
+# whose only red jobs never got a runner is additionally rerun once, within
+# minutes, by runner-starvation-retry.yml; the publish gate stays the backstop.
 #
 # "Complete" means every distribution in EXPECTED_DIST_SUFFIXES (below) is on
 # PyPI and unyanked, not merely that the version answers HTTP 200. A version

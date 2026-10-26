@@ -1,0 +1,43 @@
+name: Runner starvation retry
+
+# Release-plz run 40346929251 stayed red for 4.5+ hours because its only red
+# job (macos universal2) never got a hosted runner: queued, then cancelled
+# with no steps and no runner, while the other builds succeeded and publish
+# waited. The rule is to rerun only when every red job never got a runner,
+# once per run; the publish gate's next-push/six-hourly heal remains the
+# backstop. Names in `workflows:` must equal the watched workflows' `name:`
+# lines (a test pins that).
+on:
+  workflow_run:
+    workflows: [Release-plz, CI]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  rerun-starved:
+    name: Rerun runner-starved jobs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if:
+      ${{ github.repository_owner == 'sase-org' && github.event.workflow_run.conclusion
+      == 'failure' }}
+    permissions:
+      actions: write
+      contents: read
+    concurrency:
+      group: runner-starvation-retry-${{ github.event.workflow_run.id }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Rerun jobs no runner picked up
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: python3 .github/scripts/rerun_starved_jobs.py
