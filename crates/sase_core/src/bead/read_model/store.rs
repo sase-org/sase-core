@@ -486,28 +486,26 @@ pub(super) enum ServeOutcome {
     Unusable,
 }
 
-/// Open the cache read-only and load its rows without a freshness probe.
+/// Open the cache read-only and serve it only when it is still fresh.
 ///
-/// Used only when the caller just established freshness another way (a
-/// lost generation race means the winner committed fresh rows). A
-/// version mismatch drops to `Unusable`; unreadable rows drop the file
-/// and report the fault.
+/// Used when a lost generation race means another writer committed
+/// first: serve that winner's rows only if a freshness probe still
+/// agrees. An invalidated, stale, version-mismatched, or unreadable
+/// file is `Unusable` so the caller falls back instead of publishing
+/// leftover rows as a successful rebuild.
 pub(super) fn open_and_serve(
+    beads_dir: &Path,
     cache_path: &Path,
 ) -> Result<ServeOutcome, String> {
     let connection = open_read_only(cache_path, SERVE_BUSY_TIMEOUT)?;
-    let meta = read_meta(&connection)?;
-    if version_mismatch_reason(&meta).is_some() {
-        return Ok(ServeOutcome::Unusable);
+    match probe_cache(&connection, beads_dir) {
+        Probe::Fresh => Ok(ServeOutcome::Hit(
+            load_snapshot(&connection).inspect_err(|_| {
+                drop_cache_file(cache_path);
+            })?,
+        )),
+        Probe::Stale | Probe::Unusable(_) => Ok(ServeOutcome::Unusable),
     }
-    // Freshness is decided by the caller before serving, except here the
-    // file may have changed under us: re-check the token cheaply is the
-    // caller's job, so a direct serve trusts the stored rows.
-    Ok(ServeOutcome::Hit(load_snapshot(&connection).inspect_err(
-        |_| {
-            drop_cache_file(cache_path);
-        },
-    )?))
 }
 
 /// Read-only freshness probe: no writes, no replay.
@@ -578,6 +576,7 @@ fn rebuild(
         drop_cache_file(cache_path);
         ensure_schema(cache_path)?;
         connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
+        return rebuild_cold(beads_dir, cache_path, connection);
     }
     backfill_meta_keys(&connection)?;
     if !force {
@@ -1040,7 +1039,7 @@ pub(super) fn rebuild_from_replay(
             // Another writer committed first: serve what it wrote
             // instead of replaying.
             drop(connection);
-            return match open_and_serve(cache_path) {
+            return match open_and_serve(beads_dir, cache_path) {
                 Ok(ServeOutcome::Hit(fresh)) => Ok(fresh),
                 _ => Err(Fault::Cache),
             };
@@ -1497,9 +1496,10 @@ pub(super) fn insert_link_provenance(
 
 /// Persist one snapshot plus signatures and frontier in the open txn.
 ///
-/// The generation compare-and-swap commits only when the generation the
-/// caller started from is still current, so two racing rebuilds never
-/// pair newer signatures with older content.
+/// The generation compare-and-swap runs before any table rewrite, so a
+/// lost race never pays the DELETE/INSERT WAL. Version keys are written
+/// with the snapshot so a committed rebuild publishes the running crate
+/// even when in-place invalidation failed to stamp them first.
 fn write_snapshot_in_txn(
     connection: &Connection,
     snapshot: &CachedStoreSnapshot,
@@ -1508,6 +1508,18 @@ fn write_snapshot_in_txn(
     frontier: &str,
     start_generation: u64,
 ) -> Result<(), WriteFault> {
+    let new_generation = start_generation.saturating_add(1).to_string();
+    let changed = connection
+        .execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'generation' AND value = ?2",
+            rusqlite::params![new_generation, start_generation.to_string()],
+        )
+        .map_err(|_| WriteFault::Other)?;
+    if changed != 1 {
+        return Err(WriteFault::CasLost);
+    }
+    #[cfg(test)]
+    rebuild_write_stats::record_table_rewrite();
     for table in [
         "issues",
         "edges",
@@ -1616,6 +1628,9 @@ fn write_snapshot_in_txn(
         ("token", token.to_string()),
         ("last_sweep_ns", now),
         ("frontier", frontier.to_string()),
+        ("schema_version", READ_MODEL_SCHEMA_VERSION.to_string()),
+        ("reducer_version", READ_MODEL_REDUCER_VERSION.to_string()),
+        ("crate_version", crate_version()),
     ] {
         connection
             .execute(
@@ -1630,16 +1645,6 @@ fn write_snapshot_in_txn(
             [],
         )
         .map_err(|_| WriteFault::Other)?;
-    let new_generation = start_generation.saturating_add(1).to_string();
-    let changed = connection
-        .execute(
-            "UPDATE meta SET value = ?1 WHERE key = 'generation' AND value = ?2",
-            rusqlite::params![new_generation, start_generation.to_string()],
-        )
-        .map_err(|_| WriteFault::Other)?;
-    if changed != 1 {
-        return Err(WriteFault::CasLost);
-    }
     connection
         .execute(
             "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'content_generation'",
@@ -2200,6 +2205,10 @@ fn meta_counter_value(
 /// them, so the rebuild the next pass runs commits under a matching
 /// version instead of mismatching forever.
 fn invalidate_cache_in_place(cache_path: &Path) -> Result<(), Fault> {
+    #[cfg(test)]
+    if rebuild_write_stats::take_invalidation_fault() {
+        return Err(Fault::Cache);
+    }
     let connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
     connection
         .execute_batch("BEGIN IMMEDIATE")
@@ -2366,4 +2375,41 @@ pub(crate) fn drop_cache_file(cache_path: &Path) {
         return;
     }
     let _ = invalidate_cache_in_place(cache_path);
+}
+
+/// Test-only rebuild write counters and invalidation-fault injection.
+///
+/// `table_rewrites` counts snapshot table clears inside
+/// [`write_snapshot_in_txn`], which is the wasted-WAL boundary a lost
+/// generation CAS must not reach. `full_replays` on `store_io_stats`
+/// measures mutation-load replay, not these replacement writes.
+#[cfg(test)]
+pub(super) mod rebuild_write_stats {
+    use std::cell::Cell;
+
+    thread_local! {
+        static TABLE_REWRITES: Cell<u64> = const { Cell::new(0) };
+        static INVALIDATION_FAULT: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub fn reset() {
+        TABLE_REWRITES.with(|cell| cell.set(0));
+        INVALIDATION_FAULT.with(|cell| cell.set(false));
+    }
+
+    pub fn table_rewrites() -> u64 {
+        TABLE_REWRITES.with(Cell::get)
+    }
+
+    pub fn record_table_rewrite() {
+        TABLE_REWRITES.with(|cell| cell.set(cell.get().saturating_add(1)));
+    }
+
+    pub fn force_next_invalidation_fault() {
+        INVALIDATION_FAULT.with(|cell| cell.set(true));
+    }
+
+    pub(super) fn take_invalidation_fault() -> bool {
+        INVALIDATION_FAULT.with(|cell| cell.replace(false))
+    }
 }

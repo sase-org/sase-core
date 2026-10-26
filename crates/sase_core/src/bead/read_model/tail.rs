@@ -866,7 +866,7 @@ fn commit_tail(
         }
         Err(WriteFault::CasLost) => {
             let _ = connection.execute_batch("ROLLBACK");
-            return match open_and_serve(cache_path) {
+            return match open_and_serve(beads_dir, cache_path) {
                 Ok(ServeOutcome::Hit(fresh)) => {
                     Ok(TailDecision::Served(Some(fresh)))
                 }

@@ -18,6 +18,8 @@ mod store;
 mod tail;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_version;
 
 pub use freshness::{sweep_store_signatures, READ_MODEL_SWEEP_INTERVAL_SECS};
 pub use location::read_model_cache_path_for_store;
