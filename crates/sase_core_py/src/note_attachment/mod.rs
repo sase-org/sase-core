@@ -27,10 +27,200 @@ use sase_core::note_attachment::{
     AttachmentStoreTierWire, NoteAttachmentScanWire,
 };
 
+use sase_core::agent_publication_protection::{
+    publication_protection_ledger_empty as core_publication_protection_ledger_empty,
+    publication_protection_ledger_validate as core_publication_protection_ledger_validate,
+    publication_protection_lookup as core_publication_protection_lookup,
+    publication_protection_record_from_rejection as core_publication_protection_record_from_rejection,
+    publication_protection_record_from_scan as core_publication_protection_record_from_scan,
+    publication_protection_resolve_verified_clean as core_publication_protection_resolve_verified_clean,
+    publication_protection_retry_allowed as core_publication_protection_retry_allowed,
+    publication_protection_upsert as core_publication_protection_upsert,
+    publication_scan_disposition as core_publication_scan_disposition,
+    AgentPublicationProtectionError, PublicationProtectionLedgerWire,
+    PublicationProtectionLookupRequestWire,
+    PublicationProtectionRecordFromRejectionRequestWire,
+    PublicationProtectionRecordFromScanRequestWire,
+    PublicationProtectionResolveVerifiedCleanRequestWire,
+    PublicationProtectionUpsertRequestWire,
+    PublicationScanDispositionRequestWire,
+    AGENT_PUBLICATION_PROTECTION_WIRE_SCHEMA_VERSION,
+};
+
 fn note_attachment_error_to_pyerr(
     error: sase_core::note_attachment::NoteAttachmentError,
 ) -> PyErr {
     PyValueError::new_err(error.to_string())
+}
+
+fn publication_protection_error_to_pyerr(
+    error: AgentPublicationProtectionError,
+) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+#[pyfunction]
+#[pyo3(name = "agent_publication_protection_wire_schema_version")]
+fn py_agent_publication_protection_wire_schema_version() -> u32 {
+    AGENT_PUBLICATION_PROTECTION_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "publication_scan_disposition")]
+fn py_publication_scan_disposition<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PublicationScanDispositionRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid PublicationScanDispositionRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    core_publication_scan_disposition(&request)
+        .map(|result| serialize_to_py(py, &result))
+        .map_err(publication_protection_error_to_pyerr)?
+}
+
+#[pyfunction]
+#[pyo3(name = "publication_protection_ledger_empty")]
+fn py_publication_protection_ledger_empty<'py>(
+    py: Python<'py>,
+) -> PyResult<PyObject> {
+    serialize_to_py(py, &core_publication_protection_ledger_empty())
+}
+
+#[pyfunction]
+#[pyo3(name = "publication_protection_ledger_validate")]
+fn py_publication_protection_ledger_validate<'py>(
+    py: Python<'py>,
+    ledger: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let ledger: PublicationProtectionLedgerWire =
+        serde_json::from_value(py_to_json_value(ledger.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "ledger is not a valid PublicationProtectionLedgerWire dict: {error}"
+                ))
+            },
+        )?;
+    core_publication_protection_ledger_validate(&ledger)
+        .map(|result| serialize_to_py(py, &result))
+        .map_err(publication_protection_error_to_pyerr)?
+}
+
+#[pyfunction]
+#[pyo3(name = "publication_protection_record_from_scan")]
+fn py_publication_protection_record_from_scan<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PublicationProtectionRecordFromScanRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid PublicationProtectionRecordFromScanRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    core_publication_protection_record_from_scan(&request)
+        .map(|result| serialize_to_py(py, &result))
+        .map_err(publication_protection_error_to_pyerr)?
+}
+
+#[pyfunction]
+#[pyo3(name = "publication_protection_record_from_rejection")]
+fn py_publication_protection_record_from_rejection<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PublicationProtectionRecordFromRejectionRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid PublicationProtectionRecordFromRejectionRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    core_publication_protection_record_from_rejection(&request)
+        .map(|result| serialize_to_py(py, &result))
+        .map_err(publication_protection_error_to_pyerr)?
+}
+
+#[pyfunction]
+#[pyo3(name = "publication_protection_upsert")]
+fn py_publication_protection_upsert<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PublicationProtectionUpsertRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid PublicationProtectionUpsertRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    core_publication_protection_upsert(&request)
+        .map(|result| serialize_to_py(py, &result))
+        .map_err(publication_protection_error_to_pyerr)?
+}
+
+#[pyfunction]
+#[pyo3(name = "publication_protection_lookup")]
+fn py_publication_protection_lookup<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PublicationProtectionLookupRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid PublicationProtectionLookupRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    core_publication_protection_lookup(&request)
+        .map(|result| serialize_to_py(py, &result))
+        .map_err(publication_protection_error_to_pyerr)?
+}
+
+#[pyfunction]
+#[pyo3(name = "publication_protection_retry_allowed")]
+fn py_publication_protection_retry_allowed(
+    request: &Bound<'_, PyDict>,
+) -> PyResult<bool> {
+    let request: PublicationProtectionLookupRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid PublicationProtectionLookupRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    core_publication_protection_retry_allowed(&request)
+        .map_err(publication_protection_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "publication_protection_resolve_verified_clean")]
+fn py_publication_protection_resolve_verified_clean<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PublicationProtectionResolveVerifiedCleanRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid PublicationProtectionResolveVerifiedCleanRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    core_publication_protection_resolve_verified_clean(&request)
+        .map(|result| serialize_to_py(py, &result))
+        .map_err(publication_protection_error_to_pyerr)?
 }
 
 #[pyfunction]
@@ -234,6 +424,37 @@ fn py_attachment_object_digest_from_relpath(relpath: &str) -> PyResult<String> {
 pub(crate) fn register_note_attachment(
     m: &Bound<'_, PyModule>,
 ) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(
+        py_agent_publication_protection_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_publication_scan_disposition, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_publication_protection_ledger_empty,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_publication_protection_ledger_validate,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_publication_protection_record_from_scan,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_publication_protection_record_from_rejection,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_publication_protection_upsert, m)?)?;
+    m.add_function(wrap_pyfunction!(py_publication_protection_lookup, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_publication_protection_retry_allowed,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_publication_protection_resolve_verified_clean,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_classify_attachment, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_note_attachment_refs, m)?)?;
     m.add_function(wrap_pyfunction!(py_compose_note_attachment_text, m)?)?;

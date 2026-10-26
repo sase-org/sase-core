@@ -372,6 +372,22 @@ fn py_decide_sidecar_publication_after_push<'py>(
     sidecar_publication_decision_to_py(py, &decision)
 }
 
+/// Classify untrusted remote output and retain only validated attribution fields.
+#[pyfunction]
+#[pyo3(name = "classify_sidecar_publication_push_result")]
+fn py_classify_sidecar_publication_push_result<'py>(
+    py: Python<'py>,
+    returncode: i32,
+    stdout: &str,
+    stderr: &str,
+) -> PyResult<PyObject> {
+    let rejection =
+        sase_core::sidecar_publication::classify_sidecar_publication_push_result(
+            returncode, stdout, stderr,
+        );
+    serialize_to_py(py, &rejection)
+}
+
 fn sidecar_publication_decision_to_py<'py>(
     py: Python<'py>,
     decision: &SidecarPublicationDecisionWire,
@@ -873,6 +889,10 @@ pub(crate) fn register_vcs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_classify_failure_retryability, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_decide_sidecar_publication_after_push,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_classify_sidecar_publication_push_result,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

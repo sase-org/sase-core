@@ -27,9 +27,134 @@ fn note_attachment_bindings_are_registered() {
             "attachment_canonical_extension",
             "attachment_public_object_relpath",
             "attachment_object_digest_from_relpath",
+            "agent_publication_protection_wire_schema_version",
+            "publication_scan_disposition",
+            "publication_protection_ledger_empty",
+            "publication_protection_ledger_validate",
+            "publication_protection_record_from_scan",
+            "publication_protection_record_from_rejection",
+            "publication_protection_upsert",
+            "publication_protection_lookup",
+            "publication_protection_retry_allowed",
+            "publication_protection_resolve_verified_clean",
         ] {
             assert!(module.getattr(name).is_ok(), "{name} is registered");
         }
+    });
+}
+
+#[test]
+fn publication_protection_bindings_round_trip_content_blocks() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        register_note_attachment(&module).unwrap();
+        assert_eq!(py_agent_publication_protection_wire_schema_version(), 1);
+        let ledger = py_publication_protection_ledger_empty(py).unwrap();
+        let mut ledger = py_to_json_value(ledger.bind(py)).unwrap();
+        assert_eq!(ledger["schema_version"], json!(1));
+
+        let disposition_input = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "scan": {
+                    "outcome": "hit",
+                    "hit": {
+                        "kind": "credential_pattern",
+                        "rule_id": "private-key-header",
+                        "line": 4
+                    },
+                    "bytes_scanned": 128,
+                    "rules_version": 1
+                },
+                "failure": null
+            }),
+        )
+        .unwrap();
+        let disposition_input =
+            disposition_input.bind(py).downcast::<PyDict>().unwrap();
+        let disposition =
+            py_publication_scan_disposition(py, disposition_input).unwrap();
+        let disposition = py_to_json_value(disposition.bind(py)).unwrap();
+        assert_eq!(disposition["status"], json!("blocked"));
+        assert_eq!(disposition["hit"]["rule_id"], json!("private-key-header"));
+
+        let record_input = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "identity": {
+                    "repository_identity": "sase-org/sase--agents",
+                    "relative_destination": "agents/a/run/chat.md",
+                    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "affected_requests": ["request-a"],
+                "disposition": disposition,
+                "timestamp": 42.0
+            }),
+        )
+        .unwrap();
+        let record_input = record_input.bind(py).downcast::<PyDict>().unwrap();
+        let record =
+            py_publication_protection_record_from_scan(py, record_input)
+                .unwrap();
+        let record = py_to_json_value(record.bind(py)).unwrap();
+
+        let upsert_input = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "ledger": ledger,
+                "record": record
+            }),
+        )
+        .unwrap();
+        let upsert_input = upsert_input.bind(py).downcast::<PyDict>().unwrap();
+        let upserted =
+            py_publication_protection_upsert(py, upsert_input).unwrap();
+        ledger = py_to_json_value(upserted.bind(py)).unwrap();
+        assert_eq!(ledger["records"].as_array().unwrap().len(), 1);
+
+        let lookup_input = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "ledger": ledger,
+                "identity": {
+                    "repository_identity": "sase-org/sase--agents",
+                    "relative_destination": "agents/a/run/chat.md",
+                    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            }),
+        )
+        .unwrap();
+        let lookup_input = lookup_input.bind(py).downcast::<PyDict>().unwrap();
+        assert!(!py_publication_protection_retry_allowed(lookup_input).unwrap());
+        let resolve_input = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "ledger": ledger,
+                "identity": {
+                    "repository_identity": "sase-org/sase--agents",
+                    "relative_destination": "agents/a/run/chat.md",
+                    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            }),
+        )
+        .unwrap();
+        let resolve_input =
+            resolve_input.bind(py).downcast::<PyDict>().unwrap();
+        let ledger =
+            py_publication_protection_resolve_verified_clean(py, resolve_input)
+                .unwrap();
+        let ledger = py_to_json_value(ledger.bind(py)).unwrap();
+        assert_eq!(ledger["records"].as_array().unwrap().len(), 1);
+        let found = py_publication_protection_lookup(py, lookup_input).unwrap();
+        let found = py_to_json_value(found.bind(py)).unwrap();
+        assert_eq!(found["status"], json!("blocked"));
+        assert!(!found.to_string().contains("SYNTHETIC_SECRET"));
     });
 }
 

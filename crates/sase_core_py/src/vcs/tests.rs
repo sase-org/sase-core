@@ -761,6 +761,29 @@ fn sidecar_publication_binding_returns_plain_dict() {
 }
 
 #[test]
+fn sidecar_publication_rejection_binding_returns_sanitized_classification() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        let secret = "SYNTHETIC_SECRET_DO_NOT_RETURN";
+        let value = module
+            .getattr("classify_sidecar_publication_push_result")
+            .unwrap()
+            .call1((
+                1_i32,
+                "",
+                format!("GH013: {secret}; fetch first; path: agents/a/chat.md"),
+            ))
+            .unwrap();
+        let value = py_to_json_value(&value).unwrap();
+        assert_eq!(value["classification"], json!("rejected_secret_scan"));
+        assert_eq!(value["relative_paths"], json!(["agents/a/chat.md"]));
+        assert!(!value.to_string().contains(secret));
+    });
+}
+
+#[test]
 fn git_lock_bindings_round_trip_classify_and_decide() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
