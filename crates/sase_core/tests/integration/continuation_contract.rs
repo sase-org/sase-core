@@ -13,7 +13,7 @@ struct SerialReplayFixture {
 #[test]
 fn serial_replay_fixture_preserves_exact_parent_order() {
     let fixture: SerialReplayFixture = serde_json::from_str(include_str!(
-        "fixtures/continuation/serial_replay.json"
+        "../fixtures/continuation/serial_replay.json"
     ))
     .unwrap();
 

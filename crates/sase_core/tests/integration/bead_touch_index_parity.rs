@@ -13,17 +13,17 @@ use serde_json::Value;
 use tempfile::tempdir;
 
 const PLAN_STREAM: &str =
-    include_str!("fixtures/bead/touch_index/streams/plan-1.jsonl");
+    include_str!("../fixtures/bead/touch_index/streams/plan-1.jsonl");
 const TASK_STREAM: &str =
-    include_str!("fixtures/bead/touch_index/streams/task-1.jsonl");
+    include_str!("../fixtures/bead/touch_index/streams/task-1.jsonl");
 // Only an excluded operation: contributes no touch.
 const ONLY_STREAM: &str =
-    include_str!("fixtures/bead/touch_index/streams/only-1.jsonl");
+    include_str!("../fixtures/bead/touch_index/streams/only-1.jsonl");
 // Events for `task-1` filed under another name: does not belong to its file.
 const COPIED_STREAM: &str =
-    include_str!("fixtures/bead/touch_index/streams/copied.jsonl");
+    include_str!("../fixtures/bead/touch_index/streams/copied.jsonl");
 const EXPECTED_QUERY: &str =
-    include_str!("fixtures/bead/touch_index/expected_query.json");
+    include_str!("../fixtures/bead/touch_index/expected_query.json");
 
 fn write_store(beads_dir: &Path) {
     let streams = beads_dir.join("events/streams");

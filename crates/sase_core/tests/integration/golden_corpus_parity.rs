@@ -23,9 +23,9 @@
 use sase_core::parse_project_bytes;
 use serde_json::{json, Value};
 
-const MYPROJ_SASE: &[u8] = include_bytes!("fixtures/myproj.sase");
+const MYPROJ_SASE: &[u8] = include_bytes!("../fixtures/myproj.sase");
 const MYPROJ_ARCHIVE_SASE: &[u8] =
-    include_bytes!("fixtures/myproj-archive.sase");
+    include_bytes!("../fixtures/myproj-archive.sase");
 
 fn parse_to_json(path: &str, data: &[u8]) -> Vec<Value> {
     let specs = parse_project_bytes(path, data).expect("parse should succeed");

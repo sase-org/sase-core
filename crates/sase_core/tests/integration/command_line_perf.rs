@@ -3,7 +3,7 @@ use std::time::Instant;
 use sase_core::command_line::{CommandLineGrammar, DynamicCandidateWire};
 
 fn real_grammar() -> CommandLineGrammar {
-    let text = include_str!("fixtures/command_line/sase_spec.json");
+    let text = include_str!("../fixtures/command_line/sase_spec.json");
     CommandLineGrammar::from_json(text).expect("real spec loads")
 }
 

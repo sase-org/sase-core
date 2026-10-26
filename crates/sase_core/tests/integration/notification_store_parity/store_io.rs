@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 use tempfile::tempdir;
 
 const CONTRACT_FIXTURE: &str =
-    include_str!("../fixtures/notifications/store_contract.jsonl");
+    include_str!("../../fixtures/notifications/store_contract.jsonl");
 
 #[test]
 fn notification_missing_file_returns_empty_snapshot() {

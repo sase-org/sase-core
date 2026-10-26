@@ -8,15 +8,16 @@ use sase_core::{
 use tempfile::tempdir;
 
 const CURRENT_SCHEMA: &str =
-    include_str!("fixtures/bead/jsonl/current_schema.jsonl");
+    include_str!("../fixtures/bead/jsonl/current_schema.jsonl");
 const PRE_READY_SCHEMA: &str =
-    include_str!("fixtures/bead/jsonl/pre_is_ready_to_work_schema.jsonl");
+    include_str!("../fixtures/bead/jsonl/pre_is_ready_to_work_schema.jsonl");
 const PRE_PATCH_SCHEMA: &str =
-    include_str!("fixtures/bead/jsonl/pre_changespec_metadata_schema.jsonl");
+    include_str!("../fixtures/bead/jsonl/pre_changespec_metadata_schema.jsonl");
 const CORRUPT_LINES: &str =
-    include_str!("fixtures/bead/jsonl/corrupt_lines.jsonl");
-const EMPTY_JSONL: &str = include_str!("fixtures/bead/jsonl/empty.jsonl");
-const CURRENT_CONFIG: &str = include_str!("fixtures/bead/config/current.json");
+    include_str!("../fixtures/bead/jsonl/corrupt_lines.jsonl");
+const EMPTY_JSONL: &str = include_str!("../fixtures/bead/jsonl/empty.jsonl");
+const CURRENT_CONFIG: &str =
+    include_str!("../fixtures/bead/config/current.json");
 
 #[test]
 fn current_schema_fixture_loads_hierarchy_dependencies_and_metadata() {

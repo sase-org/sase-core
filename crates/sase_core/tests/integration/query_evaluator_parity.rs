@@ -18,7 +18,7 @@ use sase_core::{
     CHANGESPEC_WIRE_SCHEMA_VERSION,
 };
 
-const MYPROJ_SASE: &[u8] = include_bytes!("fixtures/myproj.sase");
+const MYPROJ_SASE: &[u8] = include_bytes!("../fixtures/myproj.sase");
 const MYPROJ_PATH: &str = "tests/core_golden/myproj.sase";
 
 fn matches(query: &str) -> Vec<String> {

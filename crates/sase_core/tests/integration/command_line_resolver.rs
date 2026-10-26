@@ -3,12 +3,12 @@ use sase_core::command_line::{
 };
 
 fn real_grammar() -> CommandLineGrammar {
-    let text = include_str!("fixtures/command_line/sase_spec.json");
+    let text = include_str!("../fixtures/command_line/sase_spec.json");
     CommandLineGrammar::from_json(text).expect("real spec loads")
 }
 
 fn mini_grammar() -> CommandLineGrammar {
-    let text = include_str!("fixtures/command_line/mini_spec.json");
+    let text = include_str!("../fixtures/command_line/mini_spec.json");
     CommandLineGrammar::from_json(text).expect("mini spec loads")
 }
 

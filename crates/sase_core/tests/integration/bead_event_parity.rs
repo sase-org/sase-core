@@ -17,19 +17,20 @@ use sase_core::{
 use tempfile::tempdir;
 
 const EVENT_ROUNDTRIP_SCHEMA: &str =
-    include_str!("fixtures/bead/jsonl/event_roundtrip_schema.jsonl");
+    include_str!("../fixtures/bead/jsonl/event_roundtrip_schema.jsonl");
 const CURRENT_SCHEMA: &str =
-    include_str!("fixtures/bead/jsonl/current_schema.jsonl");
+    include_str!("../fixtures/bead/jsonl/current_schema.jsonl");
 const PRE_PATCH_SCHEMA: &str =
-    include_str!("fixtures/bead/jsonl/pre_changespec_metadata_schema.jsonl");
+    include_str!("../fixtures/bead/jsonl/pre_changespec_metadata_schema.jsonl");
 const CORRUPT_LINES: &str =
-    include_str!("fixtures/bead/jsonl/corrupt_lines.jsonl");
+    include_str!("../fixtures/bead/jsonl/corrupt_lines.jsonl");
 const EVENT_MANIFEST: &str =
-    include_str!("fixtures/bead/events/event_roundtrip/manifest.json");
-const EVENT_GOLD_1_STREAM: &str =
-    include_str!("fixtures/bead/events/event_roundtrip/streams/gold-1.jsonl");
+    include_str!("../fixtures/bead/events/event_roundtrip/manifest.json");
+const EVENT_GOLD_1_STREAM: &str = include_str!(
+    "../fixtures/bead/events/event_roundtrip/streams/gold-1.jsonl"
+);
 const RESOLUTION_NULL_STREAM: &str =
-    include_str!("fixtures/bead/events/resolution_null_stream.jsonl");
+    include_str!("../fixtures/bead/events/resolution_null_stream.jsonl");
 
 fn notes_by_issue(issues: &[IssueWire]) -> BTreeMap<String, String> {
     issues
