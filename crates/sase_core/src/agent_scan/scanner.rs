@@ -168,6 +168,9 @@ pub fn scan_agent_artifacts(
 
     sort_records(&mut records, options.newest_first);
     let mut clan_context = resolve_clan_context_from_records(&records);
+    if options.capacity_only {
+        retain_capacity_records_for_admission(&mut records);
+    }
     apply_clan_records(&options, &mut clan_context);
 
     AgentArtifactScanWire {
@@ -277,6 +280,9 @@ pub fn scan_agent_artifact_dirs(
 
     sort_records(&mut records, options.newest_first);
     let mut clan_context = resolve_clan_context_from_records(&records);
+    if options.capacity_only {
+        retain_capacity_records_for_admission(&mut records);
+    }
     apply_clan_records(&options, &mut clan_context);
 
     AgentArtifactScanWire {
@@ -419,6 +425,183 @@ fn sort_records(records: &mut [AgentArtifactRecordWire], newest_first: bool) {
                     b.timestamp.as_str(),
                 ))
         });
+    }
+}
+
+/// Remove capacity-scan rows that can never represent a live runner.
+///
+/// The initial liveness pass is followed by a closure over the fields that
+/// runner-capacity and hold-identity consumers look up across records. A
+/// pruned row is retained if it is an ancestor, shares an explicit owner key,
+/// or supplies an explicit tribe for a represented clan generation.
+fn retain_capacity_records_for_admission(
+    records: &mut Vec<AgentArtifactRecordWire>,
+) {
+    if records.is_empty() {
+        return;
+    }
+
+    let mut keep = records
+        .iter()
+        .map(|record| !capacity_record_is_never_live(record))
+        .collect::<Vec<_>>();
+    let mut by_project_timestamp: BTreeMap<(String, String), Vec<usize>> =
+        BTreeMap::new();
+    let mut by_owner_key: BTreeMap<(String, String), Vec<usize>> =
+        BTreeMap::new();
+    let mut clan_tribe_sources: BTreeMap<(String, String), Vec<usize>> =
+        BTreeMap::new();
+
+    for (index, record) in records.iter().enumerate() {
+        by_project_timestamp
+            .entry((record.project_name.clone(), record.timestamp.clone()))
+            .or_default()
+            .push(index);
+        let Some(meta) = record.agent_meta.as_ref() else {
+            continue;
+        };
+        if let Some(owner_key) =
+            normalized_record_key(meta.runner_claim_owner_key.as_deref())
+        {
+            by_owner_key
+                .entry((record.project_name.clone(), owner_key))
+                .or_default()
+                .push(index);
+        }
+        if meta
+            .clan_tribe
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        {
+            if let Some(clan_key) = hold_clan_generation_key(record, meta) {
+                clan_tribe_sources.entry(clan_key).or_default().push(index);
+            }
+        }
+    }
+
+    let mut pending = keep
+        .iter()
+        .enumerate()
+        .filter_map(|(index, retained)| retained.then_some(index))
+        .collect::<Vec<_>>();
+    let mut cursor = 0;
+    while cursor < pending.len() {
+        let index = pending[cursor];
+        cursor += 1;
+        let record = &records[index];
+        let Some(meta) = record.agent_meta.as_ref() else {
+            continue;
+        };
+
+        if let Some(parent_timestamp) =
+            normalized_record_key(meta.parent_timestamp.as_deref())
+        {
+            if let Some(ancestors) = by_project_timestamp
+                .get(&(record.project_name.clone(), parent_timestamp))
+            {
+                retain_indexed_records(ancestors, &mut keep, &mut pending);
+            }
+        }
+        if let Some(owner_key) =
+            normalized_record_key(meta.runner_claim_owner_key.as_deref())
+        {
+            if let Some(neighbours) =
+                by_owner_key.get(&(record.project_name.clone(), owner_key))
+            {
+                retain_indexed_records(neighbours, &mut keep, &mut pending);
+            }
+        }
+        if let Some(clan_key) = hold_clan_generation_key(record, meta) {
+            if let Some(sources) = clan_tribe_sources.get(&clan_key) {
+                retain_indexed_records(sources, &mut keep, &mut pending);
+            }
+        }
+    }
+
+    let mut index = 0;
+    records.retain(|_| {
+        let retained = keep[index];
+        index += 1;
+        retained
+    });
+}
+
+fn retain_indexed_records(
+    indexes: &[usize],
+    keep: &mut [bool],
+    pending: &mut Vec<usize>,
+) {
+    for &index in indexes {
+        if !keep[index] {
+            keep[index] = true;
+            pending.push(index);
+        }
+    }
+}
+
+fn normalized_record_key(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn hold_clan_generation_key(
+    record: &AgentArtifactRecordWire,
+    meta: &AgentMetaWire,
+) -> Option<(String, String)> {
+    let clan = meta.agent_clan.as_deref().filter(|clan| !clan.is_empty())?;
+    let generation = [
+        meta.agent_clan_generation.as_deref(),
+        meta.parent_timestamp.as_deref(),
+        Some(record.timestamp.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|value| !value.is_empty())?;
+    Some((clan.to_string(), generation.to_string()))
+}
+
+fn capacity_record_is_never_live(record: &AgentArtifactRecordWire) -> bool {
+    if record.has_done_marker {
+        return true;
+    }
+    if record.pending_question.is_some() {
+        return false;
+    }
+    let stopped = record
+        .agent_meta
+        .as_ref()
+        .and_then(|meta| meta.stopped_at.as_deref())
+        .is_some_and(|value| !value.is_empty());
+    if stopped
+        && !marker_may_exist(
+            &Path::new(&record.artifact_dir).join("running.json"),
+        )
+        && !marker_may_exist(
+            &Path::new(&record.artifact_dir).join("waiting.json"),
+        )
+    {
+        return true;
+    }
+
+    let pid = record
+        .agent_meta
+        .as_ref()
+        .and_then(|meta| meta.pid)
+        .or_else(|| record.running.as_ref().and_then(|running| running.pid));
+    pid.filter(|pid| *pid > 1)
+        .and_then(|pid| i32::try_from(pid).ok())
+        .is_some_and(crate::host_liveness::process_is_provably_missing)
+}
+
+/// Treat marker existence errors as uncertainty. A dangling symlink still
+/// counts as a marker entry because `symlink_metadata` does not follow it.
+fn marker_may_exist(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => true,
     }
 }
 
@@ -2061,6 +2244,135 @@ mod tests {
         fs::write(path, serde_json::to_string(&payload).unwrap()).unwrap();
     }
 
+    fn capacity_artifact_dir(projects: &Path, timestamp: &str) -> PathBuf {
+        projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(timestamp)
+    }
+
+    fn write_capacity_meta(
+        projects: &Path,
+        timestamp: &str,
+        meta: Value,
+    ) -> PathBuf {
+        let artifact = capacity_artifact_dir(projects, timestamp);
+        write_json(&artifact.join("agent_meta.json"), meta);
+        artifact
+    }
+
+    fn scan_capacity_records(projects: &Path) -> AgentArtifactScanWire {
+        scan_agent_artifacts(
+            projects,
+            AgentArtifactScanOptionsWire {
+                capacity_only: true,
+                ..AgentArtifactScanOptionsWire::default()
+            },
+        )
+    }
+
+    fn runner_capacity_record_from_scan(
+        record: &AgentArtifactRecordWire,
+    ) -> crate::runner_capacity::RunnerCapacityRecordWire {
+        let meta = record.agent_meta.as_ref();
+        let waiting = record.waiting.as_ref();
+        let pid = meta.and_then(|meta| meta.pid).or_else(|| {
+            record.running.as_ref().and_then(|running| running.pid)
+        });
+        let stopped = meta
+            .and_then(|meta| meta.stopped_at.as_deref())
+            .is_some_and(|value| !value.is_empty());
+        let live = pid == Some(i64::from(std::process::id())) && !stopped;
+        let queue_weight = waiting
+            .and_then(|waiting| waiting.queue_weight)
+            .or_else(|| meta.and_then(|meta| meta.queue_weight));
+        let queue_weight_explicit = waiting
+            .map(|waiting| waiting.queue_weight_explicit)
+            .or_else(|| meta.map(|meta| meta.queue_weight_explicit))
+            .unwrap_or(false);
+        let queue_weight_invalid = waiting
+            .map(|waiting| waiting.queue_weight_invalid)
+            .or_else(|| meta.map(|meta| meta.queue_weight_invalid))
+            .unwrap_or(false);
+        let queue_capacity = waiting
+            .and_then(|waiting| waiting.queue_capacity.or(waiting.wait_runners))
+            .or_else(|| {
+                meta.and_then(|meta| meta.queue_capacity.or(meta.wait_runners))
+            });
+        let queue_capacity_explicit = waiting
+            .map(|waiting| {
+                waiting.queue_capacity_explicit || waiting.wait_runners_explicit
+            })
+            .or_else(|| {
+                meta.map(|meta| {
+                    meta.queue_capacity_explicit || meta.wait_runners_explicit
+                })
+            })
+            .unwrap_or(false);
+        let tribes = meta
+            .into_iter()
+            .flat_map(|meta| [meta.tribe.as_ref(), meta.clan_tribe.as_ref()])
+            .flatten()
+            .filter(|tribe| !tribe.is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+
+        serde_json::from_value(serde_json::json!({
+            "artifact_dir": record.artifact_dir,
+            "project_name": record.project_name,
+            "workflow_dir_name": record.workflow_dir_name,
+            "timestamp": record.timestamp,
+            "agent_name": meta.and_then(|meta| meta.name.as_ref()),
+            "workflow": meta.and_then(|meta| meta.workflow_name.as_ref()),
+            "clan": meta.and_then(|meta| meta.agent_clan.as_ref()),
+            "tribe": meta.and_then(|meta| meta.tribe.as_ref().or(meta.clan_tribe.as_ref())),
+            "tribes": tribes,
+            "has_agent_meta": meta.is_some(),
+            "has_done_marker": record.has_done_marker,
+            "appears_as_agent": record.workflow_state.as_ref().is_none_or(|state| state.appears_as_agent),
+            "live": live,
+            "pending_question": record.pending_question.is_some(),
+            "pid": pid,
+            "run_started_at": meta.and_then(|meta| meta.run_started_at.as_ref()),
+            "parent_timestamp": meta.and_then(|meta| meta.parent_timestamp.as_ref()),
+            "agent_session": meta.and_then(|meta| meta.agent_session.as_ref()),
+            "agent_session_role": meta.and_then(|meta| meta.agent_session_role.as_ref()),
+            "agent_session_parallel": meta.is_some_and(|meta| meta.agent_session_parallel),
+            "runner_claim_owner_key": meta.and_then(|meta| meta.runner_claim_owner_key.as_ref()),
+            "queue_weight": queue_weight,
+            "queue_weight_explicit": queue_weight_explicit,
+            "queue_weight_invalid": queue_weight_invalid,
+            "slot_requested_at": waiting.and_then(|waiting| waiting.slot_requested_at.as_ref()),
+            "queue_capacity": queue_capacity,
+            "queue_capacity_explicit": queue_capacity_explicit,
+            "queue_capacity_multiplier": waiting
+                .and_then(|waiting| waiting.queue_capacity_multiplier)
+                .or_else(|| meta.and_then(|meta| meta.queue_capacity_multiplier)),
+            "wait_priority": waiting
+                .and_then(|waiting| waiting.wait_priority)
+                .or_else(|| meta.and_then(|meta| meta.wait_priority)),
+            "eligible_since": waiting.and_then(|waiting| waiting.eligible_since.as_ref()),
+        }))
+        .expect("scanner record projects into runner-capacity wire")
+    }
+
+    fn rust_capacity_snapshot(
+        records: &[AgentArtifactRecordWire],
+        candidate: Option<crate::runner_capacity::RunnerCapacityRecordWire>,
+    ) -> crate::runner_capacity::RunnerCapacitySnapshotWire {
+        let request = serde_json::from_value(serde_json::json!({
+            "effective_limit": 10.0,
+            "records": records
+                .iter()
+                .map(runner_capacity_record_from_scan)
+                .collect::<Vec<_>>(),
+            "candidate": candidate,
+        }))
+        .expect("runner-capacity request deserializes");
+        crate::runner_capacity::runner_capacity_snapshot(&request)
+    }
+
     #[test]
     fn scanner_round_trips_monitor_next_model() {
         let tmp = tempdir().unwrap();
@@ -2669,7 +2981,10 @@ mod tests {
             .join("ace-run")
             .join("20260427130000");
         write_json(&running.join("agent_meta.json"), json!({"name": "runner"}));
-        write_json(&running.join("running.json"), json!({"pid": 4242}));
+        write_json(
+            &running.join("running.json"),
+            json!({"pid": std::process::id()}),
+        );
         let waiting = projects
             .join("proj")
             .join("artifacts")
@@ -2824,7 +3139,10 @@ mod tests {
             .join("ace-run")
             .join("20260427170000");
         write_json(&running.join("agent_meta.json"), json!({"name": "runner"}));
-        write_json(&running.join("running.json"), json!({"pid": 9000}));
+        write_json(
+            &running.join("running.json"),
+            json!({"pid": std::process::id()}),
+        );
         write_json(
             &running.join("plan_path.json"),
             json!({"plan_path": "plans/example.md"}),
@@ -2881,6 +3199,439 @@ mod tests {
         assert!(!snapshot.records[0].has_done_marker);
         assert!(snapshot.records[0].running.is_none());
         assert!(snapshot.records[0].waiting.is_none());
+    }
+
+    #[test]
+    fn capacity_only_prunes_stopped_markerless_dirs() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        write_capacity_meta(
+            &projects,
+            "20260427190000",
+            json!({"name": "stopped", "stopped_at": "2026-04-27T19:00:00Z"}),
+        );
+
+        let snapshot = scan_capacity_records(&projects);
+
+        assert!(snapshot.records.is_empty());
+    }
+
+    #[test]
+    fn capacity_only_keeps_stopped_dir_with_waiting_marker() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let stopped = write_capacity_meta(
+            &projects,
+            "20260427190001",
+            json!({"name": "stopped-waiter", "stopped_at": "2026-04-27T19:00:00Z"}),
+        );
+        write_json(
+            &stopped.join("waiting.json"),
+            json!({"slot_requested_at": "2026-04-27T19:00:01Z"}),
+        );
+
+        let snapshot = scan_capacity_records(&projects);
+
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].timestamp, "20260427190001");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capacity_only_prunes_dead_pid_waiters() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let dead = write_capacity_meta(
+            &projects,
+            "20260427190002",
+            json!({"name": "dead-waiter", "pid": 1_i64 << 30}),
+        );
+        write_json(
+            &dead.join("waiting.json"),
+            json!({"slot_requested_at": "2026-04-27T19:00:02Z"}),
+        );
+
+        let snapshot = scan_capacity_records(&projects);
+
+        assert!(snapshot.records.is_empty());
+    }
+
+    #[test]
+    fn capacity_only_keeps_live_pid_dirs() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        write_capacity_meta(
+            &projects,
+            "20260427190003",
+            json!({"name": "live", "pid": std::process::id()}),
+        );
+
+        let snapshot = scan_capacity_records(&projects);
+
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(
+            snapshot.records[0]
+                .agent_meta
+                .as_ref()
+                .and_then(|meta| meta.pid),
+            Some(i64::from(std::process::id()))
+        );
+    }
+
+    #[test]
+    fn capacity_only_keeps_dirs_without_a_pid() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        write_capacity_meta(
+            &projects,
+            "20260427190004",
+            json!({"name": "no-pid"}),
+        );
+
+        let snapshot = scan_capacity_records(&projects);
+
+        assert_eq!(snapshot.records.len(), 1);
+    }
+
+    #[test]
+    fn capacity_only_keeps_stopped_dirs_with_pending_questions() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let stopped = write_capacity_meta(
+            &projects,
+            "20260427190005",
+            json!({"name": "question", "stopped_at": "2026-04-27T19:00:05Z"}),
+        );
+        write_json(
+            &stopped.join("pending_question.json"),
+            json!({"session_id": "session-1"}),
+        );
+
+        let snapshot = scan_capacity_records(&projects);
+
+        assert_eq!(snapshot.records.len(), 1);
+        assert!(snapshot.records[0].pending_question.is_some());
+    }
+
+    #[test]
+    fn capacity_only_prunes_in_exact_artifact_scans() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let stopped = write_capacity_meta(
+            &projects,
+            "20260427190006",
+            json!({"name": "stopped", "stopped_at": "2026-04-27T19:00:06Z"}),
+        );
+        let live = write_capacity_meta(
+            &projects,
+            "20260427190007",
+            json!({"name": "live", "pid": std::process::id()}),
+        );
+
+        let snapshot = scan_agent_artifact_dirs(
+            &projects,
+            &[stopped, live],
+            AgentArtifactScanOptionsWire {
+                capacity_only: true,
+                ..AgentArtifactScanOptionsWire::default()
+            },
+        );
+
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].timestamp, "20260427190007");
+    }
+
+    #[test]
+    fn capacity_only_re_admits_transitive_lineage_ancestors() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let root = write_capacity_meta(
+            &projects,
+            "20260427200000",
+            json!({"name": "stopped-root", "stopped_at": "2026-04-27T20:00:00Z"}),
+        );
+        let middle = write_capacity_meta(
+            &projects,
+            "20260427200001",
+            json!({
+                "name": "dead-middle",
+                "pid": 1_i64 << 30,
+                "parent_timestamp": "20260427200000"
+            }),
+        );
+        write_json(
+            &middle.join("waiting.json"),
+            json!({"slot_requested_at": "2026-04-27T20:00:01Z"}),
+        );
+        write_capacity_meta(
+            &projects,
+            "20260427200002",
+            json!({
+                "name": "live-child",
+                "pid": std::process::id(),
+                "parent_timestamp": "20260427200001"
+            }),
+        );
+
+        let snapshot = scan_capacity_records(&projects);
+        let timestamps = snapshot
+            .records
+            .iter()
+            .map(|record| record.timestamp.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(timestamps.len(), 3);
+        assert!(timestamps.contains("20260427200000"));
+        assert!(timestamps.contains("20260427200001"));
+        assert!(timestamps.contains("20260427200002"));
+        assert!(root.exists());
+    }
+
+    #[test]
+    fn capacity_only_re_admits_owner_key_neighbours() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        write_capacity_meta(
+            &projects,
+            "20260427210000",
+            json!({
+                "name": "stopped-owner-peer",
+                "stopped_at": "2026-04-27T21:00:00Z",
+                "runner_claim_owner_key": "shared-owner"
+            }),
+        );
+        write_capacity_meta(
+            &projects,
+            "20260427210001",
+            json!({
+                "name": "live-owner",
+                "pid": std::process::id(),
+                "runner_claim_owner_key": " shared-owner "
+            }),
+        );
+
+        let snapshot = scan_capacity_records(&projects);
+
+        assert_eq!(snapshot.records.len(), 2);
+        assert_eq!(snapshot.records[0].timestamp, "20260427210000");
+    }
+
+    #[test]
+    fn capacity_only_re_admits_clan_tribe_declarations() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        write_capacity_meta(
+            &projects,
+            "20260427220000",
+            json!({
+                "name": "stopped-tribe-source",
+                "stopped_at": "2026-04-27T22:00:00Z",
+                "agent_clan": "research",
+                "agent_clan_generation": "generation-1",
+                "clan_tribe": "nightly"
+            }),
+        );
+        write_capacity_meta(
+            &projects,
+            "20260427220001",
+            json!({
+                "name": "live-clan-member",
+                "pid": std::process::id(),
+                "agent_clan": "research",
+                "agent_clan_generation": "generation-1"
+            }),
+        );
+
+        let snapshot = scan_capacity_records(&projects);
+
+        assert_eq!(snapshot.records.len(), 2);
+        assert_eq!(snapshot.records[0].timestamp, "20260427220000");
+        assert_eq!(snapshot.clan_context.len(), 1);
+        assert_eq!(
+            snapshot.clan_context[0].clan_tribe.as_deref(),
+            Some("nightly")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capacity_only_is_decision_neutral_for_runner_capacity() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let root_timestamp = "20260427230000";
+        write_capacity_meta(
+            &projects,
+            root_timestamp,
+            json!({
+                "name": "stopped-root",
+                "stopped_at": "2026-04-27T23:00:00Z",
+                "queue_weight": 2.5,
+                "queue_weight_explicit": true
+            }),
+        );
+        let middle = write_capacity_meta(
+            &projects,
+            "20260427230001",
+            json!({
+                "name": "dead-middle",
+                "pid": 1_i64 << 30,
+                "parent_timestamp": root_timestamp
+            }),
+        );
+        write_json(
+            &middle.join("waiting.json"),
+            json!({"slot_requested_at": "2026-04-27T23:00:01Z"}),
+        );
+        write_capacity_meta(
+            &projects,
+            "20260427230002",
+            json!({
+                "name": "stopped-owner-peer",
+                "stopped_at": "2026-04-27T23:00:02Z",
+                "runner_claim_owner_key": "shared-owner"
+            }),
+        );
+        let active = write_capacity_meta(
+            &projects,
+            "20260427230003",
+            json!({
+                "name": "active-owner",
+                "pid": std::process::id(),
+                "run_started_at": "2026-04-27T23:00:03Z",
+                "runner_claim_owner_key": "shared-owner",
+                "queue_weight": 3.0,
+                "queue_weight_explicit": true
+            }),
+        );
+        write_json(
+            &active.join("running.json"),
+            json!({"pid": std::process::id()}),
+        );
+        let waiter = write_capacity_meta(
+            &projects,
+            "20260427230004",
+            json!({
+                "name": "live-waiter",
+                "pid": std::process::id(),
+                "parent_timestamp": "20260427230001"
+            }),
+        );
+        write_json(
+            &waiter.join("waiting.json"),
+            json!({"slot_requested_at": "2026-04-27T23:00:04Z"}),
+        );
+        write_capacity_meta(
+            &projects,
+            "20260427230005",
+            json!({
+                "name": "stopped-tribe-source",
+                "stopped_at": "2026-04-27T23:00:05Z",
+                "agent_clan": "research",
+                "agent_clan_generation": "generation-1",
+                "clan_tribe": "nightly"
+            }),
+        );
+        write_capacity_meta(
+            &projects,
+            "20260427230006",
+            json!({
+                "name": "live-clan-member",
+                "pid": std::process::id(),
+                "agent_clan": "research",
+                "agent_clan_generation": "generation-1"
+            }),
+        );
+        let dead_waiter = write_capacity_meta(
+            &projects,
+            "20260427230007",
+            json!({"name": "dead-waiter", "pid": 1_i64 << 30}),
+        );
+        write_json(
+            &dead_waiter.join("waiting.json"),
+            json!({"slot_requested_at": "2026-04-27T23:00:07Z"}),
+        );
+        let stopped_waiter = write_capacity_meta(
+            &projects,
+            "20260427230008",
+            json!({
+                "name": "stopped-waiter",
+                "stopped_at": "2026-04-27T23:00:08Z"
+            }),
+        );
+        write_json(
+            &stopped_waiter.join("waiting.json"),
+            json!({"slot_requested_at": "2026-04-27T23:00:08Z"}),
+        );
+        write_capacity_meta(
+            &projects,
+            "20260427230009",
+            json!({"name": "no-pid"}),
+        );
+        let done = write_capacity_meta(
+            &projects,
+            "20260427230010",
+            json!({"name": "done"}),
+        );
+        write_json(&done.join("done.json"), json!({"outcome": "completed"}));
+
+        let full_scan = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        let unpruned = full_scan
+            .records
+            .into_iter()
+            .filter(|record| !record.has_done_marker)
+            .collect::<Vec<_>>();
+        let pruned = scan_capacity_records(&projects);
+        let candidate: crate::runner_capacity::RunnerCapacityRecordWire =
+            serde_json::from_value(serde_json::json!({
+                "artifact_dir": "/candidate/20260427230011",
+                "project_name": "proj",
+                "workflow_dir_name": "ace-run",
+                "timestamp": "20260427230011",
+                "agent_name": "candidate",
+                "has_agent_meta": true,
+                "live": true,
+                "parent_timestamp": "20260427230001",
+                "slot_requested_at": "2026-04-27T23:00:11Z"
+            }))
+            .unwrap();
+
+        let full_capacity =
+            rust_capacity_snapshot(&unpruned, Some(candidate.clone()));
+        let pruned_capacity =
+            rust_capacity_snapshot(&pruned.records, Some(candidate));
+
+        assert_eq!(pruned_capacity.claims, full_capacity.claims);
+        assert_eq!(pruned_capacity.waiters, full_capacity.waiters);
+        assert_eq!(
+            pruned_capacity.candidate_decision,
+            full_capacity.candidate_decision
+        );
+        assert_eq!(
+            pruned_capacity.occupied_capacity,
+            full_capacity.occupied_capacity
+        );
+        assert_eq!(pruned_capacity.claims.len(), 1);
+        assert_eq!(pruned_capacity.claims[0].owner_key, "proj:shared-owner");
+        assert_eq!(pruned_capacity.claims[0].occupied_capacity, 3.0);
+        assert_eq!(pruned_capacity.waiters.len(), 2);
+        assert!(pruned_capacity.waiters.iter().any(|waiter| {
+            waiter.artifact_dir.ends_with("20260427230004")
+                && waiter.requested_weight == 1.0
+        }));
+        let decision = pruned_capacity.candidate_decision.unwrap();
+        assert_eq!(decision.lineage_key, root_timestamp);
+        assert_eq!(decision.inherited_weight, Some(2.5));
+        assert!(pruned
+            .records
+            .iter()
+            .any(|record| { record.timestamp == "20260427230005" }));
+        assert!(!pruned
+            .records
+            .iter()
+            .any(|record| { record.timestamp == "20260427230007" }));
     }
 
     #[test]

@@ -378,21 +378,52 @@ fn observe_host_process(pid: i32) -> HostProcessObservation {
 
 #[cfg(unix)]
 fn process_exists(pid: i32) -> bool {
-    // SAFETY: signal 0 performs an existence/permission probe and does not
-    // deliver a signal. `pid` was validated as a positive process ID.
-    let result = unsafe { libc::kill(pid, 0) };
-    if result == 0 {
-        return true;
-    }
-    matches!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EPERM)
-    )
+    matches!(probe_process(pid), ProcessProbe::Present)
 }
 
 #[cfg(not(unix))]
 fn process_exists(_pid: i32) -> bool {
     false
+}
+
+/// Return true only when the OS positively reports that `pid` does not exist.
+///
+/// Capacity scans use this narrower result when pruning stale records: errors
+/// other than ESRCH are uncertainty and must keep the record. EPERM means the
+/// process exists but cannot be inspected by this user.
+pub(crate) fn process_is_provably_missing(pid: i32) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(probe_process(pid), ProcessProbe::Missing)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessProbe {
+    Present,
+    Missing,
+    Unknown,
+}
+
+#[cfg(unix)]
+fn probe_process(pid: i32) -> ProcessProbe {
+    // SAFETY: signal 0 performs an existence/permission probe and does not
+    // deliver a signal. Callers validate that `pid` is positive.
+    let result = unsafe { libc::kill(pid, 0) };
+    if result == 0 {
+        return ProcessProbe::Present;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => ProcessProbe::Missing,
+        Some(libc::EPERM) => ProcessProbe::Present,
+        _ => ProcessProbe::Unknown,
+    }
 }
 
 #[cfg(test)]

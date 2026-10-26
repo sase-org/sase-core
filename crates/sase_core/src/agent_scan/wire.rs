@@ -67,14 +67,12 @@ pub struct AgentArtifactScanOptionsWire {
     pub only_projects: Vec<String>,
     #[serde(default)]
     pub include_project_states: Vec<String>,
-    /// When true, skip artifact dirs carrying a `done` marker before
-    /// parsing any of their other marker files, and skip marker files not
-    /// consumed by the runner-slot capacity snapshot (`plan_path.json`,
-    /// `xprompts.json`) even for dirs that are still scanned. Purely a scan
-    /// cost optimization: the returned record shape is unchanged, and every
-    /// field the capacity snapshot consumes (`agent_meta`, `running`,
-    /// `waiting`, `workflow_state`, `pending_question`) is still parsed for
-    /// non-done dirs.
+    /// When true, omit artifact dirs carrying a `done` marker before parsing
+    /// their other marker files, and omit stopped marker-less or provably
+    /// dead-pid dirs unless another capacity record needs their lineage,
+    /// owner key, or explicit clan tribe. Marker files not consumed by the
+    /// runner-slot capacity snapshot (`plan_path.json`, `xprompts.json`) are
+    /// skipped for returned records.
     #[serde(default)]
     pub capacity_only: bool,
     /// Directory holding per-clan JSON records. When set, recorded clan
