@@ -2,6 +2,7 @@
 
 mod claims;
 mod close_remove;
+mod completion_recovery;
 mod create;
 mod dependencies;
 mod links;
@@ -24,8 +25,13 @@ pub use claims::{
     CLOSED_BEAD_LAUNCH_NOTE_PREFIX,
 };
 pub use close_remove::{
-    close_issues, close_issues_with_note, open_issue, remove_issue,
+    close_issues, close_issues_with_note,
+    close_issues_with_note_and_provenance, open_issue, remove_issue,
     remove_issues,
+};
+pub use completion_recovery::{
+    recover_failed_closes, BeadFailedCloseRecoveryEntryWire,
+    BeadFailedCloseRecoveryRequestWire, BeadFailedCloseRecoveryResultWire,
 };
 pub use create::{create_issue, init_store};
 pub use dependencies::{

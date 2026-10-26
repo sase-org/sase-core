@@ -236,7 +236,7 @@ fn doctor_reports_projection_fields_and_redundant_close_census() {
     assert_eq!(report.projection_drift[0].issue_id, "beads-1");
     assert_eq!(
         report.projection_drift[0].changed_fields,
-        vec!["close_reason", "closed_at", "updated_at"]
+        vec!["close_event_id", "close_reason", "closed_at", "updated_at"]
     );
     assert_eq!(report.redundant_close_events, 1);
     assert_eq!(report.redundant_close_issues, 1);
@@ -978,6 +978,7 @@ fn close_event(
             resolution: Some(BeadResolutionWire::Done),
             forced_descendant_ids: Vec::new(),
             closed_by: None,
+            close_provenance: None,
         },
     }
 }

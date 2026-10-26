@@ -6,6 +6,8 @@
 
 use std::collections::BTreeSet;
 
+use chrono::DateTime;
+
 use super::propagate::apply_stranded_propagation;
 use super::wire::{
     StrandedWorkBeadFactsWire, StrandedWorkInputWire,
@@ -260,6 +262,9 @@ fn stranded_cause(
             }
         }
     }
+    if bead.completion_failure.is_some() {
+        return STRANDED_CAUSE_FAILED;
+    }
     if let Some(latest) = newest_agent_member(&bead.members) {
         let lifecycle = normalize_field(&latest.lifecycle);
         if lifecycle == "failed" {
@@ -301,9 +306,17 @@ fn classify_bead(
         owner: None,
         delegates: Vec::new(),
         session: bead.assignee.clone(),
-        last_turn: latest_agent.map(|member| member.name.clone()),
-        last_turn_artifact_dir: latest_agent
-            .map(|member| member.artifact_dir.clone()),
+        last_turn: bead
+            .completion_failure
+            .as_ref()
+            .map(|failure| failure.agent_name.clone())
+            .or_else(|| latest_agent.map(|member| member.name.clone())),
+        last_turn_artifact_dir: bead
+            .completion_failure
+            .as_ref()
+            .map(|failure| failure.artifact_dir.clone())
+            .or_else(|| latest_agent.map(|member| member.artifact_dir.clone())),
+        completion_failure: bead.completion_failure.clone(),
         declared_bead_action: latest_agent
             .and_then(|member| member.declared_bead_action.clone()),
         since: activity_since(bead, &input.beads),
@@ -329,7 +342,7 @@ fn classify_bead(
         return verdict;
     }
 
-    if bead.members.is_empty() {
+    if bead.members.is_empty() && bead.completion_failure.is_none() {
         verdict.state = STRANDED_STATE_UNKNOWN.to_string();
         verdict.reason = Some(
             if bead.records_available {
@@ -342,6 +355,20 @@ fn classify_bead(
         return verdict;
     }
 
+    if let Some(failed_at) = bead
+        .completion_failure
+        .as_ref()
+        .and_then(|failure| {
+            DateTime::parse_from_rfc3339(&failure.failed_at).ok()
+        })
+        .map(|timestamp| timestamp.timestamp_millis() as f64 / 1_000.0)
+    {
+        verdict.since = Some(
+            verdict
+                .since
+                .map_or(failed_at, |since| since.max(failed_at)),
+        );
+    }
     if let Some(since) = verdict.since {
         if input.now - since < input.settle_grace_seconds {
             verdict.state = STRANDED_STATE_SETTLING.to_string();
@@ -363,7 +390,11 @@ pub fn reduce_stranded_work(
     let mut verdicts: Vec<StrandedWorkVerdictWire> = input
         .beads
         .iter()
-        .filter(|bead| bead.candidate)
+        .filter(|bead| {
+            bead.candidate
+                || (normalize_field(&bead.status) == "open"
+                    && bead.completion_failure.is_some())
+        })
         .map(|bead| classify_bead(input, bead))
         .collect();
     apply_stranded_propagation(&mut verdicts, &input.beads);

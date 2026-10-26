@@ -168,6 +168,7 @@ fn run_claim_launch(
     let mut issue = current;
     issue.status = StatusWire::InProgress;
     issue.assignee = agent_name.to_string();
+    issue.completion_failure = None;
     // The event this stages is an `issue_updated` carrying a status, so
     // the reducer clears the record through `apply_update_event_fields`;
     // clearing it here too is what keeps the two projections identical.
@@ -518,6 +519,7 @@ fn run_preclaim(
     for (assignment, current) in assignments.iter().zip(currents) {
         let mut issue = current;
         issue.status = StatusWire::InProgress;
+        issue.completion_failure = None;
         // A closed target is rejected above, so this archives nothing
         // today; it keeps the mutation path aligned with the
         // `EpicWorkPreclaimed` reducer branch if that guard ever moves.
@@ -537,6 +539,7 @@ fn run_preclaim(
     if let Some(agent_name) = epic_agent_name.clone() {
         let mut issue = epic;
         issue.status = StatusWire::InProgress;
+        issue.completion_failure = None;
         archive_close_metadata(
             &mut issue,
             &now,

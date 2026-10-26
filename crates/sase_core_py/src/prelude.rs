@@ -442,6 +442,8 @@ pub(crate) use sase_core::axe_status::{
     AXE_STATUS_SCHEMA_VERSION,
 };
 #[cfg(test)]
+pub(crate) use sase_core::bead::close_issues_with_note as core_bead_close_issues_with_note;
+#[cfg(test)]
 pub(crate) use sase_core::bead::PhaseSizeWire;
 pub(crate) use sase_core::bead::{
     add_bead_link as core_bead_add_link,
@@ -456,7 +458,7 @@ pub(crate) use sase_core::bead::{
     cancel_task_snooze as core_bead_cancel_task_snooze,
     claim_for_agent_launch as core_bead_claim_for_agent_launch,
     claim_for_agent_wait as core_bead_claim_for_agent_wait,
-    close_issues_with_note as core_bead_close_issues_with_note,
+    close_issues_with_note_and_provenance as core_bead_close_issues_with_provenance,
     create_issue as core_bead_create_issue, doctor as core_bead_doctor,
     doctor_report as core_bead_doctor_report,
     doctor_report_with_contexts as core_bead_doctor_report_with_contexts,
@@ -490,6 +492,7 @@ pub(crate) use sase_core::bead::{
     read_legacy_jsonl_issues as core_bead_read_legacy_jsonl_issues,
     read_store_issues as core_bead_read_store_issues,
     ready_issues as core_bead_ready_issues,
+    recover_failed_closes as core_bead_recover_failed_closes,
     reduce_event_streams as core_reduce_event_streams,
     refresh_bead_touch_index as core_refresh_bead_touch_index,
     release_agent_claim as core_bead_release_agent_claim,
@@ -515,8 +518,9 @@ pub(crate) use sase_core::bead::{
     task_type_migration_sql as core_bead_task_type_migration_sql,
     unmark_ready_to_work as core_bead_unmark_ready_to_work,
     update_issue as core_bead_update_issue,
-    update_issues as core_bead_update_issues, BeadCreateRequestWire, BeadError,
-    BeadEventStoreManifestWire, BeadEventStreamWire,
+    update_issues as core_bead_update_issues, BeadCloseProvenanceWire,
+    BeadCreateRequestWire, BeadError, BeadEventStoreManifestWire,
+    BeadEventStreamWire, BeadFailedCloseRecoveryRequestWire,
     BeadLinkProjectionRequestWire, BeadPreclaimAssignmentWire,
     BeadResolutionWire, BeadTargetRoutingRequestWire, BeadUpdateFieldsWire,
     IssueWire, BEAD_TARGET_ROUTING_WIRE_SCHEMA_VERSION,

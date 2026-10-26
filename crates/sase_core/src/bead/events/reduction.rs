@@ -429,6 +429,7 @@ pub(in crate::bead) fn apply_event(
         BeadEventPayloadWire::IssueClosed {
             close_reason,
             resolution,
+            close_provenance,
             ..
         } => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
@@ -437,11 +438,36 @@ pub(in crate::bead) fn apply_event(
                 issue.closed_at = Some(event.timestamp.clone());
                 issue.close_reason = close_reason.clone();
                 issue.resolution = resolution.clone();
+                issue.close_event_id = Some(event.event_id.clone());
+                issue.close_provenance = close_provenance.clone();
+                issue.completion_failure = None;
                 // Replaying an `issue_closed` event over a snoozed bead is
                 // what heals a store the pre-fix close already bricked.
                 clear_snooze_record(issue);
                 issue.updated_at = event.timestamp.clone();
             }
+        }
+        BeadEventPayloadWire::CompletionFailureRecovered { failure, note } => {
+            let issue = existing_issue_mut(issues, &event.issue_id)?;
+            issue.status = StatusWire::Open;
+            archive_close_metadata(
+                issue,
+                &event.timestamp,
+                BeadReopenCauseWire::CompletionFailure,
+                Some(event.actor.clone()),
+            );
+            clear_snooze_record(issue);
+            issue.completion_failure = Some(failure.clone());
+            if let Some(note_row) = BeadNoteWire::from_event(
+                &event.event_id,
+                &event.timestamp,
+                &event.actor,
+                note,
+                Vec::new(),
+            ) {
+                issue.notes.push(note_row);
+            }
+            issue.updated_at = event.timestamp.clone();
         }
         BeadEventPayloadWire::IssueRemoved {
             cascade_removed_issue_ids,
@@ -550,6 +576,7 @@ pub(in crate::bead) fn apply_event(
             );
             clear_snooze_record(issue);
             issue.assignee = agent_name.clone();
+            issue.completion_failure = None;
             issue.updated_at = event.timestamp.clone();
         }
         BeadEventPayloadWire::TaskPlusOneRecorded { evidence } => {
@@ -688,6 +715,9 @@ fn apply_update_event_fields(
             None,
         );
     }
+    if fields.status.as_ref() == Some(&StatusWire::InProgress) {
+        issue.completion_failure = None;
+    }
 }
 
 /// Move an undone close out of the flat close fields and into `close_history`.
@@ -711,10 +741,14 @@ pub(in crate::bead) fn archive_close_metadata(
             reopened_at: reopened_at.to_string(),
             reopened_via,
             reopened_by,
+            close_event_id: issue.close_event_id.take(),
+            close_provenance: issue.close_provenance.take(),
         });
     }
     issue.closed_at = None;
     issue.close_reason = None;
+    issue.close_event_id = None;
+    issue.close_provenance = None;
     issue.resolution = None;
 }
 

@@ -51,6 +51,16 @@ pub(crate) const BEAD_MUTATION_LOCK_TIMEOUT_ENV: &str =
 pub(crate) const BEAD_MUTATION_LOCK_TIMEOUT_DEFAULT: Duration =
     Duration::from_secs(600);
 
+pub(crate) trait MutationLockWait {
+    fn set_lock_wait_ms(&mut self, lock_wait_ms: u64);
+}
+
+impl MutationLockWait for BeadMutationOutcomeWire {
+    fn set_lock_wait_ms(&mut self, lock_wait_ms: u64) {
+        self.lock_wait_ms = lock_wait_ms;
+    }
+}
+
 pub(crate) fn link_mutation_error(
     error: crate::artifact_link::ArtifactLinkError,
 ) -> BeadError {
@@ -498,11 +508,11 @@ pub(crate) fn not_found(issue_id: &str) -> BeadError {
     }
 }
 
-pub(crate) fn with_bead_mutation_lock(
+pub(crate) fn with_bead_mutation_lock<T: MutationLockWait>(
     beads_dir: &Path,
     operation_name: &str,
-    mutation: impl FnOnce() -> Result<BeadMutationOutcomeWire, BeadError>,
-) -> Result<BeadMutationOutcomeWire, BeadError> {
+    mutation: impl FnOnce() -> Result<T, BeadError>,
+) -> Result<T, BeadError> {
     let lock_path = bead_mutation_lock_path(beads_dir);
     let lock = lock_bead_mutation_with_timeout(
         beads_dir,
@@ -525,7 +535,7 @@ pub(crate) fn with_bead_mutation_lock(
     });
     match (result, unlock_result) {
         (Ok(mut value), Ok(())) => {
-            value.lock_wait_ms = lock_wait_ms;
+            value.set_lock_wait_ms(lock_wait_ms);
             Ok(value)
         }
         (Err(error), Ok(())) => Err(error),

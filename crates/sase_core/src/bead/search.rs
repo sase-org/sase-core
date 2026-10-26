@@ -1049,6 +1049,8 @@ mod tests {
             reopened_at: "2026-01-01T00:03:00Z".to_string(),
             reopened_via: BeadReopenCauseWire::PlusOne,
             reopened_by: None,
+            close_event_id: None,
+            close_provenance: None,
         };
         update(&mut record);
         record
@@ -1069,7 +1071,10 @@ mod tests {
             updated_at: "2026-01-01T00:01:00Z".to_string(),
             closed_at: None,
             close_reason: None,
+            close_event_id: None,
+            close_provenance: None,
             resolution: None,
+            completion_failure: None,
             close_history: Vec::new(),
             description: String::new(),
             notes: Vec::new(),

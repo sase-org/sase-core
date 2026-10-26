@@ -254,7 +254,10 @@ pub fn verb_for_operation(
         | BeadEventOperationWire::NoteEdited
         | BeadEventOperationWire::NoteRemoved => Some("noted"),
         BeadEventOperationWire::IssueClosed => Some("closed"),
-        BeadEventOperationWire::IssueOpened => Some("reopened"),
+        BeadEventOperationWire::IssueOpened
+        | BeadEventOperationWire::CompletionFailureRecovered => {
+            Some("reopened")
+        }
         BeadEventOperationWire::TaskPlusOneRecorded => Some("+1"),
         BeadEventOperationWire::ReadyMarked
         | BeadEventOperationWire::ReadyUnmarked => Some("ready"),
@@ -1175,6 +1178,10 @@ fn meta_update(
             }
         }
         BeadEventOperationWire::IssueOpened => MetaUpdate {
+            status: Some("open"),
+            ..MetaUpdate::default()
+        },
+        BeadEventOperationWire::CompletionFailureRecovered => MetaUpdate {
             status: Some("open"),
             ..MetaUpdate::default()
         },

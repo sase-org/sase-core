@@ -155,6 +155,7 @@ fn issue_closed_without_closed_by_round_trips_byte_identically() {
         resolution: None,
         forced_descendant_ids: Vec::new(),
         closed_by: None,
+        close_provenance: None,
     };
     let json = serde_json::to_value(&payload).unwrap();
     assert!(json.get("closed_by").is_none());
@@ -190,6 +191,7 @@ fn issue_closed_rejects_a_blank_closed_by() {
             resolution: None,
             forced_descendant_ids: Vec::new(),
             closed_by: Some("   ".to_string()),
+            close_provenance: None,
         },
     };
     let error = record.validate().unwrap_err();

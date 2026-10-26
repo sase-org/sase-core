@@ -8,6 +8,7 @@ use super::wire::{
     StrandedWorkMemberFactsWire, StrandedWorkReportWire,
     StrandedWorkVerdictWire, STRANDED_WORK_WIRE_SCHEMA_VERSION,
 };
+use crate::bead::wire::BeadCompletionFailureWire;
 
 const NOW: f64 = 1_800_000_000.0;
 const OLD: f64 = NOW - 3_600.0;
@@ -81,6 +82,26 @@ fn input(beads: Vec<StrandedWorkBeadFactsWire>) -> StrandedWorkInputWire {
     }
 }
 
+fn recovered_failure(failed_at: &str) -> BeadCompletionFailureWire {
+    BeadCompletionFailureWire {
+        close_event_id: "beads-1:close-event".to_string(),
+        run_id: "origin-run".to_string(),
+        agent_name: "origin-agent".to_string(),
+        artifact_dir: "/artifacts/origin-run".to_string(),
+        failed_at: failed_at.to_string(),
+        evidence_locations: vec![
+            "/artifacts/origin-run/failure.json".to_string()
+        ],
+        failure_code: "hook_failed".to_string(),
+    }
+}
+
+fn unix_seconds(timestamp: &str) -> f64 {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .unwrap()
+        .timestamp() as f64
+}
+
 fn reduce(
     bead: StrandedWorkBeadFactsWire,
     context: Vec<StrandedWorkBeadFactsWire>,
@@ -103,6 +124,88 @@ fn kept_phase(id: &str) -> StrandedWorkBeadFactsWire {
         members: vec![member],
         ..bead(id, "phase")
     }
+}
+
+#[test]
+fn open_recovery_facts_survive_missing_records_and_use_failed_liveness_cause() {
+    let failed_at = "2027-01-15T08:00:00Z";
+    let mut recovered = StrandedWorkBeadFactsWire {
+        id: "recovered-phase".to_string(),
+        kind: "phase".to_string(),
+        status: "open".to_string(),
+        candidate: false,
+        records_available: false,
+        completion_failure: Some(recovered_failure(failed_at)),
+        ..StrandedWorkBeadFactsWire::default()
+    };
+    let now = unix_seconds(failed_at) + 3_600.0;
+    let report = reduce_stranded_work(&StrandedWorkInputWire {
+        now,
+        settle_grace_seconds: 120.0,
+        beads: vec![recovered.clone()],
+        ..StrandedWorkInputWire::default()
+    });
+    let verdict = &report.verdicts[0];
+    assert_eq!(verdict.state, "stranded");
+    assert_eq!(verdict.reason.as_deref(), Some("failed"));
+    assert_eq!(verdict.last_turn.as_deref(), Some("origin-agent"));
+    assert_eq!(
+        verdict.last_turn_artifact_dir.as_deref(),
+        Some("/artifacts/origin-run")
+    );
+    assert_eq!(
+        verdict.completion_failure.as_ref().unwrap().run_id,
+        "origin-run"
+    );
+    assert_eq!(report.stranded_ids, vec!["recovered-phase"]);
+
+    recovered.completion_failure = Some(recovered_failure(failed_at));
+    let live = StrandedWorkMemberFactsWire {
+        name: "successor.agent".to_string(),
+        artifact_dir: "/artifacts/successor".to_string(),
+        lifecycle: "running".to_string(),
+        process_live: true,
+        ..StrandedWorkMemberFactsWire::default()
+    };
+    recovered.members = vec![live];
+    let live_report = reduce_stranded_work(&StrandedWorkInputWire {
+        now,
+        settle_grace_seconds: 120.0,
+        beads: vec![recovered],
+        ..StrandedWorkInputWire::default()
+    });
+    assert_eq!(live_report.verdicts[0].state, "owned");
+    assert_eq!(
+        live_report.verdicts[0].owner.as_deref(),
+        Some("successor.agent")
+    );
+}
+
+#[test]
+fn recovery_settle_grace_applies_and_ordinary_open_drafts_stay_excluded() {
+    let failed_at = "2027-01-15T08:00:00Z";
+    let recovered = StrandedWorkBeadFactsWire {
+        id: "recovering".to_string(),
+        kind: "phase".to_string(),
+        status: "open".to_string(),
+        completion_failure: Some(recovered_failure(failed_at)),
+        ..StrandedWorkBeadFactsWire::default()
+    };
+    let draft = StrandedWorkBeadFactsWire {
+        id: "ordinary-draft".to_string(),
+        kind: "phase".to_string(),
+        status: "open".to_string(),
+        ..StrandedWorkBeadFactsWire::default()
+    };
+    let report = reduce_stranded_work(&StrandedWorkInputWire {
+        now: unix_seconds(failed_at) + 30.0,
+        settle_grace_seconds: 120.0,
+        beads: vec![recovered, draft],
+        ..StrandedWorkInputWire::default()
+    });
+    assert_eq!(report.verdicts.len(), 1);
+    assert_eq!(report.verdicts[0].bead_id, "recovering");
+    assert_eq!(report.verdicts[0].state, "settling");
 }
 
 #[test]

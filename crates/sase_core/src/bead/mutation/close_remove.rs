@@ -10,6 +10,7 @@ use crate::bead::events::archive_close_metadata;
 use crate::bead::events::clear_snooze_record;
 use crate::bead::events::BeadEventOperationWire;
 use crate::bead::events::BeadEventPayloadWire;
+use crate::bead::wire::BeadCloseProvenanceWire;
 use crate::bead::wire::BeadError;
 use crate::bead::wire::BeadNoteWire;
 use crate::bead::wire::BeadReopenCauseWire;
@@ -142,6 +143,38 @@ pub fn close_issues_with_note(
         Vec<crate::note_attachment::BeadNoteAttachmentWire>,
     >,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
+    close_issues_with_note_and_provenance(
+        beads_dir,
+        issue_ids,
+        reason,
+        resolution,
+        force,
+        note,
+        actor,
+        now,
+        note_attachments,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn close_issues_with_note_and_provenance(
+    beads_dir: &Path,
+    issue_ids: &[String],
+    reason: Option<String>,
+    resolution: Option<BeadResolutionWire>,
+    force: bool,
+    note: Option<String>,
+    actor: Option<String>,
+    now: Option<String>,
+    note_attachments: Option<
+        Vec<crate::note_attachment::BeadNoteAttachmentWire>,
+    >,
+    close_provenance: Option<BeadCloseProvenanceWire>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    if let Some(provenance) = &close_provenance {
+        provenance.validate()?;
+    }
     let note = match note {
         None => None,
         Some(entry) => {
@@ -166,6 +199,7 @@ pub fn close_issues_with_note(
             actor.clone(),
             now.clone(),
             note_attachments.clone(),
+            close_provenance.clone(),
         )
     })
 }
@@ -194,6 +228,7 @@ fn run_close(
     note_attachments: Option<
         Vec<crate::note_attachment::BeadNoteAttachmentWire>,
     >,
+    close_provenance: Option<BeadCloseProvenanceWire>,
 ) -> Result<MutationStep<BeadMutationOutcomeWire>, BeadError> {
     let resolved_ids: Vec<String> = issue_ids
         .iter()
@@ -368,7 +403,7 @@ fn run_close(
         }
     }
     for event in &batch.event_closed {
-        let Some(_) = view.stage_event(
+        let Some(event_id) = view.stage_event(
             &event.issue.id,
             BeadEventOperationWire::IssueClosed,
             BeadEventPayloadWire::IssueClosed {
@@ -376,6 +411,7 @@ fn run_close(
                 resolution: event.issue.resolution.clone(),
                 forced_descendant_ids: event.forced_descendant_ids.clone(),
                 closed_by: closed_by.clone(),
+                close_provenance: close_provenance.clone(),
             },
             &now,
             &actor,
@@ -383,6 +419,11 @@ fn run_close(
         else {
             return Ok(MutationStep::NeedsReplay);
         };
+        let mut issue = view.get(&event.issue.id)?;
+        issue.close_event_id = Some(event_id);
+        issue.close_provenance = close_provenance.clone();
+        issue.completion_failure = None;
+        view.stage_issue(issue);
     }
 
     let closed_ids = batch.closed_ids;
@@ -652,7 +693,7 @@ pub(crate) fn reject_unclosed_descendants_in_batch(
 /// reopens), flips closed ancestors to open with archived close
 /// metadata, stages them, and returns them in chain order. Callers mint
 /// one `IssueOpened` event per returned ancestor in its own stream.
-fn reopen_closed_ancestors_via_view(
+pub(super) fn reopen_closed_ancestors_via_view(
     view: &mut MutationView,
     issue_id: &str,
     opened_at: &str,

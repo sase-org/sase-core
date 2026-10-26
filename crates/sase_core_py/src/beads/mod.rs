@@ -1009,6 +1009,7 @@ fn py_bead_open<'py>(
     note=None,
     author=None,
     note_attachments=None,
+    close_provenance=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn py_bead_close<'py>(
@@ -1022,6 +1023,7 @@ fn py_bead_close<'py>(
     note: Option<String>,
     author: Option<String>,
     note_attachments: Option<Bound<'py, PyList>>,
+    close_provenance: Option<Bound<'py, PyDict>>,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
     let resolution = resolution
@@ -1030,10 +1032,22 @@ fn py_bead_close<'py>(
         .transpose()?;
     let note_attachments =
         bead_note_attachments_from_py_list(note_attachments)?;
+    let close_provenance = close_provenance
+        .map(|dict| {
+            let value = py_to_json_value(&dict)?;
+            serde_json::from_value::<BeadCloseProvenanceWire>(value).map_err(
+                |error| {
+                    PyValueError::new_err(format!(
+                        "close_provenance is not a valid BeadCloseProvenanceWire dict: {error}"
+                    ))
+                },
+            )
+        })
+        .transpose()?;
     bead_result_to_py(
         py,
         py.allow_threads(|| {
-            core_bead_close_issues_with_note(
+            core_bead_close_issues_with_provenance(
                 &beads_dir,
                 &issue_ids,
                 reason,
@@ -1043,7 +1057,33 @@ fn py_bead_close<'py>(
                 author,
                 now,
                 note_attachments,
+                close_provenance,
             )
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_recover_failed_closes")]
+fn py_bead_recover_failed_closes<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = py_to_json_value(request)?;
+    let request = serde_json::from_value::<BeadFailedCloseRecoveryRequestWire>(
+        request,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid BeadFailedCloseRecoveryRequestWire dict: {error}"
+        ))
+    })?;
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_recover_failed_closes(&beads_dir, request)
         }),
     )
 }
@@ -1591,6 +1631,7 @@ pub(crate) fn register_beads(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_preclaim_epic_work, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_open, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_close, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_recover_failed_closes, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_merge_event_streams, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_bead_merge_event_streams_with_relocation,

@@ -330,6 +330,7 @@ fn reducer_handles_current_mutation_operation_variants() {
                     resolution: None,
                     forced_descendant_ids: Vec::new(),
                     closed_by: None,
+                    close_provenance: None,
                 },
             ),
             event(
@@ -613,6 +614,7 @@ fn redundant_close_keeps_the_first_close_projection() {
                     resolution: Some(BeadResolutionWire::Done),
                     forced_descendant_ids: Vec::new(),
                     closed_by: None,
+                    close_provenance: None,
                 },
             ),
             event(
@@ -624,6 +626,7 @@ fn redundant_close_keeps_the_first_close_projection() {
                     resolution: Some(BeadResolutionWire::Canceled),
                     forced_descendant_ids: Vec::new(),
                     closed_by: None,
+                    close_provenance: None,
                 },
             ),
         ],
@@ -670,6 +673,7 @@ fn task_plus_one_replay_honors_observation_window_freshness() {
                     resolution: Some(BeadResolutionWire::Done),
                     forced_descendant_ids: Vec::new(),
                     closed_by: None,
+                    close_provenance: None,
                 },
             ),
             event(
@@ -796,6 +800,7 @@ fn every_transition_out_of_closed_starts_a_new_close_interval() {
                         resolution: Some(BeadResolutionWire::Done),
                         forced_descendant_ids: Vec::new(),
                         closed_by: None,
+                        close_provenance: None,
                     },
                 ),
                 event("gold-1", "2026-01-01T00:02:00Z", operation, payload),
@@ -819,6 +824,7 @@ fn every_transition_out_of_closed_starts_a_new_close_interval() {
                 resolution: Some(BeadResolutionWire::Superseded),
                 forced_descendant_ids: Vec::new(),
                 closed_by: None,
+                close_provenance: None,
             },
         ));
         let reclosed = reduce_event_streams(&[stream]).unwrap().remove(0);
@@ -881,6 +887,7 @@ fn close_event_stamps_an_issue_updated_to_closed_without_a_timestamp() {
                     resolution: Some(BeadResolutionWire::Done),
                     forced_descendant_ids: Vec::new(),
                     closed_by: None,
+                    close_provenance: None,
                 },
             ),
         ],
@@ -924,6 +931,7 @@ fn concurrent_close_projection_is_independent_of_branch_order() {
             resolution: Some(BeadResolutionWire::Done),
             forced_descendant_ids: Vec::new(),
             closed_by: None,
+            close_provenance: None,
         },
     ));
     let mut close_b = base.clone();
@@ -936,6 +944,7 @@ fn concurrent_close_projection_is_independent_of_branch_order() {
             resolution: Some(BeadResolutionWire::Canceled),
             forced_descendant_ids: Vec::new(),
             closed_by: None,
+            close_provenance: None,
         },
     ));
 
@@ -1175,6 +1184,7 @@ fn merge_event_stream_unions_concurrent_appends_deterministically() {
             resolution: None,
             forced_descendant_ids: Vec::new(),
             closed_by: None,
+            close_provenance: None,
         },
     ));
     let mut theirs = base.clone();
@@ -1188,6 +1198,7 @@ fn merge_event_stream_unions_concurrent_appends_deterministically() {
             resolution: None,
             forced_descendant_ids: Vec::new(),
             closed_by: None,
+            close_provenance: None,
         },
     ));
 
@@ -1310,6 +1321,7 @@ fn merge_event_stream_orders_non_base_union_deterministically() {
                 resolution: None,
                 forced_descendant_ids: Vec::new(),
                 closed_by: None,
+                close_provenance: None,
             },
         ),
         numbered_event(
@@ -1556,6 +1568,7 @@ fn merge_event_stream_accepts_interleaved_additions_and_preserves_ids() {
             resolution: None,
             forced_descendant_ids: Vec::new(),
             closed_by: None,
+            close_provenance: None,
         },
     );
     let ours = BeadEventStreamWire {
@@ -1694,6 +1707,7 @@ fn merge_event_stream_supports_sequential_rebase_replay() {
                 resolution: None,
                 forced_descendant_ids: Vec::new(),
                 closed_by: None,
+                close_provenance: None,
             },
         ),
         event(
@@ -1782,6 +1796,7 @@ fn reduce_applies_merged_stream_events_in_recorded_order() {
                         resolution: None,
                         forced_descendant_ids: Vec::new(),
                         closed_by: None,
+                        close_provenance: None,
                     },
                 ),
             ],
@@ -1867,6 +1882,7 @@ fn reduce_survives_many_merged_streams_with_non_monotonic_timestamps() {
                             resolution: None,
                             forced_descendant_ids: Vec::new(),
                             closed_by: None,
+                            close_provenance: None,
                         },
                     ),
                 ],
@@ -2297,7 +2313,10 @@ fn issue(
         updated_at: timestamp.to_string(),
         closed_at: None,
         close_reason: None,
+        close_event_id: None,
+        close_provenance: None,
         resolution: None,
+        completion_failure: None,
         close_history: Vec::new(),
         description: String::new(),
         notes: Vec::new(),

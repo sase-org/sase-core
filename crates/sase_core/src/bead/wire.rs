@@ -575,6 +575,7 @@ pub enum BeadReopenCauseWire {
     Open,
     Update,
     EpicPreclaim,
+    CompletionFailure,
 }
 
 impl BeadReopenCauseWire {
@@ -584,7 +585,83 @@ impl BeadReopenCauseWire {
             Self::Open => "open",
             Self::Update => "update",
             Self::EpicPreclaim => "epic_preclaim",
+            Self::CompletionFailure => "completion_failure",
         }
+    }
+}
+
+/// Stable host identity attached to a close made during an agent run.
+///
+/// Legacy and human closes omit this record and are never inferred to belong
+/// to a run from timestamps or assignees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadCloseProvenanceWire {
+    pub run_id: String,
+    pub agent_name: String,
+    pub artifact_dir: String,
+}
+
+impl BeadCloseProvenanceWire {
+    pub fn validate(&self) -> Result<(), BeadError> {
+        for (field, value) in [
+            ("run_id", &self.run_id),
+            ("agent_name", &self.agent_name),
+            ("artifact_dir", &self.artifact_dir),
+        ] {
+            if value.trim().is_empty() {
+                return Err(BeadError::validation(format!(
+                    "close provenance {field} cannot be empty or blank"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Durable, structured evidence that host completion failed after a close.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadCompletionFailureWire {
+    pub close_event_id: String,
+    pub run_id: String,
+    pub agent_name: String,
+    pub artifact_dir: String,
+    pub failed_at: String,
+    #[serde(default)]
+    pub evidence_locations: Vec<String>,
+    pub failure_code: String,
+}
+
+impl BeadCompletionFailureWire {
+    pub fn validate(&self) -> Result<(), BeadError> {
+        for (field, value) in [
+            ("close_event_id", &self.close_event_id),
+            ("run_id", &self.run_id),
+            ("agent_name", &self.agent_name),
+            ("artifact_dir", &self.artifact_dir),
+            ("failure_code", &self.failure_code),
+        ] {
+            if value.trim().is_empty() {
+                return Err(BeadError::validation(format!(
+                    "completion failure {field} cannot be empty or blank"
+                )));
+            }
+        }
+        DateTime::parse_from_rfc3339(self.failed_at.trim()).map_err(|error| {
+            BeadError::validation(format!(
+                "completion failure failed_at must be an RFC-3339 timestamp: {:?} ({error})",
+                self.failed_at
+            ))
+        })?;
+        if self
+            .evidence_locations
+            .iter()
+            .any(|value| value.trim().is_empty())
+        {
+            return Err(BeadError::validation(
+                "completion failure evidence locations cannot be empty or blank",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -605,6 +682,10 @@ pub struct BeadCloseRecordWire {
     pub reopened_via: BeadReopenCauseWire,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reopened_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_provenance: Option<BeadCloseProvenanceWire>,
 }
 
 impl BeadCloseRecordWire {
@@ -627,6 +708,18 @@ impl BeadCloseRecordWire {
             return Err(BeadError::validation(
                 "close history reopened_by cannot be empty or blank",
             ));
+        }
+        if self
+            .close_event_id
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(BeadError::validation(
+                "close history close_event_id cannot be empty or blank",
+            ));
+        }
+        if let Some(provenance) = &self.close_provenance {
+            provenance.validate()?;
         }
         Ok(())
     }
@@ -860,7 +953,13 @@ pub struct IssueWire {
     #[serde(default, deserialize_with = "deserialize_option_non_empty_string")]
     pub close_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_provenance: Option<BeadCloseProvenanceWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<BeadResolutionWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_failure: Option<BeadCompletionFailureWire>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub close_history: Vec<BeadCloseRecordWire>,
     #[serde(
@@ -981,7 +1080,13 @@ struct IssueWireRaw {
     #[serde(default, deserialize_with = "deserialize_option_non_empty_string")]
     pub close_reason: Option<String>,
     #[serde(default)]
+    pub close_event_id: Option<String>,
+    #[serde(default)]
+    pub close_provenance: Option<BeadCloseProvenanceWire>,
+    #[serde(default)]
     pub resolution: Option<BeadResolutionWire>,
+    #[serde(default)]
+    pub completion_failure: Option<BeadCompletionFailureWire>,
     #[serde(default)]
     pub close_history: Vec<BeadCloseRecordWire>,
     #[serde(
@@ -1071,7 +1176,10 @@ impl<'de> Deserialize<'de> for IssueWire {
             updated_at: raw.updated_at,
             closed_at: raw.closed_at,
             close_reason: raw.close_reason,
+            close_event_id: raw.close_event_id,
+            close_provenance: raw.close_provenance,
             resolution: raw.resolution,
+            completion_failure: raw.completion_failure,
             close_history: raw.close_history,
             description: raw.description,
             notes,
@@ -1228,6 +1336,21 @@ impl IssueWire {
                 "Only closed issues can carry resolution metadata",
             ));
         }
+        if self
+            .close_event_id
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(BeadError::validation(
+                "close_event_id cannot be empty or blank",
+            ));
+        }
+        if let Some(provenance) = &self.close_provenance {
+            provenance.validate()?;
+        }
+        if let Some(failure) = &self.completion_failure {
+            failure.validate()?;
+        }
         for record in &self.close_history {
             record.validate()?;
         }
@@ -1299,7 +1422,10 @@ mod tests {
             updated_at: String::new(),
             closed_at: None,
             close_reason: None,
+            close_event_id: None,
+            close_provenance: None,
             resolution: None,
+            completion_failure: None,
             close_history: Vec::new(),
             description: String::new(),
             notes: Vec::new(),
@@ -1329,6 +1455,8 @@ mod tests {
             reopened_at: "2026-08-05T17:04:11Z".to_string(),
             reopened_via: BeadReopenCauseWire::PlusOne,
             reopened_by: Some("claude.probe".to_string()),
+            close_event_id: None,
+            close_provenance: None,
         }
     }
 

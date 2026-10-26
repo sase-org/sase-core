@@ -1798,6 +1798,7 @@ fn bead_close_binding_stamps_the_supplied_author_on_the_close_event() {
             None,
             Some("worker".to_string()),
             None,
+            None,
         )
         .unwrap();
     });
@@ -1818,6 +1819,109 @@ fn bead_close_binding_stamps_the_supplied_author_on_the_close_event() {
         }
     }
     assert!(found, "expected one stamped issue_closed event");
+}
+
+#[test]
+fn failed_close_recovery_binding_round_trips_provenance_and_failure_facts() {
+    pyo3::prepare_freethreaded_python();
+    let temp = tempfile::tempdir().unwrap();
+    core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+    let beads_dir = temp.path().join("beads");
+    let issue = core_bead_create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Recoverable close".to_string(),
+            issue_type: IssueTypeWire::Task,
+            size: Some(PhaseSizeWire::Small),
+            task_type: Some("bug".to_string()),
+            now: Some("2026-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        assert!(module.getattr("bead_recover_failed_closes").is_ok());
+        let close_provenance = json_value_to_py(
+            py,
+            &json!({
+                "run_id": "run-origin-42",
+                "agent_name": "worker.agent",
+                "artifact_dir": "/tmp/run-origin-42"
+            }),
+        )
+        .unwrap()
+        .into_bound(py)
+        .downcast::<PyDict>()
+        .unwrap()
+        .to_owned();
+        let close = py_bead_close(
+            py,
+            beads_dir.to_str().unwrap(),
+            vec![issue.id.clone()],
+            None,
+            None,
+            false,
+            Some("2026-01-01T00:01:00Z".to_string()),
+            None,
+            Some("worker.agent".to_string()),
+            None,
+            Some(close_provenance),
+        )
+        .unwrap();
+        let close = py_to_json_value(close.bind(py)).unwrap();
+        let close_event_id = close["issues"][0]["close_event_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "run_id": "run-origin-42",
+                "failed_at": "2026-01-01T00:02:00Z",
+                "failure_code": "hook_failed",
+                "evidence_locations": ["/tmp/run-origin-42/finalizer.json"],
+                "note": "STITCH FAILED: finalizer hook failed; workspace /tmp/worker.",
+                "actor": "sase-finalizer"
+            }),
+        )
+        .unwrap()
+        .into_bound(py)
+        .downcast::<PyDict>()
+        .unwrap()
+        .to_owned();
+        let recovered = py_bead_recover_failed_closes(
+            py,
+            beads_dir.to_str().unwrap(),
+            &request,
+        )
+        .unwrap();
+        let recovered = py_to_json_value(recovered.bind(py)).unwrap();
+        assert_eq!(recovered["changed"], json!(true));
+        assert_eq!(recovered["recovered"][0]["close_event_id"], close_event_id);
+        assert!(recovered["skipped"].as_array().unwrap().is_empty());
+    });
+
+    let issue = core_bead_read_event_store_issues(&beads_dir)
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.id == issue.id)
+        .unwrap();
+    assert_eq!(issue.status, sase_core::bead::StatusWire::Open);
+    assert_eq!(
+        issue.completion_failure.as_ref().unwrap().run_id,
+        "run-origin-42"
+    );
+    assert_eq!(issue.close_history.len(), 1);
+    assert!(issue
+        .notes
+        .iter()
+        .any(|note| note.text.starts_with("STITCH FAILED:")));
 }
 
 #[test]

@@ -4,6 +4,7 @@
 //! present on the way out, `Option` is explicit, and unknown fields are
 //! rejected so wire drift fails loudly.
 
+use crate::bead::wire::BeadCompletionFailureWire;
 use serde::{Deserialize, Serialize};
 
 /// Wire schema version for [`StrandedWorkInputWire`]/[`StrandedWorkReportWire`].
@@ -65,6 +66,9 @@ pub struct StrandedWorkBeadFactsWire {
     pub records_available: bool,
     #[serde(default)]
     pub members: Vec<StrandedWorkMemberFactsWire>,
+    /// Explicit recovery evidence survives loss of the agent artifact index.
+    #[serde(default)]
+    pub completion_failure: Option<BeadCompletionFailureWire>,
 }
 
 /// Facts about one member of the bead's owning agent session.
@@ -158,6 +162,8 @@ pub struct StrandedWorkVerdictWire {
     pub last_turn: Option<String>,
     #[serde(default)]
     pub last_turn_artifact_dir: Option<String>,
+    #[serde(default)]
+    pub completion_failure: Option<BeadCompletionFailureWire>,
     #[serde(default)]
     pub declared_bead_action: Option<String>,
     #[serde(default)]

@@ -11,8 +11,8 @@
 
 use std::path::Path;
 
-use super::mutation_wire::BeadMutationOutcomeWire;
 use super::store::with_bead_mutation_lock;
+use super::store::MutationLockWait;
 use super::view::MutationView;
 use crate::bead::wire::BeadError;
 
@@ -33,13 +33,11 @@ pub(crate) enum MutationStep<T> {
 /// write, builds the replay backing and runs the same closure again.
 /// Genuine errors propagate without a retry; store corruption on the
 /// replay load fails exactly as today's replay load would.
-pub(crate) fn run_mutation(
+pub(crate) fn run_mutation<T: MutationLockWait>(
     beads_dir: &Path,
     operation_name: &str,
-    run: impl Fn(
-        &mut MutationView,
-    ) -> Result<MutationStep<BeadMutationOutcomeWire>, BeadError>,
-) -> Result<BeadMutationOutcomeWire, BeadError> {
+    run: impl Fn(&mut MutationView) -> Result<MutationStep<T>, BeadError>,
+) -> Result<T, BeadError> {
     with_bead_mutation_lock(beads_dir, operation_name, || {
         if let Some(mut view) = MutationView::load_cached(beads_dir)? {
             match run(&mut view) {

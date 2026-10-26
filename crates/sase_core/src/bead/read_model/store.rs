@@ -89,7 +89,7 @@ pub const READ_MODEL_SCHEMA_VERSION: u32 = 3;
 /// Every change to merge, apply, or post-pass semantics must bump this
 /// (see `reduce_event_streams`, the single validation point the rebuild
 /// reduces through). A mismatch drops the file and rebuilds.
-pub const READ_MODEL_REDUCER_VERSION: u32 = 1;
+pub const READ_MODEL_REDUCER_VERSION: u32 = 2;
 
 /// Cap on differing IDs reported by `--verify-cache`.
 const VERIFY_DIFF_ID_LIMIT: usize = 50;

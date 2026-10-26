@@ -391,6 +391,7 @@ fn a_store_bricked_by_a_close_over_a_snooze_loads_again() {
             resolution: Some(BeadResolutionWire::Canceled),
             forced_descendant_ids: Vec::new(),
             closed_by: None,
+            close_provenance: None,
         },
         "2026-01-02T00:00:00Z",
         "owner",

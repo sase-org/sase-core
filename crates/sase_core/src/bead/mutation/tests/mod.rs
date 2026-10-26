@@ -2,6 +2,7 @@ mod cache_fault_fallback;
 mod claims;
 mod claims_deps;
 mod close;
+mod completion_recovery;
 mod create;
 mod delegation_remove;
 mod dependencies;

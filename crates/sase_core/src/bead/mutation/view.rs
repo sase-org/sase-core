@@ -33,7 +33,10 @@ use crate::bead::config::{default_config, load_config, BeadConfigWire};
 use crate::bead::events::{
     BeadEventOperationWire, BeadEventPayloadWire, BeadEventStreamWire,
 };
-use crate::bead::jsonl::{event_streams_dir, read_event_stream_file};
+use crate::bead::jsonl::{
+    event_store_present, event_streams_dir, read_event_store,
+    read_event_stream_file,
+};
 use crate::bead::read_model::alloc;
 use crate::bead::read_model::{
     drop_cache_file, ensure_cache_ready_for_mutation_at,
@@ -248,6 +251,33 @@ impl MutationView {
             self.stage_order.push(issue.id.clone());
         }
         self.overlay.insert(issue.id.clone(), Some(issue));
+    }
+
+    /// Read the canonical event streams while the mutation lock is held.
+    ///
+    /// Run-scoped recovery must discover close provenance from event records,
+    /// never from the derived touch index. This cold scan is intentionally
+    /// confined to the host recovery mutation and is not used by read paths.
+    pub(crate) fn all_event_streams(
+        &self,
+    ) -> Result<Vec<BeadEventStreamWire>, BeadError> {
+        match &self.backing {
+            MutationViewBacking::Replay => self
+                .replay_store
+                .as_ref()
+                .map(|store| store.streams.all().to_vec())
+                .ok_or_else(|| {
+                    BeadError::io(
+                        "replay mutation view has no owned event streams",
+                    )
+                }),
+            MutationViewBacking::Cached { .. } => {
+                if !event_store_present(&self.beads_dir) {
+                    return Ok(Vec::new());
+                }
+                read_event_store(&self.beads_dir).map(|(_, streams)| streams)
+            }
+        }
     }
 
     /// Record a pending removal tombstone in the overlay.

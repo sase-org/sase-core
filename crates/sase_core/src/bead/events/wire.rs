@@ -14,9 +14,9 @@ use crate::artifact_link::{
 use crate::serde_option::deserialize_present_option;
 
 use super::super::wire::{
-    BeadError, BeadResolutionWire, BeadSnoozeWire, BeadTierWire,
-    DependencyWire, IssueWire, PhaseSizeWire, StatusWire,
-    TaskPlusOneEvidenceWire,
+    BeadCloseProvenanceWire, BeadCompletionFailureWire, BeadError,
+    BeadResolutionWire, BeadSnoozeWire, BeadTierWire, DependencyWire,
+    IssueWire, PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
 };
 use super::merge::remapped_id;
 
@@ -126,6 +126,7 @@ pub enum BeadEventOperationWire {
     NoteRemoved,
     IssueOpened,
     IssueClosed,
+    CompletionFailureRecovered,
     IssueRemoved,
     DependencyAdded,
     DependencyRemoved,
@@ -202,6 +203,15 @@ pub enum BeadEventPayloadWire {
         /// `Some` on every event written by the current close mutation.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         closed_by: Option<String>,
+        /// Stable host run identity. Missing on human and historical closes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        close_provenance: Option<BeadCloseProvenanceWire>,
+    },
+    /// Atomically reopens one still-current done close after host completion
+    /// failed, records durable failure facts, and appends its human note.
+    CompletionFailureRecovered {
+        failure: BeadCompletionFailureWire,
+        note: String,
     },
     IssueRemoved {
         #[serde(default)]
@@ -350,7 +360,11 @@ impl BeadEventPayloadWire {
             ) => Ok(()),
             (
                 BeadEventOperationWire::IssueClosed,
-                BeadEventPayloadWire::IssueClosed { closed_by, .. },
+                BeadEventPayloadWire::IssueClosed {
+                    closed_by,
+                    close_provenance,
+                    ..
+                },
             ) => {
                 if closed_by
                     .as_deref()
@@ -358,6 +372,24 @@ impl BeadEventPayloadWire {
                 {
                     return Err(BeadError::validation(
                         "issue_closed closed_by cannot be empty or blank",
+                    ));
+                }
+                close_provenance
+                    .as_ref()
+                    .map_or(Ok(()), BeadCloseProvenanceWire::validate)
+            }
+            (
+                BeadEventOperationWire::CompletionFailureRecovered,
+                BeadEventPayloadWire::CompletionFailureRecovered {
+                    failure,
+                    note,
+                },
+            ) => {
+                failure.validate()?;
+                if note.trim().is_empty() || !note.starts_with("STITCH FAILED:")
+                {
+                    return Err(BeadError::validation(
+                        "completion failure note must start with 'STITCH FAILED:' and contain text",
                     ));
                 }
                 Ok(())

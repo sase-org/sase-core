@@ -179,7 +179,7 @@ fn versions_are_current() {
     // adds disposable `alloc_top`/`alloc_child` allocation metadata for
     // index-only ID minting. The reducer semantics did not change.
     assert_eq!(READ_MODEL_SCHEMA_VERSION, 3);
-    assert_eq!(READ_MODEL_REDUCER_VERSION, 1);
+    assert_eq!(READ_MODEL_REDUCER_VERSION, 2);
 }
 
 #[test]
