@@ -11,7 +11,7 @@ use super::checks::{
 };
 use super::escalation::{decide_escalation, EscalationInput};
 use super::facts::{
-    CanaryFactsWire, CandidateEvalWire, CheckConclusionWire,
+    CanaryFactsWire, CandidateEvalWire, CheckConclusionWire, CoreCutRunWire,
     CoreEnsureFactsWire, EvidenceRefWire, FactRead, ReleasePrFactsWire,
     ReleaseStewardSnapshotWire, RunStatusWire, TrainFactsWire,
     WorkflowFactsWire,
@@ -501,6 +501,27 @@ fn handle_active_train(
     )
 }
 
+/// Walk `core.cuts` newest first. In-flight cuts never clear a red.
+/// Cancelled, skipped, and other non-decisive completed cuts are skipped.
+/// The first success means no `CoreCutRed`. The first typed failure is the
+/// counted red.
+fn counted_typed_cut_failure(
+    cuts: &[CoreCutRunWire],
+) -> Option<&CoreCutRunWire> {
+    for cut in cuts {
+        if cut.status != RunStatusWire::Completed {
+            continue;
+        }
+        if cut.conclusion.is_some_and(CheckConclusionWire::is_success) {
+            return None;
+        }
+        if cut.typed_failure.is_some() {
+            return Some(cut);
+        }
+    }
+    None
+}
+
 fn handle_no_train(
     request: &ReleaseStewardRequestWire,
     snapshot: &ReleaseStewardSnapshotWire,
@@ -527,9 +548,7 @@ fn handle_no_train(
             .evidence("core-ci", &ci.run_id, Some(ci.url.clone()));
         }
     }
-    if let Some(cut) = core.cuts.iter().find(|cut| {
-        cut.status == RunStatusWire::Completed && cut.typed_failure.is_some()
-    }) {
+    if let Some(cut) = counted_typed_cut_failure(&core.cuts) {
         if !cut.diagnostic_available {
             return broken(
                 "core_cut",

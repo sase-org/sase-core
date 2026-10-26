@@ -18,6 +18,34 @@ fn decide_primary(
     release_steward_decide(&request).unwrap().primary
 }
 
+fn core_cut(
+    run_id: &str,
+    status: RunStatusWire,
+    conclusion: Option<CheckConclusionWire>,
+    typed_failure: Option<&str>,
+    diagnostic_available: bool,
+) -> CoreCutRunWire {
+    CoreCutRunWire {
+        run_id: run_id.to_string(),
+        attempt: 1,
+        source_pin: PIN.to_string(),
+        status,
+        conclusion,
+        typed_failure: typed_failure.map(str::to_string),
+        diagnostic_available,
+    }
+}
+
+fn with_cuts(
+    cuts: Vec<CoreCutRunWire>,
+) -> crate::release_steward::wire::ReleaseStewardRequestWire {
+    let mut request = releasable_request();
+    if let FactRead::Ready { value } = &mut request.snapshot.core {
+        value.cuts = cuts;
+    }
+    request
+}
+
 #[test]
 fn releasable_proposes_merge() {
     let result = release_steward_decide(&releasable_request()).unwrap();
@@ -482,6 +510,115 @@ fn missing_cut_diagnostic_fails_closed() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn newer_successful_cut_supersedes_stale_typed_red() {
+    // 2026-10-24 shape: typed-red cut 40131163210, then newer green cuts.
+    let request = with_cuts(vec![
+        core_cut(
+            "40140000000",
+            RunStatusWire::Completed,
+            Some(CheckConclusionWire::Success),
+            None,
+            true,
+        ),
+        core_cut(
+            "40131163210",
+            RunStatusWire::Completed,
+            Some(CheckConclusionWire::Failure),
+            Some("CORE_CUT_RED check=tests"),
+            true,
+        ),
+    ]);
+    assert!(matches!(
+        decide_primary(request),
+        PrimaryStateWire::Releasable { .. }
+    ));
+}
+
+#[test]
+fn newest_completed_typed_failure_is_core_cut_red() {
+    let request = with_cuts(vec![
+        core_cut(
+            "cut-new",
+            RunStatusWire::Completed,
+            Some(CheckConclusionWire::Failure),
+            Some("CHECKS_NEVER_REGISTERED"),
+            true,
+        ),
+        core_cut(
+            "cut-old-green",
+            RunStatusWire::Completed,
+            Some(CheckConclusionWire::Success),
+            None,
+            true,
+        ),
+    ]);
+    match decide_primary(request) {
+        PrimaryStateWire::CoreCutRed { check } => {
+            assert_eq!(check, "CHECKS_NEVER_REGISTERED");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn cancelled_and_in_flight_cuts_do_not_clear_typed_red() {
+    let request = with_cuts(vec![
+        core_cut("cut-live", RunStatusWire::InProgress, None, None, true),
+        core_cut(
+            "cut-cancelled",
+            RunStatusWire::Completed,
+            Some(CheckConclusionWire::Cancelled),
+            None,
+            true,
+        ),
+        core_cut(
+            "cut-skipped",
+            RunStatusWire::Completed,
+            Some(CheckConclusionWire::Skipped),
+            None,
+            true,
+        ),
+        core_cut(
+            "cut-red",
+            RunStatusWire::Completed,
+            Some(CheckConclusionWire::Failure),
+            Some("CORE_CUT_RED check=tests"),
+            true,
+        ),
+    ]);
+    match decide_primary(request) {
+        PrimaryStateWire::CoreCutRed { check } => {
+            assert_eq!(check, "CORE_CUT_RED check=tests");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn superseded_red_without_diagnostics_is_not_broken() {
+    let request = with_cuts(vec![
+        core_cut(
+            "cut-green",
+            RunStatusWire::Completed,
+            Some(CheckConclusionWire::Success),
+            None,
+            true,
+        ),
+        core_cut(
+            "cut-stale-red",
+            RunStatusWire::Completed,
+            Some(CheckConclusionWire::Failure),
+            Some("CORE_CUT_RED check=tests"),
+            false,
+        ),
+    ]);
+    assert!(matches!(
+        decide_primary(request),
+        PrimaryStateWire::Releasable { .. }
+    ));
 }
 
 #[test]

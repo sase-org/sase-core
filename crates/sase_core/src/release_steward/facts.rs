@@ -352,6 +352,10 @@ pub struct CoreFactsWire {
     pub master_ci: Option<WorkflowRunFactsWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_release_pr: Option<CorePrFactsWire>,
+    /// Core-cut runs, newest first: every in-flight cut plus the newest 20
+    /// completed cuts. Policy walks this order; a later success supersedes a
+    /// stale typed failure. The wire shape does not include timestamps, so
+    /// readers must already sort newest first.
     pub cuts: Vec<CoreCutRunWire>,
 }
 
