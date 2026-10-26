@@ -558,6 +558,7 @@ fn drain_selects_preferred_then_oldest_active_then_stopped() {
         ],
         error_classes: vec![],
         preferred_key: Some(key("alice.athena.new", sha('b').as_str())),
+        exact_key: None,
     };
     let selected = select_publication_drain(&request).unwrap();
     let active: Vec<&str> = selected
@@ -612,6 +613,7 @@ fn drain_active_rows_can_exhaust_the_budget() {
         ],
         error_classes: vec![],
         preferred_key: None,
+        exact_key: None,
     };
     let selected = select_publication_drain(&request).unwrap();
     assert_eq!(selected.active.len(), 1);
@@ -635,6 +637,7 @@ fn drain_no_match_is_empty_not_unbounded() {
         )],
         error_classes: vec![PUBLICATION_ERROR_TIMEOUT.to_string()],
         preferred_key: None,
+        exact_key: None,
     };
     let selected = select_publication_drain(&request).unwrap();
     assert!(selected.active.is_empty());
@@ -676,6 +679,7 @@ fn drain_error_class_filter_ignores_active_rows() {
         ],
         error_classes: vec![PUBLICATION_ERROR_TIMEOUT.to_string()],
         preferred_key: None,
+        exact_key: None,
     };
     let selected = select_publication_drain(&request).unwrap();
     assert_eq!(selected.active.len(), 1);
@@ -711,10 +715,307 @@ fn drain_key_tie_break_is_stable() {
         ],
         error_classes: vec![],
         preferred_key: None,
+        exact_key: None,
     };
     let selected = select_publication_drain(&request).unwrap();
     assert_eq!(selected.active[0].global_agent, "alice.athena.a");
     assert_eq!(selected.active[1].global_agent, "alice.athena.b");
+}
+
+#[test]
+fn drain_exact_key_selects_only_the_matching_stopped_row() {
+    let target_revision = sha('t');
+    let request = PublicationDrainSelectionRequestWire {
+        schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+        limit: 3,
+        retry_retired: false,
+        retry_quarantined: true,
+        rows: vec![
+            retry_row_at(
+                "alice.athena.active",
+                sha('a').as_str(),
+                false,
+                false,
+                "active",
+                0.5,
+            ),
+            retry_row_at(
+                "alice.athena.target",
+                target_revision.as_str(),
+                false,
+                true,
+                "agent-hood publication did not complete within 120s",
+                2.0,
+            ),
+            retry_row_at(
+                "alice.athena.other",
+                sha('o').as_str(),
+                false,
+                true,
+                "agent-hood publication did not complete within 120s",
+                1.0,
+            ),
+        ],
+        error_classes: vec![PUBLICATION_ERROR_TIMEOUT.to_string()],
+        preferred_key: None,
+        exact_key: Some(key("alice.athena.target", target_revision.as_str())),
+    };
+    let selected = select_publication_drain(&request).unwrap();
+    assert!(selected.active.is_empty());
+    assert_eq!(selected.revive.len(), 1);
+    assert_eq!(selected.revive[0].global_agent, "alice.athena.target");
+    assert_eq!(selected.revive[0].primary_revision, target_revision);
+    assert_eq!(selected.revive[0].error_class, PUBLICATION_ERROR_TIMEOUT);
+}
+
+#[test]
+fn drain_exact_key_missing_key_selects_nothing() {
+    let request = PublicationDrainSelectionRequestWire {
+        schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+        limit: 3,
+        retry_retired: true,
+        retry_quarantined: true,
+        rows: vec![
+            retry_row_at(
+                "alice.athena.active",
+                sha('a').as_str(),
+                false,
+                false,
+                "active",
+                0.5,
+            ),
+            retry_row_at(
+                "alice.athena.timeout",
+                sha('b').as_str(),
+                false,
+                true,
+                "agent-hood publication did not complete within 120s",
+                1.0,
+            ),
+        ],
+        error_classes: vec![PUBLICATION_ERROR_TIMEOUT.to_string()],
+        preferred_key: None,
+        exact_key: Some(key("alice.athena.gone", sha('z').as_str())),
+    };
+    let selected = select_publication_drain(&request).unwrap();
+    assert!(selected.active.is_empty());
+    assert!(selected.revive.is_empty());
+}
+
+#[test]
+fn drain_exact_key_wrong_error_class_selects_nothing() {
+    let target_revision = sha('t');
+    let request = PublicationDrainSelectionRequestWire {
+        schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+        limit: 2,
+        retry_retired: false,
+        retry_quarantined: true,
+        rows: vec![retry_row_at(
+            "alice.athena.target",
+            target_revision.as_str(),
+            false,
+            true,
+            "agent-hood publication did not complete within 120s",
+            1.0,
+        )],
+        error_classes: vec![PUBLICATION_ERROR_REBASE_CONFLICT.to_string()],
+        preferred_key: None,
+        exact_key: Some(key("alice.athena.target", target_revision.as_str())),
+    };
+    let selected = select_publication_drain(&request).unwrap();
+    assert!(selected.active.is_empty());
+    assert!(selected.revive.is_empty());
+}
+
+#[test]
+fn drain_exact_key_retired_row_needs_retired_permission() {
+    let target_revision = sha('t');
+    let rows = || {
+        vec![retry_row_at(
+            "alice.athena.target",
+            target_revision.as_str(),
+            true,
+            false,
+            "owner manifest does not decode",
+            1.0,
+        )]
+    };
+    let denied = PublicationDrainSelectionRequestWire {
+        schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+        limit: 1,
+        retry_retired: false,
+        retry_quarantined: true,
+        rows: rows(),
+        error_classes: vec![PUBLICATION_ERROR_MANIFEST_MISMATCH.to_string()],
+        preferred_key: None,
+        exact_key: Some(key("alice.athena.target", target_revision.as_str())),
+    };
+    let selected = select_publication_drain(&denied).unwrap();
+    assert!(selected.active.is_empty());
+    assert!(selected.revive.is_empty());
+
+    let allowed = PublicationDrainSelectionRequestWire {
+        retry_retired: true,
+        ..denied
+    };
+    let selected = select_publication_drain(&allowed).unwrap();
+    assert!(selected.active.is_empty());
+    assert_eq!(selected.revive.len(), 1);
+    assert_eq!(selected.revive[0].global_agent, "alice.athena.target");
+}
+
+#[test]
+fn drain_exact_key_rejects_simultaneous_preferred_key() {
+    let request = PublicationDrainSelectionRequestWire {
+        schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+        limit: 1,
+        retry_retired: true,
+        retry_quarantined: true,
+        rows: vec![],
+        error_classes: vec![],
+        preferred_key: Some(key("alice.athena.foo", sha('a').as_str())),
+        exact_key: Some(key("alice.athena.foo", sha('a').as_str())),
+    };
+    let err = select_publication_drain(&request).unwrap_err();
+    assert!(err.to_string().contains("mutually exclusive"));
+}
+
+#[test]
+fn drain_exact_key_rejects_empty_identity() {
+    let request = PublicationDrainSelectionRequestWire {
+        schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+        limit: 1,
+        retry_retired: true,
+        retry_quarantined: true,
+        rows: vec![],
+        error_classes: vec![],
+        preferred_key: None,
+        exact_key: Some(key("", sha('a').as_str())),
+    };
+    let err = select_publication_drain(&request).unwrap_err();
+    assert!(err.to_string().contains("global_agent must not be empty"));
+
+    let request = PublicationDrainSelectionRequestWire {
+        schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+        limit: 1,
+        retry_retired: true,
+        retry_quarantined: true,
+        rows: vec![],
+        error_classes: vec![],
+        preferred_key: None,
+        exact_key: Some(key("alice.athena.foo", "   ")),
+    };
+    let err = select_publication_drain(&request).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("primary_revision must not be empty"));
+}
+
+#[test]
+fn drain_exact_key_deduplicates_repeated_rows() {
+    let target_revision = sha('t');
+    let request = PublicationDrainSelectionRequestWire {
+        schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+        limit: 2,
+        retry_retired: false,
+        retry_quarantined: true,
+        rows: vec![
+            retry_row_at(
+                "alice.athena.target",
+                target_revision.as_str(),
+                false,
+                true,
+                "agent-hood publication did not complete within 120s",
+                1.0,
+            ),
+            retry_row_at(
+                "alice.athena.target",
+                target_revision.as_str(),
+                false,
+                true,
+                "agent-hood publication did not complete within 120s",
+                2.0,
+            ),
+        ],
+        error_classes: vec![PUBLICATION_ERROR_TIMEOUT.to_string()],
+        preferred_key: None,
+        exact_key: Some(key("alice.athena.target", target_revision.as_str())),
+    };
+    let selected = select_publication_drain(&request).unwrap();
+    assert!(selected.active.is_empty());
+    assert_eq!(selected.revive.len(), 1);
+}
+
+#[test]
+fn drain_exact_key_resumes_only_the_matching_active_row() {
+    let target_revision = sha('t');
+    let request = PublicationDrainSelectionRequestWire {
+        schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+        limit: 5,
+        retry_retired: false,
+        retry_quarantined: false,
+        rows: vec![
+            retry_row_at(
+                "alice.athena.active",
+                sha('a').as_str(),
+                false,
+                false,
+                "active",
+                0.5,
+            ),
+            retry_row_at(
+                "alice.athena.target",
+                target_revision.as_str(),
+                false,
+                false,
+                "active",
+                1.0,
+            ),
+        ],
+        error_classes: vec![],
+        preferred_key: None,
+        exact_key: Some(key("alice.athena.target", target_revision.as_str())),
+    };
+    let selected = select_publication_drain(&request).unwrap();
+    assert_eq!(selected.active.len(), 1);
+    assert_eq!(selected.active[0].global_agent, "alice.athena.target");
+    assert!(selected.revive.is_empty());
+}
+
+#[test]
+fn drain_old_wire_without_exact_key_keeps_default_selection() {
+    let request: PublicationDrainSelectionRequestWire =
+        serde_json::from_value(serde_json::json!({
+            "schema_version": PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+            "limit": 1,
+            "retry_retired": true,
+            "retry_quarantined": true,
+            "rows": [
+                {
+                    "global_agent": "alice.athena.active",
+                    "primary_revision": sha('a'),
+                    "terminal": false,
+                    "quarantined": false,
+                    "last_error": "active",
+                    "created_at": 0.5
+                },
+                {
+                    "global_agent": "alice.athena.timeout",
+                    "primary_revision": sha('b'),
+                    "terminal": false,
+                    "quarantined": true,
+                    "last_error": "agent-hood publication did not complete within 120s",
+                    "created_at": 0.25
+                }
+            ],
+            "error_classes": [PUBLICATION_ERROR_TIMEOUT],
+        }))
+        .unwrap();
+    assert!(request.exact_key.is_none());
+    let selected = select_publication_drain(&request).unwrap();
+    assert_eq!(selected.active.len(), 1);
+    assert_eq!(selected.active[0].global_agent, "alice.athena.active");
+    assert!(selected.revive.is_empty());
 }
 
 #[test]

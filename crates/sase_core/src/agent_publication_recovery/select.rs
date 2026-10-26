@@ -58,10 +58,32 @@ pub fn select_publication_drain(
     require_schema(request.schema_version)?;
     let limit = require_positive_limit(request.limit)? as usize;
     let error_classes = validate_error_classes(&request.error_classes)?;
+    if request.exact_key.is_some() && request.preferred_key.is_some() {
+        return Err(PublicationRecoveryError::InvalidRequest(
+            "exact_key and preferred_key are mutually exclusive".to_string(),
+        ));
+    }
     let indexed = index_rows(&request.rows)?;
     let mut seen = BTreeSet::new();
     let mut active = Vec::new();
     let mut revive = Vec::new();
+
+    if let Some(exact) = request.exact_key.as_ref() {
+        let exact_key = logical_key_tuple(exact)?;
+        if let Some(row) = indexed.iter().find(|row| {
+            row.global_agent == exact_key.0
+                && row.primary_revision == exact_key.1
+        }) {
+            if row_is_drain_candidate(row, request, &error_classes) {
+                push_selected(row, &mut seen, limit, &mut active, &mut revive);
+            }
+        }
+        return Ok(PublicationDrainSelectionResponseWire {
+            schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+            active,
+            revive,
+        });
+    }
 
     if let Some(preferred) = request.preferred_key.as_ref() {
         let preferred_key = logical_key_tuple(preferred)?;

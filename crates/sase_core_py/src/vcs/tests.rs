@@ -688,6 +688,88 @@ fn publication_recovery_bindings_select_and_complete() {
 }
 
 #[test]
+fn publication_drain_binding_honors_exact_key() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let drain = |payload: serde_json::Value| {
+            let request = json_value_to_py(py, &payload).unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            py_select_publication_drain(py, request)
+                .map(|result| py_to_json_value(result.bind(py)).unwrap())
+                .map_err(|error| error.to_string())
+        };
+        let rows = json!([
+            {
+                "global_agent": "alice.athena.active",
+                "primary_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "terminal": false,
+                "quarantined": false,
+                "last_error": "active",
+                "created_at": 2.0
+            },
+            {
+                "global_agent": "alice.athena.target",
+                "primary_revision": "cccccccccccccccccccccccccccccccccccccccc",
+                "terminal": false,
+                "quarantined": true,
+                "last_error": "agent-hood publication did not complete within 120s",
+                "created_at": 1.0
+            }
+        ]);
+        let exact = json!({
+            "global_agent": "alice.athena.target",
+            "primary_revision": "cccccccccccccccccccccccccccccccccccccccc"
+        });
+
+        let hit = drain(json!({
+            "schema_version": 1,
+            "limit": 2,
+            "retry_retired": false,
+            "retry_quarantined": true,
+            "rows": rows,
+            "error_classes": ["timeout"],
+            "exact_key": exact,
+        }))
+        .unwrap();
+        assert_eq!(hit["active"], json!([]));
+        assert_eq!(hit["revive"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            hit["revive"][0]["global_agent"],
+            json!("alice.athena.target")
+        );
+
+        let miss = drain(json!({
+            "schema_version": 1,
+            "limit": 2,
+            "retry_retired": false,
+            "retry_quarantined": true,
+            "rows": rows,
+            "error_classes": ["timeout"],
+            "exact_key": {
+                "global_agent": "alice.athena.gone",
+                "primary_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+        }))
+        .unwrap();
+        assert_eq!(miss["active"], json!([]));
+        assert_eq!(miss["revive"], json!([]));
+
+        let ambiguous = drain(json!({
+            "schema_version": 1,
+            "limit": 2,
+            "retry_retired": false,
+            "retry_quarantined": true,
+            "rows": rows,
+            "error_classes": ["timeout"],
+            "preferred_key": exact,
+            "exact_key": exact,
+        }));
+        assert!(ambiguous.is_err());
+        assert!(ambiguous.unwrap_err().contains("mutually exclusive"));
+    });
+}
+
+#[test]
 fn stale_publication_repair_binding_round_trips() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

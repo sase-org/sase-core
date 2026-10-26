@@ -115,6 +115,12 @@ pub struct PublicationDrainSelectionRequestWire {
     pub error_classes: Vec<String>,
     #[serde(default)]
     pub preferred_key: Option<PublicationLogicalKeyWire>,
+    /// Exact logical-key constraint. When supplied, selection contains only
+    /// this key when it is eligible and is otherwise empty: unused capacity
+    /// is never filled with another row. Absence preserves historical
+    /// default selection.
+    #[serde(default)]
+    pub exact_key: Option<PublicationLogicalKeyWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
