@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.0](https://github.com/sase-org/sase-core/compare/v0.42.7...v0.43.0) - 2026-10-27
+
+### Added
+
+- [**breaking**] per-record capacity accounting in Rust snapshot
+- *(publication-recovery)* add exact-key constraint to drain selection
+- *(core)* add publication protection policy
+- *(beads)* recover failed-run closes atomically
+
+### Fixed
+
+- *(beads)* recover every eligible failed-run close in one mutation
+
 ## [0.42.6](https://github.com/sase-org/sase-core/compare/v0.42.5...v0.42.6) - 2026-10-25
 
 ### Added
