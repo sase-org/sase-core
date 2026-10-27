@@ -662,6 +662,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub queue_weight_error: Option<String>,
     #[serde(default)]
+    pub monitor_queue_weight_overridden: bool,
+    #[serde(default)]
     pub runner_claim_owner_key: Option<String>,
     #[serde(default)]
     pub wait_completed_at: Option<String>,

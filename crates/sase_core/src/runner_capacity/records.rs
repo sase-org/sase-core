@@ -80,7 +80,7 @@ fn serial_continuation_reuses_claim(record: &RunnerCapacityRecordWire) -> bool {
                 .is_some_and(|value| !value.trim().is_empty()))
 }
 
-fn is_pending_gate(record: &RunnerCapacityRecordWire) -> bool {
+pub(super) fn is_pending_gate(record: &RunnerCapacityRecordWire) -> bool {
     record.agent_session_role.as_deref() == Some("gate")
         && record.agent_session_turn_kind.as_deref() == Some("gate")
         && record
@@ -90,7 +90,9 @@ fn is_pending_gate(record: &RunnerCapacityRecordWire) -> bool {
         && record.agent_session_turn_state.as_deref() == Some("pending")
 }
 
-fn is_real_monitor_member(record: &RunnerCapacityRecordWire) -> bool {
+pub(super) fn is_real_monitor_member(
+    record: &RunnerCapacityRecordWire,
+) -> bool {
     record.agent_session_role.as_deref() == Some("monitor")
         && record.agent_session_turn_kind.as_deref() == Some("monitor")
         && record

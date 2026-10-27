@@ -28,10 +28,11 @@ struct ClaimAccumulator {
 pub(super) fn build_claims(
     records: &[RunnerCapacityRecordWire],
     diagnostics: &mut Vec<RunnerCapacityDiagnosticWire>,
-) -> (Vec<RunnerCapacityClaimWire>, bool) {
+) -> (Vec<RunnerCapacityClaimWire>, bool, BTreeSet<String>) {
     let index = record_index(records);
     let mut groups: BTreeMap<String, ClaimAccumulator> = BTreeMap::new();
     let mut invalid_live_claim = false;
+    let mut invalid_claim_keys = BTreeSet::new();
     for record in records {
         if is_occupying_record(record) {
             let lineage = claim_lineage(record, &index);
@@ -67,6 +68,7 @@ pub(super) fn build_claims(
     let mut claims = Vec::new();
     for (_, mut group) in groups {
         if group.invalid {
+            invalid_claim_keys.insert(group.lineage.owner_key);
             continue;
         }
         group.artifact_dirs.sort();
@@ -82,7 +84,7 @@ pub(super) fn build_claims(
             artifact_dirs: group.artifact_dirs,
         });
     }
-    (claims, invalid_live_claim)
+    (claims, invalid_live_claim, invalid_claim_keys)
 }
 
 pub(super) fn active_claim_keys(

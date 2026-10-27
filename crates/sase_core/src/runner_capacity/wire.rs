@@ -4,7 +4,7 @@ use crate::agent_hold::AgentHoldRecordWire;
 
 use crate::queue_directive::resolve_queue_capacity;
 
-pub const RUNNER_CAPACITY_POLICY_SCHEMA_VERSION: u32 = 7;
+pub const RUNNER_CAPACITY_POLICY_SCHEMA_VERSION: u32 = 8;
 pub const DEFAULT_WAIT_PRIORITY: i32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -85,6 +85,8 @@ pub struct RunnerCapacityRecordWire {
     pub queue_weight_explicit: bool,
     #[serde(default)]
     pub queue_weight_invalid: bool,
+    #[serde(default)]
+    pub queue_weight_inherited: bool,
     #[serde(default)]
     pub slot_requested_at: Option<String>,
     #[serde(default)]
@@ -201,6 +203,26 @@ pub struct RunnerCapacityCandidateDecisionWire {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RunnerCapacityAccountingWire {
+    pub artifact_dir: String,
+    pub project_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    pub state: String,
+    pub charged_weight: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_weight: Option<f64>,
+    pub weight_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_owner_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_holder_artifact_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunnerCapacitySnapshotWire {
     pub schema_version: u32,
     pub effective_limit: f64,
@@ -208,6 +230,10 @@ pub struct RunnerCapacitySnapshotWire {
     pub occupied_capacity: f64,
     #[serde(default)]
     pub claims: Vec<RunnerCapacityClaimWire>,
+    #[serde(default)]
+    pub accounting: Vec<RunnerCapacityAccountingWire>,
+    #[serde(default = "default_true")]
+    pub accounting_valid: bool,
     #[serde(default)]
     pub waiters: Vec<RunnerCapacityWaiterWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

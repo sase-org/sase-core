@@ -1,5 +1,6 @@
 use crate::queue_directive::queue_weight_is_valid;
 
+use super::accounting::build_accounting;
 use super::candidate::build_candidate_decision;
 use super::capacity_math::compensated_sum;
 use super::claims::{
@@ -27,7 +28,7 @@ pub fn runner_capacity_snapshot(
     let request = &request;
     let mut diagnostics = Vec::new();
     let claim_records = records_excluding_candidate(request);
-    let (mut claims, invalid_live_claim) =
+    let (mut claims, invalid_live_claim, invalid_claim_keys) =
         build_claims(&claim_records, &mut diagnostics);
     claims.sort_by(|left, right| {
         left.owner_key
@@ -83,12 +84,22 @@ pub fn runner_capacity_snapshot(
         )
     });
 
+    let accounting = build_accounting(
+        &claim_records,
+        &claims,
+        &invalid_claim_keys,
+        &waiters,
+    );
+    let accounting_valid = !fail_closed;
+
     RunnerCapacitySnapshotWire {
         schema_version: RUNNER_CAPACITY_POLICY_SCHEMA_VERSION,
         effective_limit: request.effective_limit,
         occupied_lanes,
         occupied_capacity,
         claims,
+        accounting,
+        accounting_valid,
         waiters,
         first_eligible_artifact_dir,
         candidate_decision,

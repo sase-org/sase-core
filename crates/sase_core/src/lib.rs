@@ -1498,11 +1498,11 @@ pub use retryability::{
 };
 pub use runner_capacity::{
     runner_capacity_policy_schema_version, runner_capacity_snapshot,
-    RunnerCapacityBlockerWire, RunnerCapacityCandidateDecisionWire,
-    RunnerCapacityClaimWire, RunnerCapacityDiagnosticWire,
-    RunnerCapacityRecordWire, RunnerCapacityRequestWire,
-    RunnerCapacitySnapshotWire, RunnerCapacityWaiterWire,
-    RUNNER_CAPACITY_POLICY_SCHEMA_VERSION,
+    RunnerCapacityAccountingWire, RunnerCapacityBlockerWire,
+    RunnerCapacityCandidateDecisionWire, RunnerCapacityClaimWire,
+    RunnerCapacityDiagnosticWire, RunnerCapacityRecordWire,
+    RunnerCapacityRequestWire, RunnerCapacitySnapshotWire,
+    RunnerCapacityWaiterWire, RUNNER_CAPACITY_POLICY_SCHEMA_VERSION,
 };
 pub use runner_limit_override::{
     clear_runner_limit_override, get_runner_limit_override,

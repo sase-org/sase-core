@@ -14,6 +14,7 @@
 //! [`holds`](holds) owns hold-barrier blocking; and
 //! [`capacity_math`](capacity_math) owns the floating-point capacity math.
 
+mod accounting;
 mod candidate;
 mod capacity_math;
 mod claims;
@@ -27,10 +28,10 @@ mod wire;
 
 pub use snapshot::runner_capacity_snapshot;
 pub use wire::{
-    runner_capacity_policy_schema_version, RunnerCapacityBlockerWire,
-    RunnerCapacityCandidateDecisionWire, RunnerCapacityClaimWire,
-    RunnerCapacityDiagnosticWire, RunnerCapacityRecordWire,
-    RunnerCapacityRequestWire, RunnerCapacitySnapshotWire,
-    RunnerCapacityWaiterWire, DEFAULT_WAIT_PRIORITY,
-    RUNNER_CAPACITY_POLICY_SCHEMA_VERSION,
+    runner_capacity_policy_schema_version, RunnerCapacityAccountingWire,
+    RunnerCapacityBlockerWire, RunnerCapacityCandidateDecisionWire,
+    RunnerCapacityClaimWire, RunnerCapacityDiagnosticWire,
+    RunnerCapacityRecordWire, RunnerCapacityRequestWire,
+    RunnerCapacitySnapshotWire, RunnerCapacityWaiterWire,
+    DEFAULT_WAIT_PRIORITY, RUNNER_CAPACITY_POLICY_SCHEMA_VERSION,
 };

@@ -1713,6 +1713,9 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         ),
         queue_weight_invalid,
         queue_weight_error,
+        monitor_queue_weight_overridden: coerce_bool_truthy(
+            data.get("monitor_queue_weight_overridden"),
+        ),
         runner_claim_owner_key: coerce_str(data.get("runner_claim_owner_key"))
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
