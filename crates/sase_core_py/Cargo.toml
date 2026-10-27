@@ -44,4 +44,5 @@ libc = "0.2"
 sase_workspace_hack = { version = "0.1", path = "../sase_workspace_hack" }
 
 [dev-dependencies]
+rusqlite = { workspace = true }
 tempfile = { workspace = true }

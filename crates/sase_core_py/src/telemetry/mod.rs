@@ -241,7 +241,7 @@ fn py_tool_run_unknown_evidence<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_begin",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_begin<'py>(
     py: Python<'py>,
@@ -267,7 +267,7 @@ fn py_tool_run_begin<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_append_event",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_append_event<'py>(
     py: Python<'py>,
@@ -293,7 +293,7 @@ fn py_tool_run_append_event<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_finish",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_finish<'py>(
     py: Python<'py>,
@@ -319,7 +319,7 @@ fn py_tool_run_finish<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_observe",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_observe<'py>(
     py: Python<'py>,
@@ -345,7 +345,7 @@ fn py_tool_run_observe<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_record_demand",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_record_demand<'py>(
     py: Python<'py>,
@@ -374,7 +374,7 @@ fn py_tool_run_record_demand<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_reconcile",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_reconcile<'py>(
     py: Python<'py>,
@@ -400,7 +400,7 @@ fn py_tool_run_reconcile<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_claim",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_claim<'py>(
     py: Python<'py>,
@@ -426,7 +426,7 @@ fn py_tool_run_claim<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_join",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_join<'py>(
     py: Python<'py>,
@@ -452,7 +452,7 @@ fn py_tool_run_join<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_release_join",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_release_join<'py>(
     py: Python<'py>,
@@ -495,7 +495,7 @@ fn py_tool_run_sync_wait_budget<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_request_stop",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_request_stop<'py>(
     py: Python<'py>,
@@ -521,7 +521,7 @@ fn py_tool_run_request_stop<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_list",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_list<'py>(
     py: Python<'py>,
@@ -547,7 +547,7 @@ fn py_tool_run_list<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_show",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_show<'py>(
     py: Python<'py>,
@@ -573,7 +573,7 @@ fn py_tool_run_show<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_summary",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_summary<'py>(
     py: Python<'py>,
@@ -599,7 +599,7 @@ fn py_tool_run_summary<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_retention_preview",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_retention_preview<'py>(
     py: Python<'py>,
@@ -625,7 +625,7 @@ fn py_tool_run_retention_preview<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_retention_apply",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_retention_apply<'py>(
     py: Python<'py>,
@@ -651,7 +651,7 @@ fn py_tool_run_retention_apply<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_store_stats",
-    signature = (store_path, busy_timeout_ms=250)
+    signature = (store_path, busy_timeout_ms=0)
 )]
 fn py_tool_run_store_stats<'py>(
     py: Python<'py>,
@@ -733,7 +733,7 @@ fn py_tool_run_triage_extract<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_triage_record",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_triage_record<'py>(
     py: Python<'py>,
@@ -762,7 +762,7 @@ fn py_tool_run_triage_record<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_triage_show",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_triage_show<'py>(
     py: Python<'py>,
@@ -824,7 +824,7 @@ fn py_tool_run_triage_verdict<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_triage_stage",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_triage_stage<'py>(
     py: Python<'py>,
@@ -853,7 +853,7 @@ fn py_tool_run_triage_stage<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_triage_settle",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_triage_settle<'py>(
     py: Python<'py>,
@@ -882,7 +882,7 @@ fn py_tool_run_triage_settle<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_receipt_settle",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_receipt_settle<'py>(
     py: Python<'py>,
@@ -911,7 +911,7 @@ fn py_tool_run_receipt_settle<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_receipt_lookup",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_receipt_lookup<'py>(
     py: Python<'py>,
@@ -940,7 +940,7 @@ fn py_tool_run_receipt_lookup<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_receipts_report",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_receipts_report<'py>(
     py: Python<'py>,
@@ -969,7 +969,7 @@ fn py_tool_run_receipts_report<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_stats_report",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_stats_report<'py>(
     py: Python<'py>,
@@ -995,7 +995,7 @@ fn py_tool_run_stats_report<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_failures",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_failures<'py>(
     py: Python<'py>,
@@ -1022,7 +1022,7 @@ fn py_tool_run_failures<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_live_glance",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_live_glance<'py>(
     py: Python<'py>,
@@ -1049,7 +1049,7 @@ fn py_tool_run_live_glance<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_briefs",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_briefs<'py>(
     py: Python<'py>,
@@ -1076,7 +1076,7 @@ fn py_tool_run_briefs<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_node_summaries",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_node_summaries<'py>(
     py: Python<'py>,
@@ -1107,7 +1107,7 @@ fn py_tool_run_node_summaries<'py>(
 #[pyfunction]
 #[pyo3(
     name = "tool_run_detail",
-    signature = (store_path, request, busy_timeout_ms=250)
+    signature = (store_path, request, busy_timeout_ms=0)
 )]
 fn py_tool_run_detail<'py>(
     py: Python<'py>,
@@ -1186,3 +1186,5 @@ mod demand_tests;
 mod stats_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod timeout_tests;

@@ -1886,6 +1886,7 @@ version = "0.43.0"
 dependencies = [
  "libc",
  "pyo3",
+ "rusqlite",
  "sase_core",
  "sase_gateway",
  "sase_workspace_hack",

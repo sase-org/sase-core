@@ -82,214 +82,56 @@ fn retention(
             diagnostics: vec!["tool run store does not exist".to_string()],
         });
     }
-    let inspect = |conn: &Connection| -> Result<ToolRunRetentionResultWire, ToolRunError> {
-        let protected_unsettled: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM runs WHERE state IN ('created', 'running')",
-            [],
-            |row| row.get(0),
-        )?;
-        let summary_rows: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM runs
-             WHERE state NOT IN ('created', 'running')
-               AND settled_ts IS NOT NULL
-               AND settled_ts < ?1",
-            [summary_cut],
-            |row| row.get(0),
-        )?;
-        let base_detail_rows: i64 = conn.query_row(
-            "SELECT
-                (SELECT COUNT(*) FROM events e
-                    JOIN runs r ON r.run_id = e.run_id
-                    WHERE r.state NOT IN ('created', 'running')
-                      AND e.kind IN ('stage_started', 'stage_finished', 'sample')
-                      AND e.created_ts < ?1)
-              + (SELECT COUNT(*) FROM stages s
-                    JOIN runs r ON r.run_id = s.run_id
-                    WHERE r.state NOT IN ('created', 'running')
-                      AND COALESCE(s.finished_ts, s.started_ts, 0) < ?1)
-              + (SELECT COUNT(*) FROM samples m
-                    JOIN runs r ON r.run_id = m.run_id
-                    WHERE r.state NOT IN ('created', 'running')
-                      AND m.observed_ts < ?1)",
-            [detail_cut],
-            |row| row.get(0),
-        )?;
-        let has_triage = triage_tables_present(conn)?;
-        let triage_detail_rows: i64 = if has_triage {
-            conn.query_row(
-                "SELECT
-                    (SELECT COUNT(*) FROM tool_triage_items i
-                        JOIN runs r ON r.run_id = i.run_id
-                        WHERE r.state NOT IN ('created', 'running')
-                          AND i.created_ts < ?1)
-                  + (SELECT COUNT(*) FROM tool_triage_stages s
-                        JOIN runs r ON r.run_id = s.run_id
-                        WHERE r.state NOT IN ('created', 'running')
-                          AND s.created_ts < ?1)
-                  + (SELECT COUNT(*) FROM tool_triage_runs t
-                        JOIN runs r ON r.run_id = t.run_id
-                        WHERE r.state NOT IN ('created', 'running')
-                          AND t.created_ts < ?1)",
-                [detail_cut],
-                |row| row.get(0),
-            )?
-        } else {
-            0
+    let inspect_sql =
+        |conn: &Connection| -> Result<RetentionSqlSnapshot, ToolRunError> {
+            inspect_retention_sql(conn, summary_cut, detail_cut, log_cut, now)
         };
-        // Triage rows of summary-deleted runs not already counted above.
-        let triage_summary_extra: i64 = if has_triage {
-            conn.query_row(
-                "SELECT
-                    (SELECT COUNT(*) FROM tool_triage_items i
-                     WHERE i.run_id IN (
-                        SELECT run_id FROM runs
-                        WHERE state NOT IN ('created', 'running')
-                          AND settled_ts IS NOT NULL
-                          AND settled_ts < ?1
-                     ) AND i.created_ts >= ?2)
-                  + (SELECT COUNT(*) FROM tool_triage_stages s
-                     WHERE s.run_id IN (
-                        SELECT run_id FROM runs
-                        WHERE state NOT IN ('created', 'running')
-                          AND settled_ts IS NOT NULL
-                          AND settled_ts < ?1
-                     ) AND s.created_ts >= ?2)
-                  + (SELECT COUNT(*) FROM tool_triage_runs t
-                     WHERE t.run_id IN (
-                        SELECT run_id FROM runs
-                        WHERE state NOT IN ('created', 'running')
-                          AND settled_ts IS NOT NULL
-                          AND settled_ts < ?1
-                     ) AND t.created_ts >= ?2)",
-                [summary_cut, detail_cut],
-                |row| row.get(0),
-            )?
-        } else {
-            0
-        };
-        let receipt_detail_rows: i64 =
-            count_deletable_receipts(conn, summary_cut, now).unwrap_or(0)
-                as i64;
-        let detail_rows: i64 = base_detail_rows
-            + triage_detail_rows
-            + triage_summary_extra
-            + receipt_detail_rows;
-        let mut file_candidates = Vec::new();
-        let mut stmt = conn.prepare(
-            "SELECT run_id, log_stdout_path, log_stderr_path, events_path
-             FROM runs
-             WHERE state NOT IN ('created', 'running')
-               AND settled_ts IS NOT NULL
-               AND settled_ts < ?1",
-        )?;
-        let rows = stmt.query_map([log_cut], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })?;
-        for row in rows {
-            let (run_id, stdout, stderr, events) = row?;
-            for (kind, path) in [
-                ("stdout", stdout.clone()),
-                ("stderr", stderr.clone()),
-                ("events", events.clone()),
-            ] {
-                if let Some(path) = path {
-                    file_candidates.push(ToolRunDeletionCandidateWire {
-                        kind: kind.to_string(),
-                        run_id: Some(run_id.clone()),
-                        path: Some(path),
-                        protected: false,
-                        reason: "log_days elapsed after settlement".to_string(),
-                    });
-                }
-            }
-            for path in stage_output_files(events.as_deref()) {
-                file_candidates.push(ToolRunDeletionCandidateWire {
-                    kind: "stage_output".to_string(),
-                    run_id: Some(run_id.clone()),
-                    path: Some(path),
-                    protected: false,
-                    reason: "log_days elapsed after settlement".to_string(),
-                });
-            }
-        }
-        let usage = select_aggregate_log_candidates(
-            conn,
-            &mut file_candidates,
-            request.policy.log_max_bytes,
-        )?;
-        // Rust only selects quarantine files; the `tool_run_retention`
-        // reaper deletes the listed paths. Remaining (young or unreadable)
-        // quarantine bytes stay in retained accounting so the report keeps
-        // honest physical-byte totals.
-        file_candidates.extend(quarantine.candidates.iter().cloned());
-        let retained_bytes = usage
-            .retained_bytes
-            .saturating_add(quarantine.remaining_bytes);
-        Ok(ToolRunRetentionResultWire {
-            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
-            dry_run: request.dry_run,
-            summary_rows: summary_rows as u64,
-            detail_rows: detail_rows as u64,
-            file_candidates,
-            protected_unsettled: protected_unsettled as u64,
-            retained_bytes,
-            protected_bytes: usage.protected_bytes,
-            over_target_bytes: retained_bytes
-                .saturating_sub(request.policy.log_max_bytes),
-            diagnostics: Vec::new(),
-        })
-    };
-    if request.dry_run {
-        return with_read_store(store_path, busy_timeout, inspect);
-    }
-    with_write_store(store_path, busy_timeout, |conn| {
-        let tx =
-            conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let report = inspect(&tx)?;
-        tx.execute(
-            "DELETE FROM samples WHERE sample_id IN (
+    let snapshot = if request.dry_run {
+        with_read_store(store_path, busy_timeout, inspect_sql)?
+    } else {
+        with_write_store(store_path, busy_timeout, |conn| {
+            let tx =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let snapshot = inspect_sql(&tx)?;
+            tx.execute(
+                "DELETE FROM samples WHERE sample_id IN (
                 SELECT m.sample_id FROM samples m
                 JOIN runs r ON r.run_id = m.run_id
                 WHERE r.state NOT IN ('created', 'running')
                   AND m.observed_ts < ?1
             )",
-            [detail_cut],
-        )?;
-        tx.execute(
-            "DELETE FROM stages WHERE stage_id IN (
+                [detail_cut],
+            )?;
+            tx.execute(
+                "DELETE FROM stages WHERE stage_id IN (
                 SELECT s.stage_id FROM stages s
                 JOIN runs r ON r.run_id = s.run_id
                 WHERE r.state NOT IN ('created', 'running')
                   AND COALESCE(s.finished_ts, s.started_ts, 0) < ?1
             )",
-            [detail_cut],
-        )?;
-        tx.execute(
-            "DELETE FROM events WHERE event_id IN (
+                [detail_cut],
+            )?;
+            tx.execute(
+                "DELETE FROM events WHERE event_id IN (
                 SELECT e.event_id FROM events e
                 JOIN runs r ON r.run_id = e.run_id
                 WHERE r.state NOT IN ('created', 'running')
                   AND e.kind IN ('stage_started', 'stage_finished', 'sample')
                   AND e.created_ts < ?1
             )",
-            [detail_cut],
-        )?;
-        if triage_tables_present(&tx)? {
-            tx.execute(
-                "DELETE FROM tool_triage_items WHERE item_id IN (
+                [detail_cut],
+            )?;
+            if triage_tables_present(&tx)? {
+                tx.execute(
+                    "DELETE FROM tool_triage_items WHERE item_id IN (
                     SELECT i.item_id FROM tool_triage_items i
                     JOIN runs r ON r.run_id = i.run_id
                     WHERE r.state NOT IN ('created', 'running')
                       AND i.created_ts < ?1
                 )",
-                [detail_cut],
-            )?;
-            tx.execute(
+                    [detail_cut],
+                )?;
+                tx.execute(
                 "DELETE FROM tool_triage_stages WHERE (run_id, stage_key) IN (
                     SELECT s.run_id, s.stage_key FROM tool_triage_stages s
                     JOIN runs r ON r.run_id = s.run_id
@@ -298,112 +140,341 @@ fn retention(
                 )",
                 [detail_cut],
             )?;
-            tx.execute(
-                "DELETE FROM tool_triage_runs WHERE run_id IN (
+                tx.execute(
+                    "DELETE FROM tool_triage_runs WHERE run_id IN (
                     SELECT t.run_id FROM tool_triage_runs t
                     JOIN runs r ON r.run_id = t.run_id
                     WHERE r.state NOT IN ('created', 'running')
                       AND t.created_ts < ?1
                 )",
-                [detail_cut],
-            )?;
-        }
-        tx.execute(
-            "DELETE FROM events WHERE run_id IN (
-                SELECT run_id FROM runs
-                WHERE state NOT IN ('created', 'running')
-                  AND settled_ts IS NOT NULL
-                  AND settled_ts < ?1
-            )",
-            [summary_cut],
-        )?;
-        tx.execute(
-            "DELETE FROM stages WHERE run_id IN (
-                SELECT run_id FROM runs
-                WHERE state NOT IN ('created', 'running')
-                  AND settled_ts IS NOT NULL
-                  AND settled_ts < ?1
-            )",
-            [summary_cut],
-        )?;
-        tx.execute(
-            "DELETE FROM samples WHERE run_id IN (
-                SELECT run_id FROM runs
-                WHERE state NOT IN ('created', 'running')
-                  AND settled_ts IS NOT NULL
-                  AND settled_ts < ?1
-            )",
-            [summary_cut],
-        )?;
-        tx.execute(
-            "DELETE FROM attempts WHERE run_id IN (
-                SELECT run_id FROM runs
-                WHERE state NOT IN ('created', 'running')
-                  AND settled_ts IS NOT NULL
-                  AND settled_ts < ?1
-            )",
-            [summary_cut],
-        )?;
-        if triage_tables_present(&tx)? {
+                    [detail_cut],
+                )?;
+            }
             tx.execute(
-                "DELETE FROM tool_triage_items WHERE run_id IN (
+                "DELETE FROM events WHERE run_id IN (
+                SELECT run_id FROM runs
+                WHERE state NOT IN ('created', 'running')
+                  AND settled_ts IS NOT NULL
+                  AND settled_ts < ?1
+            )",
+                [summary_cut],
+            )?;
+            tx.execute(
+                "DELETE FROM stages WHERE run_id IN (
+                SELECT run_id FROM runs
+                WHERE state NOT IN ('created', 'running')
+                  AND settled_ts IS NOT NULL
+                  AND settled_ts < ?1
+            )",
+                [summary_cut],
+            )?;
+            tx.execute(
+                "DELETE FROM samples WHERE run_id IN (
+                SELECT run_id FROM runs
+                WHERE state NOT IN ('created', 'running')
+                  AND settled_ts IS NOT NULL
+                  AND settled_ts < ?1
+            )",
+                [summary_cut],
+            )?;
+            tx.execute(
+                "DELETE FROM attempts WHERE run_id IN (
+                SELECT run_id FROM runs
+                WHERE state NOT IN ('created', 'running')
+                  AND settled_ts IS NOT NULL
+                  AND settled_ts < ?1
+            )",
+                [summary_cut],
+            )?;
+            if triage_tables_present(&tx)? {
+                tx.execute(
+                    "DELETE FROM tool_triage_items WHERE run_id IN (
                     SELECT run_id FROM runs
                     WHERE state NOT IN ('created', 'running')
                       AND settled_ts IS NOT NULL
                       AND settled_ts < ?1
                 )",
-                [summary_cut],
-            )?;
-            tx.execute(
-                "DELETE FROM tool_triage_stages WHERE run_id IN (
+                    [summary_cut],
+                )?;
+                tx.execute(
+                    "DELETE FROM tool_triage_stages WHERE run_id IN (
                     SELECT run_id FROM runs
                     WHERE state NOT IN ('created', 'running')
                       AND settled_ts IS NOT NULL
                       AND settled_ts < ?1
                 )",
-                [summary_cut],
-            )?;
-            tx.execute(
-                "DELETE FROM tool_triage_runs WHERE run_id IN (
+                    [summary_cut],
+                )?;
+                tx.execute(
+                    "DELETE FROM tool_triage_runs WHERE run_id IN (
                     SELECT run_id FROM runs
                     WHERE state NOT IN ('created', 'running')
                       AND settled_ts IS NOT NULL
                       AND settled_ts < ?1
                 )",
-                [summary_cut],
-            )?;
-        }
-        let summary_run_ids: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT run_id FROM runs
+                    [summary_cut],
+                )?;
+            }
+            let summary_run_ids: Vec<String> = {
+                let mut stmt = tx.prepare(
+                    "SELECT run_id FROM runs
                  WHERE state NOT IN ('created', 'running')
                    AND settled_ts IS NOT NULL
                    AND settled_ts < ?1",
-            )?;
-            let rows =
-                stmt.query_map([summary_cut], |row| row.get::<_, String>(0))?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row?);
-            }
-            out
-        };
-        tombstone_unreadable_for_runs(&tx, &summary_run_ids)?;
-        delete_deletable_receipts(&tx, summary_cut, now)?;
-        tx.execute(
-            "DELETE FROM runs
+                )?;
+                let rows = stmt
+                    .query_map([summary_cut], |row| row.get::<_, String>(0))?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row?);
+                }
+                out
+            };
+            tombstone_unreadable_for_runs(&tx, &summary_run_ids)?;
+            delete_deletable_receipts(&tx, summary_cut, now)?;
+            tx.execute(
+                "DELETE FROM runs
              WHERE state NOT IN ('created', 'running')
                AND settled_ts IS NOT NULL
                AND settled_ts < ?1",
-            [summary_cut],
-        )?;
-        touch_write_meta(&tx, now)?;
-        tx.commit()?;
-        Ok(ToolRunRetentionResultWire {
-            dry_run: false,
-            ..report
+                [summary_cut],
+            )?;
+            touch_write_meta(&tx, now)?;
+            tx.commit()?;
+            Ok(snapshot)
+        })?
+    };
+    Ok(finish_retention_report(
+        snapshot,
+        &quarantine,
+        request.dry_run,
+        request.policy.log_max_bytes,
+    ))
+}
+
+struct RetentionSqlSnapshot {
+    protected_unsettled: u64,
+    summary_rows: u64,
+    detail_rows: u64,
+    log_cut_runs: Vec<LogCutRun>,
+    usage_runs: Vec<UsageRun>,
+}
+
+struct LogCutRun {
+    run_id: String,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    events: Option<String>,
+}
+
+struct UsageRun {
+    run_id: String,
+    state: String,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    events: Option<String>,
+}
+
+fn inspect_retention_sql(
+    conn: &Connection,
+    summary_cut: i64,
+    detail_cut: i64,
+    log_cut: i64,
+    now: i64,
+) -> Result<RetentionSqlSnapshot, ToolRunError> {
+    let protected_unsettled: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM runs WHERE state IN ('created', 'running')",
+        [],
+        |row| row.get(0),
+    )?;
+    let summary_rows: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM runs
+         WHERE state NOT IN ('created', 'running')
+           AND settled_ts IS NOT NULL
+           AND settled_ts < ?1",
+        [summary_cut],
+        |row| row.get(0),
+    )?;
+    let base_detail_rows: i64 = conn.query_row(
+        "SELECT
+            (SELECT COUNT(*) FROM events e
+                JOIN runs r ON r.run_id = e.run_id
+                WHERE r.state NOT IN ('created', 'running')
+                  AND e.kind IN ('stage_started', 'stage_finished', 'sample')
+                  AND e.created_ts < ?1)
+          + (SELECT COUNT(*) FROM stages s
+                JOIN runs r ON r.run_id = s.run_id
+                WHERE r.state NOT IN ('created', 'running')
+                  AND COALESCE(s.finished_ts, s.started_ts, 0) < ?1)
+          + (SELECT COUNT(*) FROM samples m
+                JOIN runs r ON r.run_id = m.run_id
+                WHERE r.state NOT IN ('created', 'running')
+                  AND m.observed_ts < ?1)",
+        [detail_cut],
+        |row| row.get(0),
+    )?;
+    let has_triage = triage_tables_present(conn)?;
+    let triage_detail_rows: i64 = if has_triage {
+        conn.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM tool_triage_items i
+                    JOIN runs r ON r.run_id = i.run_id
+                    WHERE r.state NOT IN ('created', 'running')
+                      AND i.created_ts < ?1)
+              + (SELECT COUNT(*) FROM tool_triage_stages s
+                    JOIN runs r ON r.run_id = s.run_id
+                    WHERE r.state NOT IN ('created', 'running')
+                      AND s.created_ts < ?1)
+              + (SELECT COUNT(*) FROM tool_triage_runs t
+                    JOIN runs r ON r.run_id = t.run_id
+                    WHERE r.state NOT IN ('created', 'running')
+                      AND t.created_ts < ?1)",
+            [detail_cut],
+            |row| row.get(0),
+        )?
+    } else {
+        0
+    };
+    // Triage rows of summary-deleted runs not already counted above.
+    let triage_summary_extra: i64 = if has_triage {
+        conn.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM tool_triage_items i
+                 WHERE i.run_id IN (
+                    SELECT run_id FROM runs
+                    WHERE state NOT IN ('created', 'running')
+                      AND settled_ts IS NOT NULL
+                      AND settled_ts < ?1
+                 ) AND i.created_ts >= ?2)
+              + (SELECT COUNT(*) FROM tool_triage_stages s
+                 WHERE s.run_id IN (
+                    SELECT run_id FROM runs
+                    WHERE state NOT IN ('created', 'running')
+                      AND settled_ts IS NOT NULL
+                      AND settled_ts < ?1
+                 ) AND s.created_ts >= ?2)
+              + (SELECT COUNT(*) FROM tool_triage_runs t
+                 WHERE t.run_id IN (
+                    SELECT run_id FROM runs
+                    WHERE state NOT IN ('created', 'running')
+                      AND settled_ts IS NOT NULL
+                      AND settled_ts < ?1
+                 ) AND t.created_ts >= ?2)",
+            [summary_cut, detail_cut],
+            |row| row.get(0),
+        )?
+    } else {
+        0
+    };
+    let receipt_detail_rows: i64 =
+        count_deletable_receipts(conn, summary_cut, now).unwrap_or(0) as i64;
+    let detail_rows: i64 = base_detail_rows
+        + triage_detail_rows
+        + triage_summary_extra
+        + receipt_detail_rows;
+    let mut log_stmt = conn.prepare(
+        "SELECT run_id, log_stdout_path, log_stderr_path, events_path
+         FROM runs
+         WHERE state NOT IN ('created', 'running')
+           AND settled_ts IS NOT NULL
+           AND settled_ts < ?1",
+    )?;
+    let log_rows = log_stmt.query_map([log_cut], |row| {
+        Ok(LogCutRun {
+            run_id: row.get(0)?,
+            stdout: row.get(1)?,
+            stderr: row.get(2)?,
+            events: row.get(3)?,
         })
+    })?;
+    let mut log_cut_runs = Vec::new();
+    for row in log_rows {
+        log_cut_runs.push(row?);
+    }
+    let mut usage_stmt = conn.prepare(
+        "SELECT run_id, state, log_stdout_path, log_stderr_path, events_path
+         FROM runs
+         WHERE log_stdout_path IS NOT NULL
+            OR log_stderr_path IS NOT NULL
+            OR events_path IS NOT NULL
+         ORDER BY COALESCE(settled_ts, created_ts), run_id",
+    )?;
+    let usage_rows = usage_stmt.query_map([], |row| {
+        Ok(UsageRun {
+            run_id: row.get(0)?,
+            state: row.get(1)?,
+            stdout: row.get(2)?,
+            stderr: row.get(3)?,
+            events: row.get(4)?,
+        })
+    })?;
+    let mut usage_runs = Vec::new();
+    for row in usage_rows {
+        usage_runs.push(row?);
+    }
+    Ok(RetentionSqlSnapshot {
+        protected_unsettled: protected_unsettled as u64,
+        summary_rows: summary_rows as u64,
+        detail_rows: detail_rows as u64,
+        log_cut_runs,
+        usage_runs,
     })
+}
+
+fn finish_retention_report(
+    snapshot: RetentionSqlSnapshot,
+    quarantine: &QuarantinedStoreUsage,
+    dry_run: bool,
+    log_max_bytes: u64,
+) -> ToolRunRetentionResultWire {
+    let mut file_candidates = Vec::new();
+    for run in &snapshot.log_cut_runs {
+        for (kind, path) in [
+            ("stdout", run.stdout.clone()),
+            ("stderr", run.stderr.clone()),
+            ("events", run.events.clone()),
+        ] {
+            if let Some(path) = path {
+                file_candidates.push(ToolRunDeletionCandidateWire {
+                    kind: kind.to_string(),
+                    run_id: Some(run.run_id.clone()),
+                    path: Some(path),
+                    protected: false,
+                    reason: "log_days elapsed after settlement".to_string(),
+                });
+            }
+        }
+        for path in stage_output_files(run.events.as_deref()) {
+            file_candidates.push(ToolRunDeletionCandidateWire {
+                kind: "stage_output".to_string(),
+                run_id: Some(run.run_id.clone()),
+                path: Some(path),
+                protected: false,
+                reason: "log_days elapsed after settlement".to_string(),
+            });
+        }
+    }
+    let usage = select_aggregate_log_candidates(
+        &snapshot.usage_runs,
+        &mut file_candidates,
+        log_max_bytes,
+    );
+    file_candidates.extend(quarantine.candidates.iter().cloned());
+    let retained_bytes = usage
+        .retained_bytes
+        .saturating_add(quarantine.remaining_bytes);
+    ToolRunRetentionResultWire {
+        schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+        dry_run,
+        summary_rows: snapshot.summary_rows,
+        detail_rows: snapshot.detail_rows,
+        file_candidates,
+        protected_unsettled: snapshot.protected_unsettled,
+        retained_bytes,
+        protected_bytes: usage.protected_bytes,
+        over_target_bytes: retained_bytes.saturating_sub(log_max_bytes),
+        diagnostics: Vec::new(),
+    }
 }
 
 /// One settled run's retained files that survived age-based selection.
@@ -472,44 +543,25 @@ pub fn stage_output_files(events_path: Option<&str>) -> Vec<String> {
 /// `log_max_bytes`. Unsettled runs are never selected; when their bytes alone
 /// exceed the target the excess is reported, not hidden.
 fn select_aggregate_log_candidates(
-    conn: &Connection,
+    usage_runs: &[UsageRun],
     candidates: &mut Vec<ToolRunDeletionCandidateWire>,
     log_max_bytes: u64,
-) -> Result<AggregateLogUsage, ToolRunError> {
+) -> AggregateLogUsage {
     let already: HashSet<String> = candidates
         .iter()
         .filter_map(|candidate| candidate.path.clone())
         .collect();
-    let mut stmt = conn.prepare(
-        "SELECT run_id, state, log_stdout_path, log_stderr_path, events_path
-         FROM runs
-         WHERE log_stdout_path IS NOT NULL
-            OR log_stderr_path IS NOT NULL
-            OR events_path IS NOT NULL
-         ORDER BY COALESCE(settled_ts, created_ts), run_id",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            [
-                ("stdout", row.get::<_, Option<String>>(2)?),
-                ("stderr", row.get::<_, Option<String>>(3)?),
-                ("events", row.get::<_, Option<String>>(4)?),
-            ],
-        ))
-    })?;
     let mut protected_bytes = 0u64;
     let mut settled: Vec<SettledRunLogs> = Vec::new();
-    for row in rows {
-        let (run_id, state, files) = row?;
-        let unsettled = state == "created" || state == "running";
+    for run in usage_runs {
+        let unsettled = run.state == "created" || run.state == "running";
         let mut run_bytes = 0u64;
         let mut run_files = Vec::new();
-        let events_path: Option<String> = files
-            .iter()
-            .find(|(kind, _)| *kind == "events")
-            .and_then(|(_, path)| path.clone());
+        let files = [
+            ("stdout", run.stdout.clone()),
+            ("stderr", run.stderr.clone()),
+            ("events", run.events.clone()),
+        ];
         for (kind, path) in files {
             let Some(path) = path else { continue };
             if already.contains(&path) {
@@ -519,7 +571,7 @@ fn select_aggregate_log_candidates(
             run_files.push((kind, path));
         }
         // Stage-output files share the run's settled/unsettled protection.
-        for path in stage_output_files(events_path.as_deref()) {
+        for path in stage_output_files(run.events.as_deref()) {
             if already.contains(&path) {
                 continue;
             }
@@ -533,7 +585,7 @@ fn select_aggregate_log_candidates(
             protected_bytes += run_bytes;
         } else if run_bytes > 0 {
             settled.push(SettledRunLogs {
-                run_id,
+                run_id: run.run_id.clone(),
                 bytes: run_bytes,
                 files: run_files,
             });
@@ -556,10 +608,10 @@ fn select_aggregate_log_candidates(
         }
         retained = retained.saturating_sub(run.bytes);
     }
-    Ok(AggregateLogUsage {
+    AggregateLogUsage {
         retained_bytes: retained,
         protected_bytes,
-    })
+    }
 }
 
 /// Quarantined corrupt stores selected for reclamation plus the quarantine

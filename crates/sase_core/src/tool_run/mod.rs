@@ -163,20 +163,22 @@ impl From<io::Error> for ToolRunError {
 
 impl From<rusqlite::Error> for ToolRunError {
     fn from(error: rusqlite::Error) -> Self {
-        if matches!(
-            error.sqlite_error_code(),
-            Some(
+        if let rusqlite::Error::SqliteFailure(info, _) = &error {
+            if matches!(
+                info.code,
                 rusqlite::ErrorCode::DatabaseBusy
                     | rusqlite::ErrorCode::DatabaseLocked
-            )
-        ) {
-            Self::Busy {
-                message: error.to_string(),
+            ) {
+                return Self::Busy {
+                    message: format!(
+                        "{error} (extended_code={})",
+                        info.extended_code
+                    ),
+                };
             }
-        } else {
-            Self::Store {
-                message: error.to_string(),
-            }
+        }
+        Self::Store {
+            message: error.to_string(),
         }
     }
 }

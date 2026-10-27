@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 mod compat;
+mod contention;
 mod handoff;
 mod receipt;
 mod reconcile_owner;

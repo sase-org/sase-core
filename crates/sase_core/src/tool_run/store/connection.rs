@@ -11,8 +11,10 @@ use super::super::wire::{
 };
 use super::super::{lock_paths, ToolRunError};
 use crate::store_lock::{acquire_store_lock, LockMode, StoreLockError};
+use rusqlite::config::DbConfig;
 use rusqlite::{
     Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction,
+    TransactionBehavior,
 };
 use std::fs;
 use std::io::ErrorKind;
@@ -213,6 +215,33 @@ pub(crate) fn validate_schema(version: u32) -> Result<(), ToolRunError> {
     Ok(())
 }
 
+const REQUIRED_TABLES: &[&str] = &[
+    "meta",
+    "runs",
+    "attempts",
+    "events",
+    "stages",
+    "samples",
+    "tool_triage_items",
+    "tool_triage_stages",
+    "tool_triage_runs",
+    "tool_receipts",
+];
+
+const CHILD_OBSERVATION_COLUMNS: &[(&str, &str)] = &[
+    ("child_process_start_identity", "TEXT"),
+    ("launch_mode", "TEXT"),
+    ("launch_envelope_json", "TEXT"),
+    ("launcher_json", "TEXT"),
+    ("terminal_cause", "TEXT"),
+    ("settled_by", "TEXT"),
+    ("stop_request_json", "TEXT"),
+    ("starter_json", "TEXT"),
+    ("join_json", "TEXT"),
+    ("demand_json", "TEXT"),
+    ("owner_log_path", "TEXT"),
+];
+
 /// Add columns that postdate the store file without touching existing rows.
 /// Fresh stores already carry them through `SCHEMA_SQL`; a store written by
 /// an older binary gains them here on its first write. Reads never migrate:
@@ -222,20 +251,8 @@ pub(super) fn ensure_child_observation_columns(
     conn: &Connection,
 ) -> Result<(), ToolRunError> {
     let existing = runs_column_set(conn)?;
-    for (column, ddl) in [
-        ("child_process_start_identity", "TEXT"),
-        ("launch_mode", "TEXT"),
-        ("launch_envelope_json", "TEXT"),
-        ("launcher_json", "TEXT"),
-        ("terminal_cause", "TEXT"),
-        ("settled_by", "TEXT"),
-        ("stop_request_json", "TEXT"),
-        ("starter_json", "TEXT"),
-        ("join_json", "TEXT"),
-        ("demand_json", "TEXT"),
-        ("owner_log_path", "TEXT"),
-    ] {
-        if !existing.contains(column) {
+    for (column, ddl) in CHILD_OBSERVATION_COLUMNS {
+        if !existing.contains(*column) {
             conn.execute(
                 &format!("ALTER TABLE runs ADD COLUMN {column} {ddl}"),
                 [],
@@ -284,22 +301,94 @@ fn bounded_busy_timeout(timeout: Duration) -> Duration {
     }
 }
 
+/// One store operation's elapsed-time budget. Open, WAL setup, statement
+/// busy-waits, and contention retries all consume this same remaining time.
+struct BusyBudget {
+    deadline: Instant,
+}
+
+/// Cap one SQLite `busy_timeout` so `sqlite3_open_v2` (which ignores it)
+/// is retried from the outer loop instead of one statement consuming the
+/// whole remaining budget and leaving nothing to reopen with.
+const SQLITE_BUSY_SLICE: Duration = Duration::from_millis(25);
+
+impl BusyBudget {
+    fn new(timeout: Duration) -> Self {
+        let total = bounded_busy_timeout(timeout);
+        Self {
+            deadline: Instant::now() + total,
+        }
+    }
+
+    fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+
+    fn exhausted(&self) -> bool {
+        self.remaining().is_zero()
+    }
+
+    fn sqlite_wait(&self) -> Duration {
+        let remaining = self.remaining();
+        if remaining.is_zero() {
+            remaining
+        } else {
+            remaining.min(SQLITE_BUSY_SLICE)
+        }
+    }
+}
+
+fn is_transient_contention(error: &ToolRunError) -> bool {
+    matches!(error, ToolRunError::Busy { .. })
+}
+
+fn contention_backoff(budget: &BusyBudget, attempt: u32) {
+    let remaining = budget.remaining();
+    if remaining.is_zero() {
+        return;
+    }
+    let shift = attempt.min(4);
+    let slot = Duration::from_millis(1u64 << shift);
+    thread::sleep(slot.min(Duration::from_millis(16)).min(remaining));
+}
+
 pub(super) fn with_write_store<T>(
     store_path: &Path,
     busy_timeout: Duration,
     mut operation: impl FnMut(&mut Connection) -> Result<T, ToolRunError>,
 ) -> Result<T, ToolRunError> {
-    let timeout = bounded_busy_timeout(busy_timeout);
-    match open_write_store(store_path, timeout)
-        .and_then(|mut conn| operation(&mut conn))
-    {
-        Ok(value) => Ok(value),
-        Err(error) if should_quarantine(&error) && store_path.exists() => {
-            quarantine_corrupt_store(store_path, timeout)?;
-            let mut conn = open_write_store(store_path, timeout)?;
-            operation(&mut conn)
+    let budget = BusyBudget::new(busy_timeout);
+    let mut attempt = 0u32;
+    let mut last_busy: Option<ToolRunError> = None;
+    loop {
+        if budget.exhausted() {
+            return Err(last_busy.unwrap_or_else(|| ToolRunError::Busy {
+                message: "timed out waiting for the tool run store".into(),
+            }));
         }
-        Err(error) => Err(error),
+        let slice = budget.sqlite_wait();
+        match open_write_store(store_path, slice).and_then(|mut conn| {
+            conn.busy_timeout(budget.sqlite_wait())?;
+            operation(&mut conn)
+        }) {
+            Ok(value) => return Ok(value),
+            Err(error) if is_transient_contention(&error) => {
+                // Replay is safe: callers commit inside `operation`, and a
+                // rusqlite `Transaction` rolls back on drop when commit did
+                // not succeed. Busy never means a committed effect.
+                last_busy = Some(error);
+                attempt = attempt.saturating_add(1);
+                contention_backoff(&budget, attempt);
+            }
+            Err(error)
+                if should_quarantine(&error)
+                    && store_path.exists()
+                    && !file_too_new_to_quarantine(store_path) =>
+            {
+                quarantine_corrupt_store(store_path, budget.sqlite_wait())?;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -308,9 +397,29 @@ pub(crate) fn with_read_store<T>(
     busy_timeout: Duration,
     mut operation: impl FnMut(&Connection) -> Result<T, ToolRunError>,
 ) -> Result<T, ToolRunError> {
-    let timeout = bounded_busy_timeout(busy_timeout);
-    let conn = open_read_store(store_path, timeout)?;
-    operation(&conn)
+    let budget = BusyBudget::new(busy_timeout);
+    let mut attempt = 0u32;
+    let mut last_busy: Option<ToolRunError> = None;
+    loop {
+        if budget.exhausted() {
+            return Err(last_busy.unwrap_or_else(|| ToolRunError::Busy {
+                message: "timed out waiting for the tool run store".into(),
+            }));
+        }
+        let slice = budget.sqlite_wait();
+        match open_read_store(store_path, slice).and_then(|conn| {
+            conn.busy_timeout(budget.sqlite_wait())?;
+            operation(&conn)
+        }) {
+            Ok(value) => return Ok(value),
+            Err(error) if is_transient_contention(&error) => {
+                last_busy = Some(error);
+                attempt = attempt.saturating_add(1);
+                contention_backoff(&budget, attempt);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn should_quarantine(error: &ToolRunError) -> bool {
@@ -332,6 +441,13 @@ fn is_sqlite_corruption_error(error: &str) -> bool {
         || lower.contains("not a database")
         || lower.contains("malformed database schema")
         || lower.contains("unsupported file format")
+}
+
+/// A concurrent first-create can leave a 0-byte file after `sqlite3_open`
+/// creates it and before the header is written. Quarantining that file
+/// would steal the other opener's in-progress init.
+fn file_too_new_to_quarantine(store_path: &Path) -> bool {
+    matches!(fs::metadata(store_path), Ok(meta) if meta.len() == 0)
 }
 
 fn quarantine_corrupt_store(
@@ -408,14 +524,13 @@ fn open_write_store(
             restrict_mode(parent, 0o700)?;
         }
     }
-    let conn = Connection::open(store_path)?;
+    let mut conn = Connection::open(store_path)?;
     restrict_mode(store_path, 0o600)?;
     conn.busy_timeout(busy_timeout)?;
     enable_wal_mode(&conn, busy_timeout)?;
     conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
-    conn.execute_batch(SCHEMA_SQL)?;
-    ensure_child_observation_columns(&conn)?;
-    enforce_schema_version(&conn, true)?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    ensure_current_schema(&mut conn, true)?;
     Ok(conn)
 }
 
@@ -423,7 +538,7 @@ fn open_read_store(
     store_path: &Path,
     busy_timeout: Duration,
 ) -> Result<Connection, ToolRunError> {
-    let conn = Connection::open_with_flags(
+    let mut conn = Connection::open_with_flags(
         store_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
@@ -440,38 +555,105 @@ fn open_read_store(
         }
     })?;
     conn.busy_timeout(busy_timeout)?;
+    configure_wal_persistence(&conn);
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-    enforce_schema_version(&conn, false)?;
+    ensure_current_schema(&mut conn, false)?;
     Ok(conn)
 }
 
-fn enforce_schema_version(
-    conn: &Connection,
+fn ensure_current_schema(
+    conn: &mut Connection,
     write: bool,
 ) -> Result<(), ToolRunError> {
-    let prior: Option<u32> = conn
+    match schema_status(conn)? {
+        SchemaStatus::Newer { actual } => Err(ToolRunError::NewerSchema {
+            expected: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            actual,
+        }),
+        SchemaStatus::Current => Ok(()),
+        SchemaStatus::NeedsInit if !write => Ok(()),
+        SchemaStatus::NeedsInit => {
+            let tx =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(SCHEMA_SQL)?;
+            ensure_child_observation_columns(&tx)?;
+            write_schema_version(&tx)?;
+            tx.commit()?;
+            Ok(())
+        }
+    }
+}
+
+enum SchemaStatus {
+    Newer { actual: u32 },
+    Current,
+    NeedsInit,
+}
+
+fn schema_status(conn: &Connection) -> Result<SchemaStatus, ToolRunError> {
+    let prior = read_schema_version(conn)?;
+    if let Some(version) = prior {
+        if version > TOOL_RUN_WIRE_SCHEMA_VERSION {
+            return Ok(SchemaStatus::Newer { actual: version });
+        }
+        if version == TOOL_RUN_WIRE_SCHEMA_VERSION
+            && child_observation_columns_present(conn)?
+            && required_tables_present(conn)?
+        {
+            return Ok(SchemaStatus::Current);
+        }
+    }
+    Ok(SchemaStatus::NeedsInit)
+}
+
+fn child_observation_columns_present(
+    conn: &Connection,
+) -> Result<bool, ToolRunError> {
+    let existing = runs_column_set(conn)?;
+    Ok(CHILD_OBSERVATION_COLUMNS
+        .iter()
+        .all(|(column, _)| existing.contains(*column)))
+}
+
+fn required_tables_present(conn: &Connection) -> Result<bool, ToolRunError> {
+    let mut stmt =
+        conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut names = std::collections::HashSet::new();
+    for name in rows {
+        names.insert(name?);
+    }
+    Ok(REQUIRED_TABLES.iter().all(|table| names.contains(*table)))
+}
+
+fn read_schema_version(conn: &Connection) -> Result<Option<u32>, ToolRunError> {
+    match conn
         .query_row(
             "SELECT value FROM meta WHERE key = 'schema_version'",
             [],
             |row| row.get::<_, String>(0),
         )
-        .optional()?
-        .and_then(|raw| raw.parse().ok());
-    if let Some(version) = prior {
-        if version > TOOL_RUN_WIRE_SCHEMA_VERSION {
-            return Err(ToolRunError::NewerSchema {
-                expected: TOOL_RUN_WIRE_SCHEMA_VERSION,
-                actual: version,
-            });
+        .optional()
+    {
+        Ok(raw) => Ok(raw.and_then(|raw| raw.parse().ok())),
+        Err(error)
+            if error
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("no such table") =>
+        {
+            Ok(None)
         }
+        Err(error) => Err(error.into()),
     }
-    if write {
-        conn.execute(
-            "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [TOOL_RUN_WIRE_SCHEMA_VERSION.to_string()],
-        )?;
-    }
+}
+
+fn write_schema_version(conn: &Connection) -> Result<(), ToolRunError> {
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [TOOL_RUN_WIRE_SCHEMA_VERSION.to_string()],
+    )?;
     Ok(())
 }
 
@@ -479,11 +661,30 @@ fn enable_wal_mode(
     conn: &Connection,
     busy_timeout: Duration,
 ) -> Result<(), ToolRunError> {
+    let current: Result<String, _> =
+        conn.query_row("PRAGMA journal_mode", [], |row| row.get(0));
+    match current {
+        Ok(mode) if mode.eq_ignore_ascii_case("wal") => {
+            configure_wal_persistence(conn);
+            return Ok(());
+        }
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.sqlite_error_code(),
+                Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+            ) =>
+        {
+            // Fall through to the converting retry loop, which honors remaining
+            // time instead of treating this as a hard failure.
+        }
+        Err(error) => return Err(error.into()),
+    }
     let started = Instant::now();
-    let result = loop {
+    loop {
         let remaining = busy_timeout.saturating_sub(started.elapsed());
         if remaining.is_zero() {
-            break Err(ToolRunError::Busy {
+            return Err(ToolRunError::Busy {
                 message: "timed out waiting to enable WAL journal mode"
                     .to_string(),
             });
@@ -492,9 +693,12 @@ fn enable_wal_mode(
         match conn.query_row("PRAGMA journal_mode = WAL", [], |row| {
             row.get::<_, String>(0)
         }) {
-            Ok(mode) if mode.eq_ignore_ascii_case("wal") => break Ok(()),
+            Ok(mode) if mode.eq_ignore_ascii_case("wal") => {
+                configure_wal_persistence(conn);
+                return Ok(());
+            }
             Ok(mode) => {
-                break Err(ToolRunError::store(format!(
+                return Err(ToolRunError::store(format!(
                     "failed to enable WAL journal mode: SQLite returned {mode:?}"
                 )));
             }
@@ -506,15 +710,40 @@ fn enable_wal_mode(
             {
                 let remaining = busy_timeout.saturating_sub(started.elapsed());
                 if remaining.is_zero() {
-                    break Err(error.into());
+                    return Err(error.into());
                 }
                 thread::sleep(Duration::from_millis(5).min(remaining));
             }
-            Err(error) => break Err(error.into()),
+            Err(error) => return Err(error.into()),
         }
+    }
+}
+
+/// Keep WAL/SHM files and skip the exclusive checkpoint that SQLite
+/// otherwise runs when the last connection closes. That checkpoint is
+/// the last-close lock that busies a concurrent read-only `show`:
+/// `sqlite3_open_v2` does not honor `busy_timeout` for it.
+fn configure_wal_persistence(conn: &Connection) {
+    persist_wal_files(conn);
+    skip_checkpoint_on_close(conn);
+}
+
+fn persist_wal_files(conn: &Connection) {
+    let mut persist: std::ffi::c_int = 1;
+    let rc = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            conn.handle(),
+            std::ptr::null(),
+            rusqlite::ffi::SQLITE_FCNTL_PERSIST_WAL,
+            std::ptr::from_mut(&mut persist).cast(),
+        )
     };
-    conn.busy_timeout(busy_timeout)?;
-    result
+    let _ = rc;
+}
+
+fn skip_checkpoint_on_close(conn: &Connection) {
+    let _ =
+        conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true);
 }
 
 fn restrict_mode(path: &Path, mode: u32) -> Result<(), ToolRunError> {

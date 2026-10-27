@@ -12,6 +12,21 @@ use serde::{Deserialize, Serialize};
 
 pub const TOOL_RUN_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const TOOL_RUN_MAX_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default busy budget for one ToolRun store operation.
+///
+/// Measured on the unfixed store (sase-1ou.2.1.1): a current-store schema
+/// upsert is tens of microseconds, last-close/reopen show overlap stayed
+/// under 3 ms across 40 uninstrumented cycles, and a writer blocked by
+/// `BEGIN EXCLUSIVE` exhausted a 25 ms budget in 27 ms. WAL `BEGIN
+/// IMMEDIATE`/`BEGIN EXCLUSIVE` never busy a reader — the show failure is
+/// the exclusive file lock used by schema conversion, `locking_mode=EXCLUSIVE`,
+/// WAL recovery, and last-connection checkpoint, and `sqlite3_open_v2`
+/// returns that busy without honoring `busy_timeout`. Production opens skip
+/// checkpoint-on-close (with persist-WAL) so last-close is not that lock.
+/// 250 ms is ~100× the measured recovery window once an already-current
+/// store skips redundant schema writes, and stays inside interactive
+/// latency. Callers that pass `Duration::ZERO` receive this default.
+/// Increasing the timeout alone is not the contention fix.
 pub const TOOL_RUN_DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub const TOOL_RUN_DEFAULT_SUMMARY_DAYS: u32 = 180;
