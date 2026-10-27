@@ -285,6 +285,211 @@ fn reopens_closed_ancestors_but_never_recovers_non_done_or_newer_closes() {
     });
 }
 
+fn assert_recovered_episode(
+    beads_dir: &std::path::Path,
+    id: &str,
+    run_id: &str,
+) {
+    let issue = show_issue(beads_dir, id).unwrap();
+    assert_eq!(issue.status, StatusWire::Open);
+    assert_eq!(issue.close_history.len(), 1);
+    assert_eq!(
+        issue.close_history[0].reopened_via,
+        BeadReopenCauseWire::CompletionFailure
+    );
+    assert_eq!(issue.completion_failure.as_ref().unwrap().run_id, run_id);
+    assert_eq!(
+        issue
+            .notes
+            .iter()
+            .filter(|note| note.text.starts_with("STITCH FAILED:"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn recovers_every_eligible_close_in_a_phase_and_plan_chain() {
+    run_dual_mode_test(|_mode| {
+        let temp = tempdir();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let plan = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Plan".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                tier: Some(BeadTierWire::Epic),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let phase = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Phase".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(plan.id.clone()),
+                size: Some(PhaseSizeWire::Small),
+                now: Some("2026-01-01T00:00:01Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        close_with_run(
+            &beads_dir,
+            std::slice::from_ref(&phase.id),
+            "origin-run",
+            BeadResolutionWire::Done,
+            "2026-01-01T00:01:00Z",
+        );
+        close_with_run(
+            &beads_dir,
+            std::slice::from_ref(&plan.id),
+            "origin-run",
+            BeadResolutionWire::Done,
+            "2026-01-01T00:02:00Z",
+        );
+
+        let recovered =
+            recover_failed_closes(&beads_dir, recovery_request("origin-run"))
+                .unwrap();
+        assert!(recovered.changed);
+        assert_eq!(recovered.recovered.len(), 2);
+        assert!(recovered.already_applied.is_empty());
+        assert!(recovered.skipped.is_empty());
+        assert!(recovered.reopened_ancestor_ids.is_empty());
+        assert_recovered_episode(&beads_dir, &phase.id, "origin-run");
+        assert_recovered_episode(&beads_dir, &plan.id, "origin-run");
+
+        let repeated =
+            recover_failed_closes(&beads_dir, recovery_request("origin-run"))
+                .unwrap();
+        assert!(!repeated.changed);
+        assert!(repeated.recovered.is_empty());
+        assert_eq!(repeated.already_applied.len(), 2);
+        assert!(repeated.skipped.is_empty());
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let recovery_event_count = streams
+            .iter()
+            .flat_map(|stream| &stream.events)
+            .filter(|event| {
+                event.operation
+                    == BeadEventOperationWire::CompletionFailureRecovered
+            })
+            .count();
+        assert_eq!(recovery_event_count, 2);
+        let opened_count = streams
+            .iter()
+            .flat_map(|stream| &stream.events)
+            .filter(|event| {
+                event.operation == BeadEventOperationWire::IssueOpened
+            })
+            .count();
+        assert_eq!(opened_count, 0);
+        assert_reprojection_byte_stable(
+            &beads_dir,
+            "failed-close-recovery-phase-plan",
+        );
+        assert_dual_mode_parity_for_current_mode();
+    });
+}
+
+#[test]
+fn recovers_deeper_ancestor_chain_closed_by_one_run() {
+    run_dual_mode_test(|_mode| {
+        let temp = tempdir();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let epic = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                tier: Some(BeadTierWire::Epic),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let inner = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Inner plan".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                parent_id: Some(epic.id.clone()),
+                now: Some("2026-01-01T00:00:01Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let phase = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Phase".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(inner.id.clone()),
+                size: Some(PhaseSizeWire::Small),
+                now: Some("2026-01-01T00:00:02Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        close_with_run(
+            &beads_dir,
+            std::slice::from_ref(&phase.id),
+            "origin-run",
+            BeadResolutionWire::Done,
+            "2026-01-01T00:01:00Z",
+        );
+        close_with_run(
+            &beads_dir,
+            std::slice::from_ref(&inner.id),
+            "origin-run",
+            BeadResolutionWire::Done,
+            "2026-01-01T00:02:00Z",
+        );
+        close_with_run(
+            &beads_dir,
+            std::slice::from_ref(&epic.id),
+            "origin-run",
+            BeadResolutionWire::Done,
+            "2026-01-01T00:03:00Z",
+        );
+
+        let recovered =
+            recover_failed_closes(&beads_dir, recovery_request("origin-run"))
+                .unwrap();
+        assert_eq!(recovered.recovered.len(), 3);
+        assert!(recovered.reopened_ancestor_ids.is_empty());
+        assert_recovered_episode(&beads_dir, &phase.id, "origin-run");
+        assert_recovered_episode(&beads_dir, &inner.id, "origin-run");
+        assert_recovered_episode(&beads_dir, &epic.id, "origin-run");
+
+        let repeated =
+            recover_failed_closes(&beads_dir, recovery_request("origin-run"))
+                .unwrap();
+        assert!(!repeated.changed);
+        assert_eq!(repeated.already_applied.len(), 3);
+        assert_reprojection_byte_stable(
+            &beads_dir,
+            "failed-close-recovery-deeper-chain",
+        );
+        assert_dual_mode_parity_for_current_mode();
+    });
+}
+
 #[test]
 fn provenance_validation_rejects_partial_run_identity() {
     let mut close = provenance("origin-run");

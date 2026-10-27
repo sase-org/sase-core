@@ -287,6 +287,25 @@ fn py_select_remaining_commit_obligations<'py>(
     )
 }
 
+/// Assess whether one obligated repository has proven landing coverage.
+#[pyfunction]
+#[pyo3(name = "assess_repository_landing_proof")]
+fn py_assess_repository_landing_proof<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: RepositoryLandingProofRequestWire =
+        finalizer_wire_from_pydict(
+            request,
+            "repository landing proof request",
+        )?;
+    finalizer_result_to_py(
+        py,
+        core_assess_repository_landing_proof(&request),
+        "repository landing proof",
+    )
+}
+
 /// Validate a submission against a resolved plan/context and return a summary.
 #[pyfunction]
 #[pyo3(name = "validate_finalizer_submission")]
@@ -760,6 +779,7 @@ pub(crate) fn register_bead_decisions(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_select_remaining_commit_obligations,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_assess_repository_landing_proof, m)?)?;
     m.add_function(wrap_pyfunction!(py_finalizer_json_digest, m)?)?;
     m.add_function(wrap_pyfunction!(py_aggregate_finalizer_outcomes, m)?)?;
     m.add_function(wrap_pyfunction!(py_project_finalizer_node_view, m)?)?;

@@ -6,6 +6,7 @@
 //! coverage, and aggregate outcome classification.
 
 pub mod digest;
+pub mod landing;
 pub mod outcome;
 pub mod remaining;
 pub mod run_view;
@@ -16,6 +17,11 @@ pub mod wire;
 pub use digest::{
     canonical_json_bytes, canonical_json_sha256, finalizer_digest_json_value,
     finalizer_digest_serializable,
+};
+pub use landing::{
+    assess_repository_landing_proof, LandingAttemptFactWire,
+    LandingMarkerFactWire, RepositoryLandingProofRequestWire,
+    RepositoryLandingProofWire,
 };
 pub use outcome::{
     aggregate_finalizer_outcomes, validate_finalizer_instance_results,

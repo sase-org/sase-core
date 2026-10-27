@@ -650,6 +650,7 @@ pub(crate) use sase_core::fenced_block_details_wire as core_fenced_block_details
 pub(crate) use sase_core::fenced_block_ranges as core_fenced_block_ranges;
 pub(crate) use sase_core::finalizer::{
     aggregate_finalizer_outcomes as core_aggregate_finalizer_outcomes,
+    assess_repository_landing_proof as core_assess_repository_landing_proof,
     authenticate_finalizer_plan as core_authenticate_finalizer_plan,
     finalizer_context_digest as core_finalizer_context_digest,
     finalizer_digest_json_value as core_finalizer_digest_json_value,
@@ -668,8 +669,8 @@ pub(crate) use sase_core::finalizer::{
     FinalizerInstanceResultWire, FinalizerInstanceSpecWire,
     FinalizerNodeViewRequestWire, FinalizerPlanInputWire, FinalizerPlanWire,
     FinalizerProviderSpecWire, FinalizerSubmissionEnvelopeWire,
-    RemainingCommitWorkRequestWire, RunViewError,
-    FINALIZER_WIRE_SCHEMA_VERSION,
+    RemainingCommitWorkRequestWire, RepositoryLandingProofRequestWire,
+    RunViewError, FINALIZER_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::fleet_attention::{
     self as core_fleet_attention, FleetAttentionEntryWire,

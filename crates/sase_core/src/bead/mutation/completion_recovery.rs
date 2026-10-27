@@ -11,11 +11,12 @@ use super::runner::{run_mutation, MutationStep};
 use super::view::MutationView;
 use crate::bead::events::{
     archive_close_metadata, clear_snooze_record, BeadEventOperationWire,
-    BeadEventPayloadWire,
+    BeadEventPayloadWire, BeadEventRecordWire,
 };
 use crate::bead::wire::{
-    BeadCompletionFailureWire, BeadError, BeadNoteWire, BeadReopenCauseWire,
-    BeadResolutionWire, IssueWire, StatusWire,
+    BeadCloseProvenanceWire, BeadCompletionFailureWire, BeadError,
+    BeadNoteWire, BeadReopenCauseWire, BeadResolutionWire, IssueWire,
+    StatusWire,
 };
 
 /// Evidence collected by the host after a terminal completion failure.
@@ -148,7 +149,10 @@ fn run_recovery(
     };
     let mut expected_ids = BTreeSet::new();
     let mut reopened_ancestors = BTreeMap::<String, IssueWire>::new();
+    let mut eligible = Vec::new();
 
+    // Classify every close against the pre-mutation view so recovering a
+    // descendant cannot hide an eligible ancestor as `close_not_current`.
     for (event, resolution, provenance) in close_events {
         let entry = BeadFailedCloseRecoveryEntryWire {
             issue_id: event.issue_id.clone(),
@@ -176,16 +180,15 @@ fn run_recovery(
                 .push(with_reason(entry, "resolution_not_done"));
             continue;
         }
-        if issue.status != StatusWire::Closed
-            || issue.resolution != Some(BeadResolutionWire::Done)
-            || issue.close_event_id.as_deref() != Some(event.event_id.as_str())
-            || issue.closed_at.as_deref() != Some(event.timestamp.as_str())
-            || issue.close_provenance.as_ref() != Some(&provenance)
-        {
+        if !close_is_current(&issue, &event, &provenance) {
             result.skipped.push(with_reason(entry, "close_not_current"));
             continue;
         }
+        eligible.push((event, provenance, issue, entry));
+    }
 
+    let mut recovered_ids = BTreeSet::new();
+    for (event, provenance, issue, entry) in eligible {
         let failure = BeadCompletionFailureWire {
             close_event_id: event.event_id.clone(),
             run_id: provenance.run_id.clone(),
@@ -239,16 +242,8 @@ fn run_recovery(
         issue.validate()?;
         view.stage_issue(issue.clone());
         expected_ids.insert(issue.id.clone());
+        recovered_ids.insert(issue.id.clone());
         result.recovered.push(entry);
-
-        for ancestor in reopen_closed_ancestors_via_view(
-            view,
-            &issue.id,
-            &request.failed_at,
-        )? {
-            expected_ids.insert(ancestor.id.clone());
-            reopened_ancestors.insert(ancestor.id.clone(), ancestor);
-        }
     }
 
     if result.recovered.is_empty() {
@@ -259,6 +254,23 @@ fn run_recovery(
             left.close_event_id.cmp(&right.close_event_id)
         });
         return Ok(MutationStep::Done(result));
+    }
+
+    // Eligible ancestors already carry CompletionFailureRecovered. Walk
+    // remaining closed ancestors only after that, and never mint a later
+    // ordinary IssueOpened that would archive their recovery fact.
+    for recovered_id in &recovered_ids {
+        for ancestor in reopen_closed_ancestors_via_view(
+            view,
+            recovered_id,
+            &request.failed_at,
+        )? {
+            if recovered_ids.contains(&ancestor.id) {
+                continue;
+            }
+            expected_ids.insert(ancestor.id.clone());
+            reopened_ancestors.insert(ancestor.id.clone(), ancestor);
+        }
     }
 
     for ancestor in reopened_ancestors.values() {
@@ -303,6 +315,18 @@ fn run_recovery(
         ));
     }
     Ok(MutationStep::Done(result))
+}
+
+fn close_is_current(
+    issue: &IssueWire,
+    event: &BeadEventRecordWire,
+    provenance: &BeadCloseProvenanceWire,
+) -> bool {
+    issue.status == StatusWire::Closed
+        && issue.resolution == Some(BeadResolutionWire::Done)
+        && issue.close_event_id.as_deref() == Some(event.event_id.as_str())
+        && issue.closed_at.as_deref() == Some(event.timestamp.as_str())
+        && issue.close_provenance.as_ref() == Some(provenance)
 }
 
 fn with_reason(

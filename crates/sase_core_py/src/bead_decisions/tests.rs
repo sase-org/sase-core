@@ -84,6 +84,43 @@ fn remaining_commit_work_binding_selects_and_rejects() {
     });
 }
 
+#[test]
+fn repository_landing_proof_binding_rejects_stale_markers() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "run_id": "run-1",
+                "repo_path": "/repo",
+                "markers": [
+                    {
+                        "cwd": "/repo",
+                        "run_id": "run-1",
+                        "operation_id": "op-old",
+                        "commit_sha": "a".repeat(40),
+                        "pushed": true
+                    },
+                    {
+                        "cwd": "/repo",
+                        "run_id": "run-1",
+                        "operation_id": "op-new",
+                        "commit_sha": "b".repeat(40),
+                        "pushed": false
+                    }
+                ],
+                "attempts": []
+            }),
+        )
+        .unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_assess_repository_landing_proof(py, request).unwrap();
+        let result = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(result["landed"], json!(false));
+        assert!(result["detail"].as_str().unwrap().contains("unpushed"));
+    });
+}
+
 fn incident_gate_followup_request_json() -> JsonValue {
     json!({
         "schema_version": GATE_FOLLOWUP_WIRE_SCHEMA_VERSION,
