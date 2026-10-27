@@ -1,3 +1,4 @@
+mod agent_name_filter;
 mod agent_session_filter;
 mod checkpoint;
 mod clan_context;

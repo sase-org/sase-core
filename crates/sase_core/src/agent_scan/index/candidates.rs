@@ -20,7 +20,8 @@ pub(super) const CANDIDATE_ROW_COLUMNS: &str =
     "artifact_dir, project_name, agent_type, \
      cl_name, model, llm_provider, source_machine, imported_owner_machine, \
      workflow_dir_name, has_done_marker, has_running_marker, \
-     has_workflow_state, agent_clan, agent_clan_generation, agent_session";
+     has_workflow_state, agent_clan, agent_clan_generation, agent_session, \
+     agent_name";
 
 pub(super) fn indexed_candidate_row_from_sql(
     row: &rusqlite::Row<'_>,
@@ -44,6 +45,7 @@ pub(super) fn indexed_candidate_row_from_sql(
         agent_clan: row.get(12).map_err(|e| e.to_string())?,
         agent_clan_generation: row.get(13).map_err(|e| e.to_string())?,
         agent_session: row.get(14).map_err(|e| e.to_string())?,
+        agent_name: row.get(15).map_err(|e| e.to_string())?,
         selection,
     })
 }
