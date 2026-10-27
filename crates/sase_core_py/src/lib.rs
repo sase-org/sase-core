@@ -42,6 +42,7 @@ mod editor_completion;
 mod editor_content;
 mod fleet;
 mod fleet_attention;
+mod footprint;
 mod goals;
 mod instruction_manifest;
 mod json_bridge;
@@ -117,6 +118,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     goals::register_goals(m)?;
     fleet::register_fleet(m)?;
     fleet_attention::register_fleet_attention(m)?;
+    footprint::register_footprint(m)?;
     sudo::register_sudo(m)?;
     continuation::register_continuation(m)?;
     telemetry::register_telemetry(m)?;
