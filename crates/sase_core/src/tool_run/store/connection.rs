@@ -661,6 +661,9 @@ fn enable_wal_mode(
     conn: &Connection,
     busy_timeout: Duration,
 ) -> Result<(), ToolRunError> {
+    // The initial read can itself consume the whole SQLite busy allowance.
+    // Starting the timer after it would grant WAL conversion a second budget.
+    let started = Instant::now();
     let current: Result<String, _> =
         conn.query_row("PRAGMA journal_mode", [], |row| row.get(0));
     match current {
@@ -680,7 +683,6 @@ fn enable_wal_mode(
         }
         Err(error) => return Err(error.into()),
     }
-    let started = Instant::now();
     loop {
         let remaining = busy_timeout.saturating_sub(started.elapsed());
         if remaining.is_zero() {
@@ -754,4 +756,40 @@ fn restrict_mode(path: &Path, mode: u32) -> Result<(), ToolRunError> {
     }
     let _ = (path, mode);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wal_mode_probe_consumes_conversion_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runs.sqlite");
+        let holder = Connection::open(&path).unwrap();
+        holder
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA locking_mode = EXCLUSIVE;
+                 CREATE TABLE evidence (id INTEGER);",
+            )
+            .unwrap();
+        // The holder owns its lock before the contender starts and retains
+        // it throughout both the journal-mode probe and possible conversion.
+        let contender = Connection::open(&path).unwrap();
+        let budget = Duration::from_millis(250);
+        contender.busy_timeout(budget).unwrap();
+        let started = Instant::now();
+        let result = enable_wal_mode(&contender, budget);
+        let elapsed = started.elapsed();
+        drop(holder);
+
+        assert!(matches!(result, Err(ToolRunError::Busy { .. })));
+        // Allow 175ms for host scheduling, but reject the former two full
+        // 250ms waits. The lock schedule is deterministic, not a startup race.
+        assert!(
+            elapsed < Duration::from_millis(425),
+            "WAL setup renewed an exhausted budget: {elapsed:?}"
+        );
+    }
 }
