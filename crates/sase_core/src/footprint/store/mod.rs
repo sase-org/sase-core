@@ -78,6 +78,13 @@ CREATE TABLE IF NOT EXISTS fold_checkpoints (
     complete INTEGER NOT NULL,
     folded_at TEXT
 );
+CREATE TABLE IF NOT EXISTS reviews (
+    feature_id TEXT PRIMARY KEY,
+    decision TEXT NOT NULL,
+    reason TEXT,
+    decided_day TEXT NOT NULL,
+    snooze_until TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_footprint_daily_day ON daily(day);
 CREATE INDEX IF NOT EXISTS idx_footprint_daily_feature
     ON daily(feature_id, day);
@@ -144,6 +151,16 @@ pub const SCHEMA_TABLE_COLUMNS: &[(&str, &[&str])] = &[
     (
         "fold_checkpoints",
         &["file", "file_id", "offset", "complete", "folded_at"],
+    ),
+    (
+        "reviews",
+        &[
+            "feature_id",
+            "decision",
+            "reason",
+            "decided_day",
+            "snooze_until",
+        ],
     ),
 ];
 

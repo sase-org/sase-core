@@ -2,6 +2,8 @@
 
 use rusqlite::ErrorCode;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io;
 use thiserror::Error;
 
@@ -68,6 +70,35 @@ pub const KEEP_REASONS: &[&str] = &[
     "api_contract",
     "other",
 ];
+
+/// Closed actor-scope vocabulary for report requests.
+pub const ACTOR_SCOPES: &[&str] = &["you", "agents", "automation", "everyone"];
+
+/// Closed lens vocabulary.
+pub const LENSES: &[&str] = &[
+    "map",
+    "cold",
+    "fading",
+    "agent-only",
+    "dead-paths",
+    "friction",
+    "hot",
+    "coverage",
+    "decisions",
+];
+
+/// Closed evidence-state vocabulary.
+pub const EVIDENCE_STATES: &[&str] = &[
+    "not_measured",
+    "too_new",
+    "used",
+    "rare_by_design",
+    "no_recorded_use",
+    "retired",
+];
+
+/// Stored local review decisions (`clear` is a decide action, not stored).
+pub const REVIEW_DECISIONS: &[&str] = &["keep", "later", "cut"];
 
 /// Catalog JSONL schema identifier.
 pub const CATALOG_SCHEMA: &str = "sase.footprint.catalog/1";
@@ -250,6 +281,226 @@ pub struct CatalogHeaderWire {
     pub count: u64,
     #[serde(default)]
     pub sase_version: Option<String>,
+}
+
+fn default_window_days() -> Option<u32> {
+    Some(60)
+}
+
+fn default_actor() -> String {
+    "you".to_string()
+}
+
+fn default_lens() -> String {
+    "map".to_string()
+}
+
+fn default_min_catalog_days() -> u32 {
+    60
+}
+
+fn default_min_active_days() -> u32 {
+    30
+}
+
+fn default_calibration_days() -> u32 {
+    3
+}
+
+fn default_fading_days() -> u32 {
+    30
+}
+
+fn default_overlay() -> Value {
+    Value::Object(
+        [("schema".to_string(), Value::String(OVERLAY_SCHEMA.into()))]
+            .into_iter()
+            .collect(),
+    )
+}
+
+/// Request for `footprint_report` and `footprint_card`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryRequestWire {
+    pub store_path: String,
+    #[serde(default = "default_overlay")]
+    pub overlay: Value,
+    pub today: String,
+    #[serde(default = "default_window_days")]
+    pub window_days: Option<u32>,
+    #[serde(default = "default_actor")]
+    pub actor: String,
+    #[serde(default = "default_lens")]
+    pub lens: String,
+    #[serde(default)]
+    pub area: Option<String>,
+    #[serde(default)]
+    pub feature_id: Option<String>,
+    #[serde(default = "default_min_catalog_days")]
+    pub min_catalog_days: u32,
+    #[serde(default = "default_min_active_days")]
+    pub min_active_days: u32,
+    #[serde(default = "default_calibration_days")]
+    pub calibration_days: u32,
+    #[serde(default = "default_fading_days")]
+    pub fading_days: u32,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Trust header on a report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportHeaderWire {
+    pub actor: String,
+    pub window_days: Option<u32>,
+    pub window_start: Option<String>,
+    pub window_end: String,
+    pub observed_active_days: BTreeMap<String, u32>,
+    pub recording_since: Option<String>,
+    pub gate_active_days: u32,
+    pub gate_required_days: u32,
+    pub gate_met: bool,
+    pub generation: u64,
+    pub imported_pack_count: u64,
+}
+
+/// Summary tiles on a report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TilesWire {
+    pub used: u64,
+    pub total: u64,
+    pub candidates: u64,
+    pub candidates_preview: bool,
+    pub rare_by_design: u64,
+    pub agent_only: u64,
+    pub not_measured: u64,
+}
+
+/// One map-lens area row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AreaRowWire {
+    pub area: String,
+    pub ns: String,
+    pub total: u64,
+    pub used: u64,
+    pub used_pct: i64,
+    pub recency_7d: u64,
+    pub recency_30d: u64,
+    pub recency_window: u64,
+    pub recency_none: u64,
+    pub recency_not_measured: u64,
+}
+
+/// Area summary on a card, including the largest unused features.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AreaSummaryWire {
+    pub area: String,
+    pub ns: String,
+    pub total: u64,
+    pub used: u64,
+    pub used_pct: i64,
+    pub recency_7d: u64,
+    pub recency_30d: u64,
+    pub recency_window: u64,
+    pub recency_none: u64,
+    pub recency_not_measured: u64,
+    pub unused_by_loc: Vec<FeatureRowWire>,
+}
+
+/// Per-actor use counts.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ActorUsesWire {
+    pub human: i64,
+    pub agent: i64,
+    pub automation: i64,
+    pub unknown: i64,
+}
+
+/// One feature row in a report or card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeatureRowWire {
+    pub id: String,
+    pub label: String,
+    pub ns: String,
+    pub area: String,
+    pub kind: String,
+    pub state: String,
+    pub coverage_incomplete: bool,
+    pub uses: ActorUsesWire,
+    pub days_used: u32,
+    pub last_used_day: Option<String>,
+    pub last_used_actor: Option<String>,
+    pub via: BTreeMap<String, i64>,
+    pub outcome: BTreeMap<String, i64>,
+    pub dur_ms_sum: i64,
+    pub loc: Option<i64>,
+    pub parent: Option<String>,
+    pub protected: Option<String>,
+    pub decision: Option<String>,
+    pub decision_reason: Option<String>,
+    pub decided_day: Option<String>,
+    pub snooze_until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friction_ratio_bps: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_days: Option<u32>,
+}
+
+/// One day in a card series.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DailyPointWire {
+    pub day: String,
+    pub n: i64,
+    pub measured: bool,
+}
+
+/// One coverage-lens surface summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoverageSummaryWire {
+    pub surface: String,
+    pub measured_days: u32,
+    pub active_days: u32,
+    pub torn: i64,
+    pub dropped: i64,
+    pub unknown_ids: i64,
+    pub first_measured_day: Option<String>,
+    pub incomplete_days: u32,
+}
+
+/// `footprint_report` response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportWire {
+    pub schema_version: u32,
+    pub header: ReportHeaderWire,
+    pub tiles: TilesWire,
+    pub areas: Vec<AreaRowWire>,
+    pub rows: Vec<FeatureRowWire>,
+    pub coverage: Vec<CoverageSummaryWire>,
+}
+
+/// `footprint_card` response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardWire {
+    pub schema_version: u32,
+    pub row: FeatureRowWire,
+    pub daily_series: Vec<DailyPointWire>,
+    pub first_in_catalog: Option<String>,
+    pub last_in_catalog: Option<String>,
+    pub parent: Option<String>,
+    pub children: Vec<String>,
+    pub retire_with: Vec<String>,
+    pub area_summary: Option<AreaSummaryWire>,
+}
+
+/// Result of `footprint_decide`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecideResultWire {
+    pub schema_version: u32,
+    pub feature_id: String,
+    pub decision: Option<String>,
+    pub reason: Option<String>,
+    pub decided_day: Option<String>,
+    pub snooze_until: Option<String>,
 }
 
 pub(crate) fn require_member(

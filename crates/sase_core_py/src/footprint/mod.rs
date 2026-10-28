@@ -9,12 +9,15 @@ use crate::prelude::*;
 use pyo3::types::PyList;
 use pyo3::wrap_pyfunction;
 use sase_core::footprint::{
-    catalog_status as core_catalog_status, clear as core_clear,
-    fold as core_fold, footprint_wire_schema_version as core_wire_version,
+    card as core_card, catalog_status as core_catalog_status,
+    clear as core_clear, decide as core_decide, fold as core_fold,
+    footprint_wire_schema_version as core_wire_version,
     ingest_catalog as core_ingest_catalog, prune as core_prune,
-    status as core_status, upsert_derived as core_upsert_derived,
+    report as core_report, status as core_status,
+    upsert_derived as core_upsert_derived,
     validate_overlay_shape as core_validate_overlay_shape,
     DerivedCoverageRowWire, DerivedDailyRowWire, FootprintError,
+    QueryRequestWire,
 };
 
 fn footprint_error(error: FootprintError) -> PyErr {
@@ -287,6 +290,103 @@ fn py_footprint_validate_overlay<'py>(
     serialize_to_py(py, &true)
 }
 
+fn query_request_from_pydict(
+    request: &Bound<'_, PyDict>,
+) -> PyResult<QueryRequestWire> {
+    let value = py_to_json_value(request.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid QueryRequestWire dict: {error}"
+        ))
+    })
+}
+
+/// Build a lens report from the ledger and overlay.
+#[pyfunction]
+#[pyo3(
+    name = "footprint_report",
+    signature = (request, busy_timeout_ms=250)
+)]
+fn py_footprint_report<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request = query_request_from_pydict(request)?;
+    let result = py
+        .allow_threads(|| {
+            core_report(&request, Duration::from_millis(busy_timeout_ms))
+        })
+        .map_err(footprint_error)?;
+    serialize_to_py(py, &result)
+}
+
+/// Build an evidence card for one feature or area.
+#[pyfunction]
+#[pyo3(
+    name = "footprint_card",
+    signature = (request, busy_timeout_ms=250)
+)]
+fn py_footprint_card<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request = query_request_from_pydict(request)?;
+    let result = py
+        .allow_threads(|| {
+            core_card(&request, Duration::from_millis(busy_timeout_ms))
+        })
+        .map_err(footprint_error)?;
+    serialize_to_py(py, &result)
+}
+
+/// Record, snooze, or clear a local review decision.
+#[pyfunction]
+#[pyo3(
+    name = "footprint_decide",
+    signature = (
+        store_path,
+        feature_id,
+        decision,
+        reason,
+        today,
+        snooze_days=30,
+        busy_timeout_ms=250
+    )
+)]
+#[allow(clippy::too_many_arguments)]
+fn py_footprint_decide<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    feature_id: &str,
+    decision: &str,
+    reason: Option<&str>,
+    today: &str,
+    snooze_days: u32,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let store_path = PathBuf::from(store_path);
+    let feature_id = feature_id.to_string();
+    let decision = decision.to_string();
+    let reason = reason.map(str::to_string);
+    let today = today.to_string();
+    let result = py
+        .allow_threads(|| {
+            core_decide(
+                &store_path,
+                &feature_id,
+                &decision,
+                reason.as_deref(),
+                &today,
+                snooze_days,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(footprint_error)?;
+    serialize_to_py(py, &result)
+}
+
 pub(crate) fn register_footprint(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_footprint_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_footprint_catalog_status, m)?)?;
@@ -297,6 +397,9 @@ pub(crate) fn register_footprint(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_footprint_prune, m)?)?;
     m.add_function(wrap_pyfunction!(py_footprint_clear, m)?)?;
     m.add_function(wrap_pyfunction!(py_footprint_validate_overlay, m)?)?;
+    m.add_function(wrap_pyfunction!(py_footprint_report, m)?)?;
+    m.add_function(wrap_pyfunction!(py_footprint_card, m)?)?;
+    m.add_function(wrap_pyfunction!(py_footprint_decide, m)?)?;
     Ok(())
 }
 

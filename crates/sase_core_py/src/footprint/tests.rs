@@ -99,6 +99,41 @@ fn footprint_bindings_round_trip() {
         let overlay = overlay.bind(py).downcast::<PyDict>().unwrap();
         py_footprint_validate_overlay(py, overlay).unwrap();
 
+        let request = PyDict::new_bound(py);
+        request
+            .set_item("store_path", store.to_str().unwrap())
+            .unwrap();
+        request.set_item("today", "2026-10-27").unwrap();
+        request.set_item("lens", "map").unwrap();
+        let reported = py_footprint_report(py, &request, 5_000).unwrap();
+        let reported = py_to_json_value(reported.bind(py)).unwrap();
+        assert_eq!(reported["schema_version"], json!(1));
+        assert!(reported["areas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|area| { area["area"] == json!("cli.bead") }));
+
+        request.set_item("feature_id", "cli:bead.list").unwrap();
+        let evidence = py_footprint_card(py, &request, 5_000).unwrap();
+        let evidence = py_to_json_value(evidence.bind(py)).unwrap();
+        assert_eq!(evidence["row"]["id"], json!("cli:bead.list"));
+        assert_eq!(evidence["row"]["state"], json!("used"));
+
+        let decided = py_footprint_decide(
+            py,
+            store.to_str().unwrap(),
+            "cli:bead.list",
+            "keep",
+            Some("agent_facing"),
+            "2026-10-27",
+            30,
+            5_000,
+        )
+        .unwrap();
+        let decided = py_to_json_value(decided.bind(py)).unwrap();
+        assert_eq!(decided["decision"], json!("keep"));
+
         let cleared = py_footprint_clear(
             py,
             store.to_str().unwrap(),
