@@ -310,3 +310,90 @@ fn aggregates_swarm_xprompt_kind_through_stats_wire() {
     assert_eq!(focus.runs, 1);
     assert_eq!(focus.references, 2);
 }
+
+#[test]
+fn query_macro_usage_splits_parent_launches_from_human_launches() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+
+    let human = add_project_run(
+        &projects,
+        "alpha-project",
+        "20260710010000",
+        json!({
+            "name": "human-root",
+            "run_started_at": "2026-07-10T01:00:00Z"
+        }),
+        None,
+        false,
+    );
+    write_json(
+        &human.join("xprompts.json"),
+        json!([{"name": "research", "kind": "workflow", "tags": []}]),
+    );
+
+    let child = add_project_run(
+        &projects,
+        "alpha-project",
+        "20260710020000",
+        json!({
+            "name": "child",
+            "run_started_at": "2026-07-10T02:00:00Z",
+            "parent_agent_name": "human-root",
+            "parent_timestamp": "20260710010000"
+        }),
+        None,
+        false,
+    );
+    write_json(
+        &child.join("xprompts.json"),
+        json!([
+            {"name": "research", "kind": "workflow", "tags": []},
+            {"name": "custom-user-macro", "kind": "workflow", "tags": []}
+        ]),
+    );
+
+    let hidden = add_project_run(
+        &projects,
+        "alpha-project",
+        "20260710030000",
+        json!({
+            "name": "hidden",
+            "run_started_at": "2026-07-10T03:00:00Z",
+            "hidden": true
+        }),
+        None,
+        false,
+    );
+    write_json(
+        &hidden.join("xprompts.json"),
+        json!([{"name": "secret", "kind": "workflow", "tags": []}]),
+    );
+
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    let result = query_macro_usage(&index).unwrap();
+    assert_eq!(result.schema_version, 1);
+    assert_eq!(result.malformed_rows_skipped, 0);
+    let mut names: Vec<(&str, bool, u64)> = result
+        .rows
+        .iter()
+        .map(|row| (row.name.as_str(), row.has_parent, row.n))
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec![
+            ("custom-user-macro", true, 1),
+            ("research", false, 1),
+            ("research", true, 1),
+        ]
+    );
+    assert!(result.rows.iter().all(|row| row.ts > 0));
+}

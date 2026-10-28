@@ -495,6 +495,30 @@ pub struct AgentActivityStatsResponseWire {
     pub malformed_rows_skipped: u64,
 }
 
+/// Wire schema for compact launch-boundary macro usage rows.
+pub const MACRO_USAGE_WIRE_SCHEMA_VERSION: u32 = 1;
+
+/// One launch-boundary macro reference, identity-free.
+///
+/// `ts` is the Unix launch timestamp so Python can bucket by the configured
+/// local calendar day. `has_parent` is true when the launch had a parent
+/// agent. `n` is the reference count on that launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacroUsageRowWire {
+    pub ts: i64,
+    pub name: String,
+    pub has_parent: bool,
+    pub n: u64,
+}
+
+/// Compact launch-boundary macro usage for Footprint derived rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacroUsageResponseWire {
+    pub schema_version: u32,
+    pub rows: Vec<MacroUsageRowWire>,
+    pub malformed_rows_skipped: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::Value;

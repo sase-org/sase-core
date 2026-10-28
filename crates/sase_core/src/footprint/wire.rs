@@ -32,6 +32,7 @@ pub const VIAS: &[&str] = &[
     "prompt",
     "history",
     "auto",
+    "config",
 ];
 
 /// Closed outcome vocabulary.

@@ -182,6 +182,53 @@ fn agent_stats_binding_round_trips_python_dict() {
 }
 
 #[test]
+fn agent_stats_query_macro_usage_binding_returns_parent_split() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = temp_agent_stats_root();
+        let root = temp.path();
+        let projects = root.join("projects");
+        let artifact = projects.join("proj/artifacts/ace-run/20260710010000");
+        fs::create_dir_all(&artifact).unwrap();
+        fs::write(
+            artifact.join("agent_meta.json"),
+            serde_json::to_vec(&json!({
+                "name": "child",
+                "run_started_at": "100",
+                "parent_agent_name": "root"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            artifact.join("xprompts.json"),
+            serde_json::to_vec(&json!([
+                {"name": "research", "kind": "workflow", "tags": []}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let index = root.join("agent_artifact_index.sqlite");
+        sase_core::rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            sase_core::AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        assert_eq!(py_agent_stats_macro_usage_wire_schema_version(py), 1);
+        let result =
+            py_agent_stats_query_macro_usage(py, index.to_str().unwrap())
+                .unwrap();
+        let result = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(result["schema_version"], json!(1));
+        assert_eq!(result["rows"][0]["name"], json!("research"));
+        assert_eq!(result["rows"][0]["has_parent"], json!(true));
+        assert_eq!(result["rows"][0]["n"], json!(1));
+    });
+}
+
+#[test]
 fn agent_output_variable_history_binding_round_trips_python_dict() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

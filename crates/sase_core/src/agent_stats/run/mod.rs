@@ -11,6 +11,7 @@ mod attribution;
 mod finishing;
 mod folds;
 mod lifecycle;
+mod macro_usage;
 mod macros;
 mod query;
 #[cfg(test)]
@@ -18,4 +19,5 @@ mod tests;
 mod types;
 
 pub(super) use lifecycle::parse_timestamp;
+pub use macro_usage::query_macro_usage;
 pub use query::query_run_stats;

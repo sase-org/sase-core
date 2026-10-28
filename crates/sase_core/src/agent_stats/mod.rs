@@ -6,7 +6,7 @@ mod runner;
 mod wire;
 
 pub use activity::query_activity_stats;
-pub use run::query_run_stats;
+pub use run::{query_macro_usage, query_run_stats};
 /// Legacy Rust alias retained for compatibility with older stats callers.
 pub use wire::AgentChangeSpecWorkStatsWire;
 pub use wire::{
@@ -21,6 +21,7 @@ pub use wire::{
     AgentRunnerStatsWire, AgentRunnerTrendSliceWire,
     AgentRuntimeGroupStatsWire, AgentStatsCountWire,
     AgentStatsDistributionWire, AgentStatsRuntimeGroupByWire,
-    AgentWorkStatsWire, AgentWorkspaceStatsWire,
-    AGENT_STATS_WIRE_SCHEMA_VERSION,
+    AgentWorkStatsWire, AgentWorkspaceStatsWire, MacroUsageResponseWire,
+    MacroUsageRowWire, AGENT_STATS_WIRE_SCHEMA_VERSION,
+    MACRO_USAGE_WIRE_SCHEMA_VERSION,
 };

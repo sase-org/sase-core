@@ -364,6 +364,47 @@ fn derived_upsert_is_idempotent() {
 }
 
 #[test]
+fn derived_config_via_is_accepted() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("footprint.sqlite");
+    let catalog = write_catalog(
+        temp.path(),
+        &[&entry("config:ace.page_size", "config", "Page size")],
+    );
+    ingest_catalog(&store, &catalog, &BTreeMap::new(), TODAY, BUSY).unwrap();
+    upsert_derived(
+        &store,
+        "derived.config",
+        &["2026-10-27".into()],
+        &[DerivedDailyRowWire {
+            day: "2026-10-27".into(),
+            feature_id: "config:ace.page_size".into(),
+            actor: "human".into(),
+            via: "config".into(),
+            outcome: "ok".into(),
+            n: 1,
+            dur_ms_sum: 0,
+            dur_ms_max: 0,
+        }],
+        &[DerivedCoverageRowWire {
+            day: "2026-10-27".into(),
+            surface: "config".into(),
+            measured: 1,
+            human_active: 1,
+            records: 1,
+            torn: 0,
+            dropped: 0,
+            unknown_ids: 0,
+            incomplete: 0,
+        }],
+        BUSY,
+    )
+    .unwrap();
+    let conn = open_write_store(&store, BUSY).unwrap();
+    assert_eq!(daily_n(&conn, "config:ace.page_size"), 1);
+}
+
+#[test]
 fn prune_and_clear() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("footprint.sqlite");

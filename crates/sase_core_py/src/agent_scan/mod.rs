@@ -1056,6 +1056,27 @@ fn py_agent_stats_query_runs<'py>(
     telemetry_result_to_py(py, &result)
 }
 
+/// Compact launch-boundary macro usage for Footprint derived rows.
+#[pyfunction]
+#[pyo3(name = "agent_stats_query_macro_usage")]
+fn py_agent_stats_query_macro_usage<'py>(
+    py: Python<'py>,
+    index_path: &str,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(index_path);
+    let result = py
+        .allow_threads(|| core_query_macro_usage(&path))
+        .map_err(PyRuntimeError::new_err)?;
+    telemetry_result_to_py(py, &result)
+}
+
+/// Return the compact macro-usage wire schema version.
+#[pyfunction]
+#[pyo3(name = "agent_stats_macro_usage_wire_schema_version")]
+fn py_agent_stats_macro_usage_wire_schema_version(py: Python<'_>) -> u32 {
+    py.allow_threads(|| MACRO_USAGE_WIRE_SCHEMA_VERSION)
+}
+
 /// Aggregate durable skill, memory, question, and plan activity.
 #[pyfunction]
 #[pyo3(name = "agent_stats_query_activity")]
@@ -1165,6 +1186,11 @@ pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_agent_stats_query_runs, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_stats_query_macro_usage, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_agent_stats_macro_usage_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_agent_stats_query_activity, m)?)?;
     Ok(())
 }

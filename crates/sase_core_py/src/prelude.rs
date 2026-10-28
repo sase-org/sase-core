@@ -236,8 +236,9 @@ pub(crate) use sase_core::agent_session_manifest::{
 };
 pub(crate) use sase_core::agent_stats::{
     query_activity_stats as core_query_activity_stats,
+    query_macro_usage as core_query_macro_usage,
     query_run_stats as core_query_run_stats, AgentActivityStatsRequestWire,
-    AgentRunStatsRequestWire,
+    AgentRunStatsRequestWire, MACRO_USAGE_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::agent_tab::{
     build_agent_tab_catalog as core_build_agent_tab_catalog,
