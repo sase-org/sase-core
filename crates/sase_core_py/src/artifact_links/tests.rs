@@ -619,6 +619,74 @@ fn artifact_link_collision_bindings_round_trip() {
             json!("historical_ancestor_wins")
         );
 
+        let repeated_event = event("plan:202610/repeated.md");
+        let competitor_event = event("plan:202610/competitor.md");
+        let repeated_dict = request_dict(py, repeated_event.clone());
+        let competitor_dict = request_dict(py, competitor_event.clone());
+        let repeated_canonical =
+            py_artifact_link_event_canonical_json(&repeated_dict).unwrap();
+        let competitor_canonical =
+            py_artifact_link_event_canonical_json(&competitor_dict).unwrap();
+        let repeated_digest =
+            py_artifact_link_event_digest(&repeated_dict).unwrap();
+        let competitor_digest =
+            py_artifact_link_event_digest(&competitor_dict).unwrap();
+        let early_commit = "a".repeat(40);
+        let competitor_commit = "b".repeat(40);
+        let late_copy_commit = "c".repeat(40);
+        let copy_chronology_request = request_dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "candidates": [
+                    candidate(
+                        repeated_event.clone(),
+                        &repeated_canonical,
+                        &repeated_digest,
+                        "durable",
+                        json!({
+                            "history_complete": true,
+                            "first_commit_id": early_commit,
+                            "first_commit_at": "2026-10-27T10:00:00Z",
+                            "ancestor_commit_ids": [],
+                        }),
+                    ),
+                    candidate(
+                        repeated_event.clone(),
+                        &repeated_canonical,
+                        &repeated_digest,
+                        "durable",
+                        json!({
+                            "history_complete": true,
+                            "first_commit_id": late_copy_commit,
+                            "first_commit_at": "2026-10-27T12:00:00Z",
+                            "ancestor_commit_ids": [competitor_commit],
+                        }),
+                    ),
+                    candidate(
+                        competitor_event.clone(),
+                        &competitor_canonical,
+                        &competitor_digest,
+                        "durable",
+                        json!({
+                            "history_complete": true,
+                            "first_commit_id": competitor_commit,
+                            "first_commit_at": "2026-10-27T11:00:00Z",
+                            "ancestor_commit_ids": [],
+                        }),
+                    ),
+                ],
+            }),
+        );
+        let copy_chronology_obj =
+            py_artifact_link_collision_partition(py, &copy_chronology_request)
+                .unwrap();
+        let copy_chronology =
+            py_to_json_value(copy_chronology_obj.bind(py)).unwrap();
+        let copy_group = &copy_chronology["groups"][0];
+        assert_eq!(copy_group["accepted"]["digest"], json!(repeated_digest));
+        assert_eq!(copy_group["basis"], json!("historical_commit_time_wins"));
+
         let path =
             py_artifact_link_quarantine_record_path(&op_id, &replay_digest)
                 .unwrap();

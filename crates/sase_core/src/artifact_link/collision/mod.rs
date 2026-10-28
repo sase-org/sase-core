@@ -840,6 +840,29 @@ fn validate_history_ancestry(
             "conflicting first-add ancestry evidence contains a cycle",
         ));
     }
+    let mut instant_by_commit: BTreeMap<&str, &DateTime<FixedOffset>> =
+        BTreeMap::new();
+    for entry in entries {
+        for occurrence in &entry.history {
+            if let Some(existing) =
+                instant_by_commit.get(occurrence.first_commit_id.as_str())
+            {
+                if compare_instants(existing, &occurrence.first_commit_at)
+                    != std::cmp::Ordering::Equal
+                {
+                    return Err(ArtifactLinkError::validation(format!(
+                        "conflicting first_commit_at values for commit {}",
+                        occurrence.first_commit_id
+                    )));
+                }
+            } else {
+                instant_by_commit.insert(
+                    occurrence.first_commit_id.as_str(),
+                    &occurrence.first_commit_at,
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -879,6 +902,43 @@ fn evidence_strength(entry: &DigestEntry) -> u8 {
     }
 }
 
+fn occurrence_is_eliminated(
+    occurrence: &HistoryEvidence,
+    owner_digest: &str,
+    scope: &[&DigestEntry],
+) -> bool {
+    scope.iter().any(|other| {
+        other.digest != owner_digest
+            && other.history.iter().any(|other_occurrence| {
+                is_history_ancestor(other_occurrence, occurrence)
+                    && !is_history_ancestor(occurrence, other_occurrence)
+            })
+    })
+}
+
+fn surviving_histories<'a>(
+    entry: &'a DigestEntry,
+    scope: &[&'a DigestEntry],
+) -> Vec<&'a HistoryEvidence> {
+    entry
+        .history
+        .iter()
+        .filter(|occurrence| {
+            !occurrence_is_eliminated(occurrence, &entry.digest, scope)
+        })
+        .collect()
+}
+
+fn best_surviving_instant(
+    entry: &DigestEntry,
+    scope: &[&DigestEntry],
+) -> Option<DateTime<FixedOffset>> {
+    surviving_histories(entry, scope)
+        .iter()
+        .map(|occurrence| occurrence.first_commit_at)
+        .min_by(compare_instants)
+}
+
 fn selection_pool(entries: &[DigestEntry]) -> Vec<&DigestEntry> {
     let strongest_tier = entries
         .iter()
@@ -905,11 +965,7 @@ fn selection_pool(entries: &[DigestEntry]) -> Vec<&DigestEntry> {
         .iter()
         .copied()
         .filter(|candidate| {
-            !evidence_entries.iter().any(|other| {
-                candidate.digest != other.digest
-                    && is_proven_ancestor(other, candidate)
-                    && !is_proven_ancestor(candidate, other)
-            })
+            !surviving_histories(candidate, &evidence_entries).is_empty()
         })
         .collect();
     if ancestry_minima.is_empty() {
@@ -921,8 +977,39 @@ fn selection_pool(entries: &[DigestEntry]) -> Vec<&DigestEntry> {
 
 fn select_winner(entries: &[DigestEntry]) -> &DigestEntry {
     let pool = selection_pool(entries);
+    let Some(first) = pool.first() else {
+        unreachable!("collision group has a selection candidate");
+    };
+    let first_tier = first.tier.rank();
+    let first_strength = evidence_strength(first);
+    if first_strength != 2 {
+        return pool
+            .into_iter()
+            .min_by(|left, right| compare_selection_order(left, right))
+            .expect("collision group has a selection candidate");
+    }
+    let scope: Vec<&DigestEntry> = entries
+        .iter()
+        .filter(|entry| {
+            entry.tier.rank() == first_tier
+                && evidence_strength(entry) == first_strength
+        })
+        .collect();
     pool.into_iter()
-        .min_by(|left, right| compare_selection_order(left, right))
+        .min_by(|left, right| {
+            match (
+                best_surviving_instant(left, &scope),
+                best_surviving_instant(right, &scope),
+            ) {
+                (Some(left_at), Some(right_at)) => {
+                    compare_instants(&left_at, &right_at)
+                        .then_with(|| left.digest.cmp(&right.digest))
+                }
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => compare_selection_order(left, right),
+            }
+        })
         .expect("collision group has a selection candidate")
 }
 
@@ -1010,52 +1097,105 @@ fn pairwise_basis(
         );
     }
     if winner_strength == 2 {
-        if let Some(ancestor) = entries
+        let scope: Vec<&DigestEntry> = entries
             .iter()
             .filter(|entry| {
-                entry.digest != loser.digest
-                    && entry.tier == loser.tier
+                entry.tier == loser.tier
                     && evidence_strength(entry) == loser_strength
-                    && is_proven_ancestor(entry, loser)
-                    && !is_proven_ancestor(loser, entry)
             })
-            .min_by(|left, right| left.digest.cmp(&right.digest))
-        {
+            .collect();
+        let loser_surviving = surviving_histories(loser, &scope);
+        if loser_surviving.is_empty() {
+            if let Some(ancestor) = entries
+                .iter()
+                .filter(|entry| {
+                    entry.digest != loser.digest
+                        && entry.tier == loser.tier
+                        && evidence_strength(entry) == loser_strength
+                        && is_proven_ancestor(entry, loser)
+                        && !is_proven_ancestor(loser, entry)
+                })
+                .min_by(|left, right| left.digest.cmp(&right.digest))
+            {
+                return (
+                    ArtifactLinkCollisionBasisWire::HistoricalAncestorWins,
+                    format!(
+                        "first-add ancestor {} proves digest {} is a later replay; descendants are excluded before selecting {} from the complete history group",
+                        ancestor.digest, loser.digest, winner.digest,
+                    ),
+                    Vec::new(),
+                );
+            }
             return (
                 ArtifactLinkCollisionBasisWire::HistoricalAncestorWins,
                 format!(
-                    "first-add ancestor {} proves digest {} is a later replay; descendants are excluded before selecting {} from the complete history group",
-                    ancestor.digest, loser.digest, winner.digest,
+                    "complete-group ancestry and time ordering selects {} over {}",
+                    winner.digest, loser.digest,
                 ),
                 Vec::new(),
             );
         }
-        let winner_at =
-            winner.evidence.first_commit_at.as_ref().expect("checked");
-        let loser_at =
-            loser.evidence.first_commit_at.as_ref().expect("checked");
-        match compare_instants(winner_at, loser_at) {
-            std::cmp::Ordering::Less => {
-                return (
-                    ArtifactLinkCollisionBasisWire::HistoricalCommitTimeWins,
-                    format!(
-                        "earlier first-add {} wins over {}",
-                        winner.digest, loser.digest,
-                    ),
-                    Vec::new(),
-                );
+        let winner_surviving = surviving_histories(winner, &scope);
+        let winner_best = winner_surviving
+            .iter()
+            .map(|occurrence| occurrence.first_commit_at)
+            .min_by(compare_instants);
+        let loser_best = loser_surviving
+            .iter()
+            .map(|occurrence| occurrence.first_commit_at)
+            .min_by(compare_instants);
+        if let (Some(winner_at), Some(loser_at)) = (winner_best, loser_best) {
+            match compare_instants(&winner_at, &loser_at) {
+                std::cmp::Ordering::Less => {
+                    return (
+                        ArtifactLinkCollisionBasisWire::HistoricalCommitTimeWins,
+                        format!(
+                            "earlier first-add {} wins over {}",
+                            winner.digest, loser.digest,
+                        ),
+                        Vec::new(),
+                    );
+                }
+                std::cmp::Ordering::Greater => {
+                    return (
+                        ArtifactLinkCollisionBasisWire::HistoricalAncestorWins,
+                        format!(
+                            "complete-group ancestry and time ordering selects {} over {}",
+                            winner.digest, loser.digest,
+                        ),
+                        Vec::new(),
+                    );
+                }
+                std::cmp::Ordering::Equal => {}
             }
-            std::cmp::Ordering::Greater => {
-                return (
-                    ArtifactLinkCollisionBasisWire::HistoricalAncestorWins,
-                    format!(
-                        "complete-group ancestry and time ordering selects {} over {}",
-                        winner.digest, loser.digest,
-                    ),
-                    Vec::new(),
-                );
+        } else {
+            let winner_at =
+                winner.evidence.first_commit_at.as_ref().expect("checked");
+            let loser_at =
+                loser.evidence.first_commit_at.as_ref().expect("checked");
+            match compare_instants(winner_at, loser_at) {
+                std::cmp::Ordering::Less => {
+                    return (
+                        ArtifactLinkCollisionBasisWire::HistoricalCommitTimeWins,
+                        format!(
+                            "earlier first-add {} wins over {}",
+                            winner.digest, loser.digest,
+                        ),
+                        Vec::new(),
+                    );
+                }
+                std::cmp::Ordering::Greater => {
+                    return (
+                        ArtifactLinkCollisionBasisWire::HistoricalAncestorWins,
+                        format!(
+                            "complete-group ancestry and time ordering selects {} over {}",
+                            winner.digest, loser.digest,
+                        ),
+                        Vec::new(),
+                    );
+                }
+                std::cmp::Ordering::Equal => {}
             }
-            std::cmp::Ordering::Equal => {}
         }
         return (
             ArtifactLinkCollisionBasisWire::DigestTieBreakUnordered,

@@ -3,6 +3,15 @@
 mod index;
 
 use crate::prelude::*;
+use sase_core::artifact_link::{
+    artifact_link_quarantine_record_canonical_json,
+    artifact_link_quarantine_record_path,
+    partition_artifact_link_collision_events,
+    validate_artifact_link_quarantine_record, ArtifactLinkCollisionRequestWire,
+    ArtifactLinkQuarantineRecordWire,
+    ARTIFACT_LINK_COLLISION_WIRE_SCHEMA_VERSION,
+    ARTIFACT_LINK_QUARANTINE_WIRE_SCHEMA_VERSION,
+};
 
 use crate::artifact_refs::artifact_ref_error_to_pyerr;
 
@@ -827,7 +836,7 @@ pub(crate) fn py_artifact_link_collision_partition(
                 ))
             },
         )?;
-    let partition = core_partition_artifact_link_collision_events(&request)
+    let partition = partition_artifact_link_collision_events(&request)
         .map_err(artifact_link_error_to_pyerr)?;
     let value = serde_json::to_value(partition).map_err(|error| {
         PyValueError::new_err(format!("internal serialize error: {error}"))
@@ -842,7 +851,7 @@ pub(crate) fn py_artifact_link_quarantine_record_path(
     operation_id: &str,
     rejected_digest: &str,
 ) -> PyResult<String> {
-    core_artifact_link_quarantine_record_path(operation_id, rejected_digest)
+    artifact_link_quarantine_record_path(operation_id, rejected_digest)
         .map_err(artifact_link_error_to_pyerr)
 }
 
@@ -860,7 +869,7 @@ pub(crate) fn py_artifact_link_quarantine_record_canonical_json(
             "record is not a valid ArtifactLinkQuarantineRecordWire dict: {error}"
         ))
     })?;
-    core_artifact_link_quarantine_record_canonical_json(&record)
+    artifact_link_quarantine_record_canonical_json(&record)
         .map_err(artifact_link_error_to_pyerr)
 }
 
@@ -879,7 +888,7 @@ pub(crate) fn py_artifact_link_quarantine_record_validate(
             "record is not a valid ArtifactLinkQuarantineRecordWire dict: {error}"
         ))
     })?;
-    let validated = core_validate_artifact_link_quarantine_record(&record)
+    let validated = validate_artifact_link_quarantine_record(&record)
         .map_err(artifact_link_error_to_pyerr)?;
     let value = serde_json::to_value(validated).map_err(|error| {
         PyValueError::new_err(format!("internal serialize error: {error}"))
