@@ -1,7 +1,6 @@
 //! CLI argument parsing: list/search/update/close/create option
 //! grammars and the status/type/tier value parsers behind them.
 
-use std::env;
 use std::io::IsTerminal;
 
 use super::super::mutation::BeadUpdateFieldsWire;
@@ -36,7 +35,7 @@ impl ColorMode {
         match self {
             Self::Auto => {
                 std::io::stdout().is_terminal()
-                    && env::var_os("NO_COLOR").is_none()
+                    && crate::native::env::var_os("NO_COLOR").is_none()
             }
             Self::Always => true,
             Self::Never => false,
@@ -414,7 +413,7 @@ pub(super) fn close_note_author() -> Option<String> {
     // Mirrors Python's `discover_agent_identity`: the bare launcher flag
     // `SASE_AGENT=1` carries no identity.
     for key in ["SASE_AGENT_NAME", "SASE_AGENT"] {
-        let Ok(value) = env::var(key) else {
+        let Ok(value) = crate::native::env::var(key) else {
             continue;
         };
         let trimmed = value.trim().to_string();

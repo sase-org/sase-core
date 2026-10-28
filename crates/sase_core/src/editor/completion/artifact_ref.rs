@@ -517,7 +517,7 @@ impl CommitLogFailure {
 }
 pub(crate) fn artifact_ref_commit_timeout() -> Duration {
     parse_commit_timeout(
-        std::env::var(ARTIFACT_REF_COMMIT_TIMEOUT_ENV)
+        crate::native::env::var(ARTIFACT_REF_COMMIT_TIMEOUT_ENV)
             .ok()
             .as_deref(),
     )

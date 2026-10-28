@@ -103,6 +103,7 @@ pub mod mobile_pairing;
 pub mod model_completion;
 pub mod model_route;
 pub mod model_validity;
+pub mod native;
 pub mod note_attachment;
 pub mod notifications;
 pub mod parser;

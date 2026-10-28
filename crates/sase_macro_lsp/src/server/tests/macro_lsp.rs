@@ -10,22 +10,18 @@ use super::support::*;
 use crate::catalog_cache::CatalogCache;
 use sase_core::editor::jinja::JinjaScopeKind;
 
-static ENV_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 struct HomeGuard {
-    prev_home: Option<std::ffi::OsString>,
     _temp: tempfile::TempDir,
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _env: sase_core::native::env::TestEnvGuard,
 }
 
 impl HomeGuard {
     fn isolate() -> Self {
-        let lock = ENV_SERIAL.lock().unwrap();
+        let env = sase_core::native::env::TestEnvGuard::new();
         let temp = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var_os("HOME");
         // Point HOME at an empty dir so the real ~/.config/sase/sase.yml
         // never poisons Rust loads.
-        std::env::set_var("HOME", temp.path());
+        env.set("HOME", temp.path());
         // Clear transport vars that could redirect the loader at real dirs.
         for key in [
             "SASE_MACRO_PACKAGE_DIR",
@@ -40,21 +36,11 @@ impl HomeGuard {
             "SASE_MACRO_PLUGIN_CONFIG_PATHS_JSON",
             "SASE_SKILL_PLUGIN_DIRS_JSON",
         ] {
-            std::env::remove_var(key);
+            env.remove(key);
         }
         Self {
-            prev_home,
             _temp: temp,
-            _lock: lock,
-        }
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        match &self.prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
+            _env: env,
         }
     }
 }
@@ -129,7 +115,7 @@ fn legacy_policy_is_unconditional() {
 
 #[test]
 fn metadata_env_ignores_legacy_prefix() {
-    let _serial = ENV_SERIAL.lock().unwrap();
+    let env = sase_core::native::env::TestEnvGuard::new();
     // The LSP crate no longer reads `SASE_XPROMPT_*`; only the macro
     // spelling is honored and the retired spelling is ignored.
     let pairs = [
@@ -155,10 +141,8 @@ fn metadata_env_ignores_legacy_prefix() {
         ),
     ];
     for (new_key, old_key) in pairs {
-        let old_prev = std::env::var_os(old_key);
-        let new_prev = std::env::var_os(new_key);
-        std::env::set_var(old_key, "/tmp/old-catalog.json");
-        std::env::set_var(new_key, "/tmp/new-catalog.json");
+        env.set(old_key, "/tmp/old-catalog.json");
+        env.set(new_key, "/tmp/new-catalog.json");
         let resolved = match new_key {
             "SASE_MACRO_VCS_PROJECT_CATALOG" => {
                 super::super::initialize::vcs_project_catalog_path()
@@ -180,7 +164,7 @@ fn metadata_env_ignores_legacy_prefix() {
             "{new_key} should win"
         );
         // The retired spelling alone is ignored.
-        std::env::remove_var(new_key);
+        env.remove(new_key);
         let fallback = match new_key {
             "SASE_MACRO_VCS_PROJECT_CATALOG" => {
                 super::super::initialize::vcs_project_catalog_path()
@@ -197,14 +181,6 @@ fn metadata_env_ignores_legacy_prefix() {
             _ => super::super::initialize::glossary_catalog_path(),
         };
         assert_eq!(fallback, None, "{old_key} legacy spelling must be ignored");
-        match old_prev {
-            Some(v) => std::env::set_var(old_key, v),
-            None => std::env::remove_var(old_key),
-        }
-        match new_prev {
-            Some(v) => std::env::set_var(new_key, v),
-            None => std::env::remove_var(new_key),
-        }
     }
 }
 

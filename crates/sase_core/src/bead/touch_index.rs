@@ -2637,6 +2637,7 @@ mod tests {
 
     #[test]
     fn refresh_fails_loudly_on_a_held_lock() {
+        let env = crate::native::env::TestEnvGuard::new();
         let store = Store::new();
         fs::create_dir_all(store.index_path.parent().unwrap()).unwrap();
         let lock_path = index_lock_path(&store.index_path);
@@ -2650,11 +2651,10 @@ mod tests {
         .unwrap();
         // Same-process flock on a second descriptor conflicts, so the bounded
         // wait must time out into a conflict error rather than hanging.
-        std::env::set_var(LOCK_TIMEOUT_ENV, "0.05");
+        env.set(LOCK_TIMEOUT_ENV, "0.05");
         let error =
             refresh_bead_touch_index(&store.beads_dir, &store.index_path)
                 .unwrap_err();
-        std::env::remove_var(LOCK_TIMEOUT_ENV);
         assert_eq!(error.kind, "conflict");
     }
 

@@ -467,10 +467,10 @@ fn agent_hold_bindings_map_validation_and_lock_errors() {
         let lock_result =
             unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
         assert_eq!(lock_result, 0);
-        std::env::set_var("SASE_AGENT_HOLD_LOCK_TIMEOUT", "0.01");
+        let env = sase_core::native::env::TestEnvGuard::new();
+        env.set("SASE_AGENT_HOLD_LOCK_TIMEOUT", "0.01");
         let timeout =
             py_agent_hold_list(py, &home, None, Some(now)).unwrap_err();
-        std::env::remove_var("SASE_AGENT_HOLD_LOCK_TIMEOUT");
         let unlock_result =
             unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
         assert_eq!(unlock_result, 0);

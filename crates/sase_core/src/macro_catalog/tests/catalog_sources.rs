@@ -1,7 +1,4 @@
 use super::*;
-use std::env;
-
-static ENV_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn write_macro(dir: &Path, name: &str, body: &str) {
     fs::create_dir_all(dir).unwrap();
@@ -103,14 +100,14 @@ fn explicit_package_macros_win_over_xprompts() {
 
 #[test]
 fn explicit_resources_beat_inferred_environment_paths() {
-    let _serial = ENV_SERIAL.lock().unwrap();
+    let env = crate::native::env::TestEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let explicit = temp.path().join("explicit_macros");
     let inferred = temp.path().join("inferred_macros");
     write_macro(&explicit, "winner.md", "Explicit body");
     write_macro(&inferred, "winner.md", "Inferred body");
 
-    env::set_var(
+    env.set(
         "SASE_MACRO_BUILTIN_DIR",
         inferred.to_string_lossy().to_string(),
     );
@@ -121,51 +118,46 @@ fn explicit_resources_beat_inferred_environment_paths() {
         },
     );
     let all = CatalogLoader::new(&options).load_all_macros(None).unwrap();
-    env::remove_var("SASE_MACRO_BUILTIN_DIR");
     assert!(all["winner"].content.contains("Explicit"));
 }
 
 #[test]
 fn macro_env_precedence_is_new_first() {
-    let _serial = ENV_SERIAL.lock().unwrap();
+    let env = crate::native::env::TestEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let new_dir = temp.path().join("new_builtin");
     let old_dir = temp.path().join("old_builtin");
     write_macro(&new_dir, "envy.md", "New env body");
     write_macro(&old_dir, "envy.md", "Old env body");
 
-    env::set_var(
+    env.set(
         "SASE_MACRO_BUILTIN_DIR",
         new_dir.to_string_lossy().to_string(),
     );
-    env::set_var(
+    env.set(
         "SASE_XPROMPT_BUILTIN_DIR",
         old_dir.to_string_lossy().to_string(),
     );
     let all = CatalogLoader::new(&MacroCatalogLoadOptions::new(None))
         .load_all_macros(None)
         .unwrap();
-    env::remove_var("SASE_MACRO_BUILTIN_DIR");
-    env::remove_var("SASE_XPROMPT_BUILTIN_DIR");
     assert!(all["envy"].content.contains("New env"));
 
     let new_default = temp.path().join("new_default");
     let old_default = temp.path().join("old_default");
     write_macro(&new_default, "def.md", "New default");
     write_macro(&old_default, "def.md", "Old default");
-    env::set_var(
+    env.set(
         "SASE_MACRO_DEFAULT_DIR",
         new_default.to_string_lossy().to_string(),
     );
-    env::set_var(
+    env.set(
         "SASE_XPROMPT_DEFAULT_DIR",
         old_default.to_string_lossy().to_string(),
     );
     let all = CatalogLoader::new(&MacroCatalogLoadOptions::new(None))
         .load_all_macros(None)
         .unwrap();
-    env::remove_var("SASE_MACRO_DEFAULT_DIR");
-    env::remove_var("SASE_XPROMPT_DEFAULT_DIR");
     assert!(all["def"].content.contains("New default"));
 
     let new_plugin = temp.path().join("new_plugin");
@@ -182,13 +174,11 @@ fn macro_env_precedence_is_new_first() {
         "path": old_plugin.to_string_lossy(),
     })])
     .unwrap();
-    env::set_var("SASE_MACRO_PLUGIN_DIRS_JSON", &new_json);
-    env::set_var("SASE_XPROMPT_PLUGIN_DIRS_JSON", &old_json);
+    env.set("SASE_MACRO_PLUGIN_DIRS_JSON", &new_json);
+    env.set("SASE_XPROMPT_PLUGIN_DIRS_JSON", &old_json);
     let all = CatalogLoader::new(&MacroCatalogLoadOptions::new(None))
         .load_all_macros(None)
         .unwrap();
-    env::remove_var("SASE_MACRO_PLUGIN_DIRS_JSON");
-    env::remove_var("SASE_XPROMPT_PLUGIN_DIRS_JSON");
     assert!(all["plug"].content.contains("New plugin"));
 }
 

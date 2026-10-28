@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use sase_core::HelperHostBridge;
+use sase_core::{native::env::TestEnvGuard, HelperHostBridge};
 use sase_macro_lsp::MacroLspServer;
 use serde_json::{json, Value};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
@@ -19,6 +19,7 @@ impl HelperHostBridge for NoopBridge {}
 
 #[tokio::test]
 async fn stdio_jsonrpc_model_shortcut_completion_transitions() {
+    let env = TestEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let catalog_path = temp.path().join("model_catalog.json");
     std::fs::write(
@@ -74,7 +75,7 @@ async fn stdio_jsonrpc_model_shortcut_completion_transitions() {
         .unwrap(),
     )
     .unwrap();
-    std::env::set_var(MODEL_CATALOG_ENV, &catalog_path);
+    env.set(MODEL_CATALOG_ENV, catalog_path.as_os_str());
 
     let (mut client_writer, server_stdin) = duplex(16384);
     let (server_stdout, mut client_reader) = duplex(16384);
@@ -312,8 +313,6 @@ async fn stdio_jsonrpc_model_shortcut_completion_transitions() {
     )
     .await;
     server_task.await.unwrap();
-
-    std::env::remove_var(MODEL_CATALOG_ENV);
 }
 
 async fn did_change(

@@ -1,8 +1,7 @@
 //! End-to-end coverage for the artifact-ref commit-log wall-clock budget.
 //!
-//! This file deliberately holds exactly one test. The budget override is read
-//! from the process environment, and Rust runs the tests inside one binary on
-//! parallel threads, so a second test here would race this one's `set_var`.
+//! The budget override uses a thread-local test environment so parallel tests
+//! cannot affect one another.
 
 #![cfg(unix)]
 
@@ -10,6 +9,7 @@ use std::ffi::CString;
 use std::path::Path;
 use std::process::Command;
 
+use sase_core::native::env::TestEnvGuard;
 use sase_core::{
     editor_build_artifact_ref_payload_inventory, ArtifactRefContextWire,
     ArtifactRefRepositoryWire,
@@ -19,6 +19,7 @@ const BUDGET_ENV: &str = "SASE_ARTIFACT_REF_COMMIT_TIMEOUT";
 
 #[test]
 fn commit_inventory_budget_override_controls_whether_rows_survive() {
+    let env = TestEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let healthy = temp.path().join("healthy");
     let wedged = temp.path().join("wedged");
@@ -33,7 +34,7 @@ fn commit_inventory_budget_override_controls_whether_rows_survive() {
     // The regression this override exists to rescue: a `git log` that outruns
     // the budget is dropped, and the caller cannot tell that from a repository
     // with no commits at all.
-    std::env::set_var(BUDGET_ENV, "0.2");
+    env.set(BUDGET_ENV, "0.2");
     let starved =
         editor_build_artifact_ref_payload_inventory("commit", &wedged_context)
             .unwrap();
@@ -51,7 +52,7 @@ fn commit_inventory_budget_override_controls_whether_rows_survive() {
         1
     );
 
-    std::env::set_var(BUDGET_ENV, "120");
+    env.set(BUDGET_ENV, "120");
     let generous =
         editor_build_artifact_ref_payload_inventory("commit", &healthy_context)
             .unwrap();
@@ -60,13 +61,13 @@ fn commit_inventory_budget_override_controls_whether_rows_survive() {
 
     // A malformed override is ignored rather than treated as zero, and so is
     // an absent one.
-    std::env::set_var(BUDGET_ENV, "not-a-number");
+    env.set(BUDGET_ENV, "not-a-number");
     let malformed =
         editor_build_artifact_ref_payload_inventory("commit", &healthy_context)
             .unwrap();
     assert_eq!(malformed.payloads, generous.payloads);
 
-    std::env::remove_var(BUDGET_ENV);
+    env.remove(BUDGET_ENV);
     let defaulted =
         editor_build_artifact_ref_payload_inventory("commit", &healthy_context)
             .unwrap();

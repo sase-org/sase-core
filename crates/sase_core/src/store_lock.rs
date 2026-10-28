@@ -191,7 +191,7 @@ fn wait_for_lock(
 }
 
 pub(crate) fn timeout_from_env(name: &str, default: Duration) -> Duration {
-    std::env::var(name)
+    crate::native::env::var(name)
         .ok()
         .as_deref()
         .and_then(parse_timeout_seconds)

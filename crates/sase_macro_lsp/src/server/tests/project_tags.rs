@@ -771,19 +771,11 @@ async fn leading_tag_drives_glossary_context() {
 
 #[tokio::test]
 async fn initialize_advertises_project_tag_palette() {
+    let env = sase_core::native::env::TestEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let catalog_path = temp.path().join("vcs_project_catalog.json");
     write_v5_project_tag_catalog(&catalog_path);
-    struct EnvGuard;
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            std::env::remove_var("SASE_MACRO_VCS_PROJECT_CATALOG");
-        }
-    }
-    // Mirrors the integration tests' set_var precedent; the guard
-    // restores the environment even when an assertion fails.
-    std::env::set_var("SASE_MACRO_VCS_PROJECT_CATALOG", &catalog_path);
-    let _guard = EnvGuard;
+    env.set("SASE_MACRO_VCS_PROJECT_CATALOG", catalog_path.as_os_str());
     let (service, _) = LspService::new(|client| {
         MacroLspServer::with_bridge(
             client,

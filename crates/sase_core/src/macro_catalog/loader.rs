@@ -1,7 +1,6 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
-    env,
     path::{Path, PathBuf},
 };
 
@@ -39,7 +38,9 @@ fn load_input_type_registry(
 
 fn plugin_input_type_files_from_env(
 ) -> Vec<crate::macro_input_types::PluginInputTypeFileRecord> {
-    let Ok(raw) = env::var(SASE_MACRO_PLUGIN_INPUT_TYPES_JSON_ENV) else {
+    let Ok(raw) =
+        crate::native::env::var(SASE_MACRO_PLUGIN_INPUT_TYPES_JSON_ENV)
+    else {
         return Vec::new();
     };
     serde_json::from_str::<
@@ -108,12 +109,13 @@ fn plugin_map_new_first(
 impl CatalogLoader {
     pub(super) fn new(options: &MacroCatalogLoadOptions) -> Self {
         let root_dir = options.root_dir.clone();
-        let home_dir = env::var_os("HOME").map(PathBuf::from);
+        let home_dir = crate::native::env::var_os("HOME").map(PathBuf::from);
         // Explicit resource options retain precedence over inferred
         // environment/package paths. Only macro keys are accepted; retired
         // xprompt option spellings were removed in the key-flip.
         let macro_package_root =
-            env::var_os(SASE_MACRO_PACKAGE_DIR_ENV).map(PathBuf::from);
+            crate::native::env::var_os(SASE_MACRO_PACKAGE_DIR_ENV)
+                .map(PathBuf::from);
         let package_macros_dir = options
             .package_macros_dir
             .clone()

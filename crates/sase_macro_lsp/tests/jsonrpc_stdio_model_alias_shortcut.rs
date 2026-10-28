@@ -1,13 +1,11 @@
 //! JSON-RPC stdio coverage for the `=alias` shortcut completion trigger.
 //!
-//! This file deliberately holds exactly one test. The model catalog path is
-//! read from the process environment at `initialize` time (mirroring the real
-//! launcher), and Rust runs the tests inside one binary on parallel threads,
-//! so a second test here would race this one's `set_var`.
+//! The model catalog path is read at `initialize` time through a thread-local
+//! test override, so the test is isolated from other test threads.
 
 use std::sync::Arc;
 
-use sase_core::HelperHostBridge;
+use sase_core::{native::env::TestEnvGuard, HelperHostBridge};
 use sase_macro_lsp::MacroLspServer;
 use serde_json::{json, Value};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
@@ -24,6 +22,7 @@ impl HelperHostBridge for NoopBridge {}
 
 #[tokio::test]
 async fn stdio_jsonrpc_model_alias_shortcut_completion() {
+    let env = TestEnvGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let catalog_path = temp.path().join("model_catalog.json");
     std::fs::write(
@@ -54,7 +53,7 @@ async fn stdio_jsonrpc_model_alias_shortcut_completion() {
         .unwrap(),
     )
     .unwrap();
-    std::env::set_var(MODEL_CATALOG_ENV, &catalog_path);
+    env.set(MODEL_CATALOG_ENV, catalog_path.as_os_str());
 
     let (mut client_writer, server_stdin) = duplex(8192);
     let (server_stdout, mut client_reader) = duplex(8192);
@@ -281,8 +280,6 @@ async fn stdio_jsonrpc_model_alias_shortcut_completion() {
     )
     .await;
     server_task.await.unwrap();
-
-    std::env::remove_var(MODEL_CATALOG_ENV);
 }
 
 async fn write_message(writer: &mut tokio::io::DuplexStream, value: Value) {

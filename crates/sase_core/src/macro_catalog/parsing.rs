@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -47,13 +47,13 @@ pub(super) fn resolve_compatible_read_path(
 }
 
 pub(super) fn env_path(name: &str) -> Option<PathBuf> {
-    env::var_os(name).map(PathBuf::from)
+    crate::native::env::var_os(name).map(PathBuf::from)
 }
 
 pub(super) fn plugin_path_map_from_env(
     name: &str,
 ) -> BTreeMap<String, PathBuf> {
-    let Some(raw) = env::var_os(name) else {
+    let Some(raw) = crate::native::env::var_os(name) else {
         return BTreeMap::new();
     };
     let Some(raw) = raw.to_str() else {

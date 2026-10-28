@@ -290,11 +290,12 @@ impl PushDispatcher {
         &self,
     ) -> Result<String, PushDeliveryError> {
         if let Some(env_name) = self.config.fcm_credential_env.as_deref() {
-            let value = std::env::var(env_name).map_err(|_| {
-                PushDeliveryError::Config(format!(
-                    "missing credential env {env_name}"
-                ))
-            })?;
+            let value =
+                sase_core::native::env::var(env_name).map_err(|_| {
+                    PushDeliveryError::Config(format!(
+                        "missing credential env {env_name}"
+                    ))
+                })?;
             if value.trim_start().starts_with('{') {
                 let account: ServiceAccountKey = serde_json::from_str(&value)?;
                 return self.service_account_access_token(account).await;
@@ -575,6 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn fcm_provider_posts_expected_http_v1_shape() {
+        let env = sase_core::native::env::TestEnvGuard::new();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -615,7 +617,7 @@ mod tests {
             request
         });
         let env_name = "SASE_GATEWAY_TEST_FCM_TOKEN";
-        std::env::set_var(env_name, "test-access-token");
+        env.set(env_name, "test-access-token");
         let dispatcher = PushDispatcher::new(PushConfig {
             provider: PushProviderMode::Fcm,
             fcm_project_id: Some("demo-project".to_string()),
@@ -657,8 +659,6 @@ mod tests {
 
         dispatcher.send_fcm(&subscription, &hint).await.unwrap();
         let request = server.await.unwrap();
-        std::env::remove_var(env_name);
-
         assert!(request.starts_with(
             "POST /v1/projects/demo-project/messages:send HTTP/1.1"
         ));

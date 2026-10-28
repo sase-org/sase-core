@@ -1,45 +1,22 @@
-use std::{env, fs, sync::Arc};
+use std::{fs, sync::Arc};
 
 use lsp_types::Uri;
 use sase_core::{
-    AgentCatalogRequest, AgentCatalogResponse, AgentCompletionEntry,
-    EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
-    EditorSnippetCatalogStatsWire, EditorSnippetEntryWire, HelperHostBridge,
-    HostBridgeError, MobileHelperProjectContextWire,
-    MobileHelperProjectScopeWire, MobileHelperResultWire,
-    MobileHelperStatusWire, MobileMacroCatalogEntryWire,
-    MobileMacroCatalogRequestWire, MobileMacroCatalogResponseWire,
-    MobileMacroCatalogStatsWire, MobileMacroInputWire,
-    EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
+    native::env::TestEnvGuard, AgentCatalogRequest, AgentCatalogResponse,
+    AgentCompletionEntry, EditorSnippetCatalogRequestWire,
+    EditorSnippetCatalogResponseWire, EditorSnippetCatalogStatsWire,
+    EditorSnippetEntryWire, HelperHostBridge, HostBridgeError,
+    MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
+    MobileHelperResultWire, MobileHelperStatusWire,
+    MobileMacroCatalogEntryWire, MobileMacroCatalogRequestWire,
+    MobileMacroCatalogResponseWire, MobileMacroCatalogStatsWire,
+    MobileMacroInputWire, EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
 };
 use sase_macro_lsp::MacroLspServer;
 use serde_json::{json, Value};
 use tokio::io::{duplex, AsyncWriteExt};
 use tower_lsp_server::UriExt;
 use tower_lsp_server::{LspService, Server};
-
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = env::var_os(key);
-        env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        if let Some(value) = &self.previous {
-            env::set_var(self.key, value);
-        } else {
-            env::remove_var(self.key);
-        }
-    }
-}
 
 #[derive(Debug)]
 struct FixtureBridge {
@@ -511,9 +488,10 @@ async fn stdio_jsonrpc_semantic_tokens_include_argument_structure() {
 
     let (mut client_writer, server_stdin) = duplex(8192);
     let (server_stdout, mut client_reader) = duplex(8192);
-    let _artifact_catalog_env = EnvVarGuard::set(
+    let artifact_catalog_env = TestEnvGuard::new();
+    artifact_catalog_env.set(
         "SASE_MACRO_ARTIFACT_REF_CATALOG",
-        &artifact_catalog_path,
+        artifact_catalog_path.as_os_str(),
     );
     let (service, socket) = LspService::new(|client| {
         MacroLspServer::with_bridge(

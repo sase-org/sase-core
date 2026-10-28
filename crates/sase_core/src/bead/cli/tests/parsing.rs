@@ -126,30 +126,23 @@ fn update_fast_path_defers_size_flag_to_python() {
 
 #[test]
 fn close_note_author_ignores_the_bare_launcher_flag() {
-    let saved_name = std::env::var("SASE_AGENT_NAME").ok();
-    let saved_agent = std::env::var("SASE_AGENT").ok();
-    std::env::remove_var("SASE_AGENT_NAME");
-    std::env::remove_var("SASE_AGENT");
+    let env = crate::native::env::TestEnvGuard::new();
+    env.remove("SASE_AGENT_NAME");
+    env.remove("SASE_AGENT");
 
     // No identity configured.
     assert_eq!(close_note_author(), None);
 
     // The bare launcher flag carries no identity.
-    std::env::set_var("SASE_AGENT", "1");
+    env.set("SASE_AGENT", "1");
     assert_eq!(close_note_author(), None);
 
     // A real agent name is returned, with `SASE_AGENT_NAME` winning.
-    std::env::set_var("SASE_AGENT", "worker");
+    env.set("SASE_AGENT", "worker");
     assert_eq!(close_note_author().as_deref(), Some("worker"));
-    std::env::set_var("SASE_AGENT_NAME", "named-worker");
+    env.set("SASE_AGENT_NAME", "named-worker");
     assert_eq!(close_note_author().as_deref(), Some("named-worker"));
 
-    std::env::remove_var("SASE_AGENT_NAME");
-    std::env::remove_var("SASE_AGENT");
-    if let Some(value) = saved_name {
-        std::env::set_var("SASE_AGENT_NAME", value);
-    }
-    if let Some(value) = saved_agent {
-        std::env::set_var("SASE_AGENT", value);
-    }
+    env.remove("SASE_AGENT_NAME");
+    env.remove("SASE_AGENT");
 }

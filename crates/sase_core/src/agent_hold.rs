@@ -2370,6 +2370,7 @@ mod tests {
 
     #[test]
     fn lock_wait_is_bounded() {
+        let env = crate::native::env::TestEnvGuard::new();
         let temp = tempdir().unwrap();
         let lock_path = agent_hold_lock_path(temp.path());
         fs::create_dir_all(temp.path()).unwrap();
@@ -2381,13 +2382,12 @@ mod tests {
             .open(&lock_path)
             .unwrap();
         lock.lock_exclusive().unwrap();
-        std::env::set_var(LOCK_TIMEOUT_ENV, "0.01");
+        env.set(LOCK_TIMEOUT_ENV, "0.01");
         let result = list_agent_holds(
             temp.path(),
             &AgentHoldLivenessFactsWire::default(),
             NOW,
         );
-        std::env::remove_var(LOCK_TIMEOUT_ENV);
         lock.unlock().unwrap();
         assert!(matches!(result, Err(AgentHoldError::LockTimeout { .. })));
     }

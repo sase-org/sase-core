@@ -58,7 +58,7 @@ pub(super) fn enabled_feature_flags() -> Vec<String> {
 }
 
 fn catalog_path_from_env(env: &str) -> Option<PathBuf> {
-    std::env::var_os(env).map(PathBuf::from)
+    sase_core::native::env::var_os(env).map(PathBuf::from)
 }
 
 pub(super) fn vcs_project_catalog_path() -> Option<PathBuf> {
