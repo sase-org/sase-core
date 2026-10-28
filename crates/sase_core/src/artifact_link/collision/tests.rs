@@ -356,6 +356,240 @@ fn historical_commit_time_orders_independent_histories() {
 }
 
 #[test]
+fn historical_commit_time_compares_actual_instants_across_offsets() {
+    let earlier = observation(&op('a'), "plan:202610/earlier.md", 1);
+    let later = observation(&op('a'), "plan:202610/later.md", 1);
+    let partition = partition_artifact_link_collision_events(&request(vec![
+        candidate(
+            later.clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&commit('b'), "2026-10-27T10:30:00+00:00", &[]),
+            None,
+        ),
+        candidate(
+            earlier.clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&commit('a'), "2026-10-27T12:00:00+02:00", &[]),
+            None,
+        ),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        partition.groups[0].basis,
+        ArtifactLinkCollisionBasisWire::HistoricalCommitTimeWins
+    );
+    assert_eq!(partition.groups[0].accepted.event, earlier);
+}
+
+#[test]
+fn equivalent_timestamp_spellings_use_the_unordered_digest_tie_break() {
+    let first = observation(&op('a'), "plan:202610/first.md", 1);
+    let second = observation(&op('a'), "plan:202610/second.md", 1);
+    let first_digest = artifact_link_event_digest(&first).unwrap();
+    let second_digest = artifact_link_event_digest(&second).unwrap();
+    let expected = if first_digest < second_digest {
+        first.clone()
+    } else {
+        second.clone()
+    };
+    let partition = partition_artifact_link_collision_events(&request(vec![
+        candidate(
+            first,
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&commit('a'), "2026-10-27T12:00:00+02:00", &[]),
+            None,
+        ),
+        candidate(
+            second,
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&commit('b'), "2026-10-27T10:00:00Z", &[]),
+            None,
+        ),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        partition.groups[0].basis,
+        ArtifactLinkCollisionBasisWire::DigestTieBreakUnordered
+    );
+    assert!(!partition.groups[0].ambiguity.is_empty());
+    assert_eq!(partition.groups[0].accepted.event, expected);
+}
+
+#[test]
+fn malformed_complete_history_timestamp_is_a_validation_error() {
+    let event = observation(&op('a'), "plan:202610/a.md", 1);
+    let error =
+        partition_artifact_link_collision_events(&request(vec![candidate(
+            event,
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&commit('a'), "not-an-rfc3339-time", &[]),
+            None,
+        )]))
+        .unwrap_err();
+
+    assert!(error
+        .message
+        .contains("first_commit_at must be a valid RFC 3339 timestamp"));
+}
+
+#[test]
+fn complete_group_selection_eliminates_descendants_before_time_ordering() {
+    let mut events = [
+        observation(&op('a'), "plan:202610/one.md", 1),
+        observation(&op('a'), "plan:202610/two.md", 1),
+        observation(&op('a'), "plan:202610/three.md", 1),
+    ];
+    events.sort_by_key(|event| artifact_link_event_digest(event).unwrap());
+    let a_commit = commit('a');
+    let b_commit = commit('b');
+    let c_commit = commit('c');
+    let candidates = [
+        candidate(
+            events[0].clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&a_commit, "2026-10-27T12:00:00Z", &[]),
+            Some("durable:a"),
+        ),
+        candidate(
+            events[1].clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&b_commit, "2026-10-27T11:00:00Z", &[]),
+            Some("durable:b"),
+        ),
+        candidate(
+            events[2].clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(
+                &c_commit,
+                "2026-10-27T10:00:00Z",
+                &[a_commit.as_str()],
+            ),
+            Some("durable:c"),
+        ),
+    ];
+    let expected = candidates[1].digest.clone();
+    let permutations = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let baseline = partition_artifact_link_collision_events(&request(
+        permutations[0]
+            .iter()
+            .map(|index| candidates[*index].clone())
+            .collect(),
+    ))
+    .unwrap();
+
+    assert_eq!(baseline.groups[0].accepted.digest, expected);
+    assert_eq!(
+        baseline.groups[0].basis,
+        ArtifactLinkCollisionBasisWire::HistoricalCommitTimeWins
+    );
+    let descendant = baseline.groups[0]
+        .rejected
+        .iter()
+        .find(|finding| finding.digest == candidates[2].digest)
+        .expect("the descendant candidate is rejected");
+    assert_eq!(
+        descendant.basis,
+        ArtifactLinkCollisionBasisWire::HistoricalAncestorWins
+    );
+    assert!(descendant.detail.contains("descendants are excluded"));
+    for permutation in permutations.iter().skip(1) {
+        let result = partition_artifact_link_collision_events(&request(
+            permutation
+                .iter()
+                .map(|index| candidates[*index].clone())
+                .collect(),
+        ))
+        .unwrap();
+        assert_eq!(result, baseline);
+    }
+}
+
+#[test]
+fn identical_digest_copies_keep_the_earliest_history_across_roots() {
+    let repeated = observation(&op('a'), "plan:202610/repeated.md", 1);
+    let competitor = observation(&op('a'), "plan:202610/competitor.md", 1);
+    let repeated_digest = artifact_link_event_digest(&repeated).unwrap();
+    let copies = [
+        candidate(
+            repeated.clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&commit('a'), "2026-10-27T12:00:00Z", &[]),
+            Some("durable:a-late"),
+        ),
+        candidate(
+            repeated.clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&commit('b'), "2026-10-27T10:00:00Z", &[]),
+            Some("durable:z-early"),
+        ),
+        candidate(
+            competitor,
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&commit('c'), "2026-10-27T11:00:00Z", &[]),
+            Some("durable:middle"),
+        ),
+    ];
+    let expected_orders = [[0, 1, 2], [2, 1, 0], [1, 0, 2]];
+
+    for order in expected_orders {
+        let partition = partition_artifact_link_collision_events(&request(
+            order.iter().map(|index| copies[*index].clone()).collect(),
+        ))
+        .unwrap();
+        assert_eq!(partition.groups[0].accepted.digest, repeated_digest);
+        assert_eq!(partition.groups[0].accepted.event, repeated);
+    }
+}
+
+#[test]
+fn duplicate_root_ancestry_is_retained_for_complete_group_selection() {
+    let repeated = observation(&op('a'), "plan:202610/repeated.md", 1);
+    let descendant = observation(&op('a'), "plan:202610/descendant.md", 1);
+    let repeated_digest = artifact_link_event_digest(&repeated).unwrap();
+    let later_copy_commit = commit('b');
+    let partition = partition_artifact_link_collision_events(&request(vec![
+        candidate(
+            repeated.clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&commit('a'), "2026-10-27T10:00:00Z", &[]),
+            Some("durable:z-early"),
+        ),
+        candidate(
+            repeated,
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&later_copy_commit, "2026-10-27T12:00:00Z", &[]),
+            Some("durable:a-late"),
+        ),
+        candidate(
+            descendant,
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(
+                &commit('c'),
+                "2026-10-27T09:00:00Z",
+                &[later_copy_commit.as_str()],
+            ),
+            Some("durable:descendant"),
+        ),
+    ]))
+    .unwrap();
+
+    assert_eq!(partition.groups[0].accepted.digest, repeated_digest);
+    assert_eq!(
+        partition.groups[0].rejected[0].basis,
+        ArtifactLinkCollisionBasisWire::HistoricalAncestorWins
+    );
+}
+
+#[test]
 fn missing_evidence_falls_back_to_digest_tie_break() {
     let first = observation(&op('a'), "plan:202609/a.md", 1);
     let second = observation(&op('a'), "plan:202609/b.md", 1);

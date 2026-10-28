@@ -478,13 +478,14 @@ fn artifact_link_collision_bindings_round_trip() {
         let candidate = |event: serde_json::Value,
                          canonical: &str,
                          digest: &str,
-                         tier: &str| {
+                         tier: &str,
+                         evidence: serde_json::Value| {
             json!({
                 "event": event,
                 "digest": digest,
                 "canonical_json": canonical,
                 "tier": tier,
-                "evidence": {},
+                "evidence": evidence,
                 "source_locator": format!("{tier}:root"),
             })
         };
@@ -498,12 +499,14 @@ fn artifact_link_collision_bindings_round_trip() {
                         &replay_canonical,
                         &replay_digest,
                         "incoming",
+                        json!({}),
                     ),
                     candidate(
                         durable_event.clone(),
                         &durable_canonical,
                         &durable_digest,
                         "durable",
+                        json!({}),
                     ),
                 ],
             }),
@@ -519,6 +522,102 @@ fn artifact_link_collision_bindings_round_trip() {
         assert_eq!(group["rejected"].as_array().unwrap().len(), 1);
         assert_eq!(group["accepted"]["digest"], json!(durable_digest));
         assert_eq!(group["rejected"][0]["digest"], json!(replay_digest));
+
+        let mut historical_candidates: Vec<(
+            serde_json::Value,
+            String,
+            String,
+        )> = [
+            "plan:202610/one.md",
+            "plan:202610/two.md",
+            "plan:202610/three.md",
+        ]
+        .into_iter()
+        .map(|target| {
+            let event = event(target);
+            let dict = request_dict(py, event.clone());
+            let canonical =
+                py_artifact_link_event_canonical_json(&dict).unwrap();
+            let digest = py_artifact_link_event_digest(&dict).unwrap();
+            (event, canonical, digest)
+        })
+        .collect();
+        historical_candidates.sort_by(|left, right| left.2.cmp(&right.2));
+        let first_commit = "a".repeat(40);
+        let second_commit = "b".repeat(40);
+        let third_commit = "c".repeat(40);
+        let historical_partition_request = request_dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "candidates": [
+                    candidate(
+                        historical_candidates[0].0.clone(),
+                        &historical_candidates[0].1,
+                        &historical_candidates[0].2,
+                        "durable",
+                        json!({
+                            "history_complete": true,
+                            "first_commit_id": first_commit.clone(),
+                            "first_commit_at": "2026-10-27T12:00:00Z",
+                            "ancestor_commit_ids": [],
+                        }),
+                    ),
+                    candidate(
+                        historical_candidates[1].0.clone(),
+                        &historical_candidates[1].1,
+                        &historical_candidates[1].2,
+                        "durable",
+                        json!({
+                            "history_complete": true,
+                            "first_commit_id": second_commit.clone(),
+                            "first_commit_at": "2026-10-27T11:00:00Z",
+                            "ancestor_commit_ids": [],
+                        }),
+                    ),
+                    candidate(
+                        historical_candidates[2].0.clone(),
+                        &historical_candidates[2].1,
+                        &historical_candidates[2].2,
+                        "durable",
+                        json!({
+                            "history_complete": true,
+                            "first_commit_id": third_commit.clone(),
+                            "first_commit_at": "2026-10-27T10:00:00Z",
+                            "ancestor_commit_ids": [first_commit.clone()],
+                        }),
+                    ),
+                ],
+            }),
+        );
+        let historical_partition_obj = py_artifact_link_collision_partition(
+            py,
+            &historical_partition_request,
+        )
+        .unwrap();
+        let historical_partition =
+            py_to_json_value(historical_partition_obj.bind(py)).unwrap();
+        let historical_group = &historical_partition["groups"][0];
+        assert_eq!(
+            historical_group["basis"],
+            json!("historical_commit_time_wins")
+        );
+        assert_eq!(
+            historical_group["accepted"]["digest"],
+            json!(historical_candidates[1].2)
+        );
+        let descendant_finding = historical_group["rejected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| {
+                finding["digest"] == json!(historical_candidates[2].2)
+            })
+            .expect("descendant is reported as rejected");
+        assert_eq!(
+            descendant_finding["basis"],
+            json!("historical_ancestor_wins")
+        );
 
         let path =
             py_artifact_link_quarantine_record_path(&op_id, &replay_digest)

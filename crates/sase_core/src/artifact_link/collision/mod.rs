@@ -12,6 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 
 use super::events::{
@@ -337,10 +338,10 @@ pub fn validate_artifact_link_quarantine_record(
 /// - exact retries (same digest) collapse without quarantine;
 /// - an already durable payload beats pending/incoming replays regardless of
 ///   `created_at`;
-/// - among same-tier durables, ancestry beats commit time, established
-///   evidence beats missing evidence, admission sequence orders local-only
-///   objects, and a stable digest tie-break covers only genuinely unordered
-///   candidates while reporting the ambiguity.
+/// - among same-tier candidates, established evidence beats missing evidence;
+///   for complete history, proven descendants are removed before independent
+///   first-add instants and genuinely unordered digest ties are considered;
+///   admission sequence orders local-only objects.
 ///
 /// Invalid individual events still error. Input order and repeated copies
 /// across roots do not alter the result when the same evidence is supplied.
@@ -407,8 +408,17 @@ struct ValidatedCandidate {
     digest: String,
     event: ArtifactLinkEventWire,
     tier: ArtifactLinkCollisionTierWire,
-    evidence: ArtifactLinkCollisionEvidenceWire,
+    evidence: ValidatedEvidence,
     source_locator: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ValidatedEvidence {
+    history_complete: bool,
+    first_commit_id: Option<String>,
+    first_commit_at: Option<DateTime<FixedOffset>>,
+    ancestor_commit_ids: BTreeSet<String>,
+    admission_sequence: Option<u64>,
 }
 
 fn validate_candidate(
@@ -465,7 +475,7 @@ fn validate_candidate(
 fn validate_evidence(
     label: &str,
     evidence: &ArtifactLinkCollisionEvidenceWire,
-) -> Result<ArtifactLinkCollisionEvidenceWire, ArtifactLinkError> {
+) -> Result<ValidatedEvidence, ArtifactLinkError> {
     let first_commit_id = evidence
         .first_commit_id
         .as_ref()
@@ -475,10 +485,15 @@ fn validate_evidence(
         .first_commit_at
         .as_ref()
         .map(|value| {
-            validate_single_line(
+            let value = validate_single_line(
                 &format!("{label}.evidence.first_commit_at"),
                 value,
-            )
+            )?;
+            DateTime::parse_from_rfc3339(&value).map_err(|error| {
+                ArtifactLinkError::validation(format!(
+                    "{label}.evidence.first_commit_at must be a valid RFC 3339 timestamp: {error}"
+                ))
+            })
         })
         .transpose()?;
     if evidence.history_complete
@@ -488,14 +503,20 @@ fn validate_evidence(
             "{label}.evidence.history_complete requires first_commit_id and first_commit_at"
         )));
     }
-    let mut ancestors = Vec::new();
+    let mut ancestors = BTreeSet::new();
     for value in &evidence.ancestor_commit_ids {
         ancestors
-            .push(validate_commit_id(&format!("{label}.evidence"), value)?);
+            .insert(validate_commit_id(&format!("{label}.evidence"), value)?);
     }
-    ancestors.sort();
-    ancestors.dedup();
-    Ok(ArtifactLinkCollisionEvidenceWire {
+    if first_commit_id
+        .as_ref()
+        .is_some_and(|first| ancestors.contains(first))
+    {
+        return Err(ArtifactLinkError::validation(format!(
+            "{label}.evidence.ancestor_commit_ids cannot contain first_commit_id"
+        )));
+    }
+    Ok(ValidatedEvidence {
         history_complete: evidence.history_complete,
         first_commit_id,
         first_commit_at,
@@ -529,8 +550,16 @@ struct DigestEntry {
     digest: String,
     event: ArtifactLinkEventWire,
     tier: ArtifactLinkCollisionTierWire,
-    evidence: ArtifactLinkCollisionEvidenceWire,
+    evidence: ValidatedEvidence,
+    history: Vec<HistoryEvidence>,
     source_locator: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct HistoryEvidence {
+    first_commit_id: String,
+    first_commit_at: DateTime<FixedOffset>,
+    ancestor_commit_ids: BTreeSet<String>,
 }
 
 fn decide_group(
@@ -549,7 +578,7 @@ fn decide_group(
     let mut entries: Vec<(DigestEntry, usize)> = Vec::new();
     for (digest, copies) in by_digest {
         let count = copies.len();
-        entries.push((representative_entry(digest, copies), count));
+        entries.push((representative_entry(digest, copies)?, count));
     }
     entries.sort_by(|left, right| left.0.digest.cmp(&right.0.digest));
     if entries.len() == 1 {
@@ -590,19 +619,16 @@ fn decide_group(
     }
     let plain: Vec<DigestEntry> =
         entries.into_iter().map(|(entry, _)| entry).collect();
-    let winner = select_winner(&plain);
-    let winner_entry = plain
-        .iter()
-        .find(|entry| entry.digest == winner)
-        .expect("winner digest present")
-        .clone();
+    validate_history_ancestry(&plain)?;
+    let winner_entry = select_winner(&plain).clone();
     let mut rejected = Vec::new();
     let mut group_ambiguity = BTreeSet::new();
     for entry in &plain {
         if entry.digest == winner_entry.digest {
             continue;
         }
-        let (basis, detail, ambiguity) = pairwise_basis(&winner_entry, entry);
+        let (basis, detail, ambiguity) =
+            pairwise_basis(&winner_entry, entry, &plain);
         for note in &ambiguity {
             group_ambiguity.insert(note.clone());
         }
@@ -617,14 +643,26 @@ fn decide_group(
         });
     }
     rejected.sort_by(|left, right| left.digest.cmp(&right.digest));
-    let runner_up = rejected
-        .iter()
-        .min_by(|left, right| {
-            rank_basis(left.basis).cmp(&rank_basis(right.basis))
-        })
-        .expect("at least one rejection");
-    let group_basis = runner_up.basis;
-    for note in &runner_up.ambiguity {
+    let selection_pool = selection_pool(&plain);
+    let group_decision = if selection_pool.len() > 1 {
+        let runner_up = selection_pool
+            .iter()
+            .copied()
+            .filter(|entry| entry.digest != winner_entry.digest)
+            .min_by(|left, right| compare_selection_order(left, right))
+            .expect("a selection alternative exists");
+        let (basis, _, ambiguity) =
+            pairwise_basis(&winner_entry, runner_up, &plain);
+        Some((basis, ambiguity))
+    } else {
+        rejected
+            .iter()
+            .min_by_key(|finding| rank_basis(finding.basis))
+            .map(|finding| (finding.basis, finding.ambiguity.clone()))
+    };
+    let (group_basis, group_decision_ambiguity) =
+        group_decision.expect("at least one rejection");
+    for note in &group_decision_ambiguity {
         group_ambiguity.insert(note.clone());
     }
     let mut ambiguity: Vec<String> = group_ambiguity.into_iter().collect();
@@ -656,40 +694,176 @@ fn decide_group(
 
 fn representative_entry(
     digest: String,
-    mut copies: Vec<ValidatedCandidate>,
-) -> DigestEntry {
-    copies.sort_by(|left, right| {
-        right
-            .tier
-            .rank()
-            .cmp(&left.tier.rank())
-            .then_with(|| {
-                right
-                    .evidence
-                    .history_complete
-                    .cmp(&left.evidence.history_complete)
+    copies: Vec<ValidatedCandidate>,
+) -> Result<DigestEntry, ArtifactLinkError> {
+    let best =
+        copies
+            .iter()
+            .min_by(|left, right| {
+                right.tier.rank().cmp(&left.tier.rank()).then_with(|| {
+                    left.source_locator.cmp(&right.source_locator)
+                })
             })
-            .then_with(|| {
-                rank_sequence(&left.evidence)
-                    .cmp(&rank_sequence(&right.evidence))
-            })
-            .then_with(|| left.source_locator.cmp(&right.source_locator))
-    });
-    let best = copies.into_iter().next().expect("at least one copy");
-    DigestEntry {
-        digest,
-        event: best.event,
-        tier: best.tier,
-        evidence: best.evidence,
-        source_locator: best.source_locator,
+            .expect("at least one copy");
+
+    let mut history_by_commit: BTreeMap<String, HistoryEvidence> =
+        BTreeMap::new();
+    for copy in &copies {
+        if !copy.evidence.history_complete {
+            continue;
+        }
+        let first_commit_id = copy
+            .evidence
+            .first_commit_id
+            .as_ref()
+            .expect("complete history has a commit id")
+            .clone();
+        let first_commit_at = *copy
+            .evidence
+            .first_commit_at
+            .as_ref()
+            .expect("complete history has a commit time");
+        if let Some(existing) = history_by_commit.get_mut(&first_commit_id) {
+            if compare_instants(&existing.first_commit_at, &first_commit_at)
+                != std::cmp::Ordering::Equal
+            {
+                return Err(ArtifactLinkError::validation(format!(
+                    "conflicting first_commit_at values for commit {first_commit_id}"
+                )));
+            }
+            existing
+                .ancestor_commit_ids
+                .extend(copy.evidence.ancestor_commit_ids.iter().cloned());
+        } else {
+            history_by_commit.insert(
+                first_commit_id.clone(),
+                HistoryEvidence {
+                    first_commit_id,
+                    first_commit_at,
+                    ancestor_commit_ids: copy
+                        .evidence
+                        .ancestor_commit_ids
+                        .clone(),
+                },
+            );
+        }
     }
+    let mut history: Vec<HistoryEvidence> =
+        history_by_commit.into_values().collect();
+    history.sort_by(|left, right| {
+        left.first_commit_id.cmp(&right.first_commit_id)
+    });
+    let primary_history = earliest_provable_history(&history);
+    if !history.is_empty() && primary_history.is_none() {
+        return Err(ArtifactLinkError::validation(format!(
+            "conflicting first-add ancestry evidence across copies of digest {digest}"
+        )));
+    }
+    let ancestor_commit_ids = history
+        .iter()
+        .flat_map(|entry| entry.ancestor_commit_ids.iter().cloned())
+        .collect();
+    let admission_sequence = copies
+        .iter()
+        .filter_map(|copy| copy.evidence.admission_sequence)
+        .min();
+    let evidence = ValidatedEvidence {
+        history_complete: primary_history.is_some(),
+        first_commit_id: primary_history
+            .map(|entry| entry.first_commit_id.clone()),
+        first_commit_at: primary_history.map(|entry| entry.first_commit_at),
+        ancestor_commit_ids,
+        admission_sequence,
+    };
+    Ok(DigestEntry {
+        digest,
+        event: best.event.clone(),
+        tier: best.tier,
+        evidence,
+        history,
+        source_locator: best.source_locator.clone(),
+    })
 }
 
-fn rank_sequence(evidence: &ArtifactLinkCollisionEvidenceWire) -> (u8, u64) {
-    match evidence.admission_sequence {
-        Some(sequence) => (0, sequence),
-        None => (1, u64::MAX),
+fn earliest_provable_history(
+    history: &[HistoryEvidence],
+) -> Option<&HistoryEvidence> {
+    history
+        .iter()
+        .filter(|candidate| {
+            !history.iter().any(|other| {
+                candidate.first_commit_id != other.first_commit_id
+                    && is_history_ancestor(other, candidate)
+                    && !is_history_ancestor(candidate, other)
+            })
+        })
+        .min_by(|left, right| compare_history_order(left, right))
+}
+
+fn compare_history_order(
+    left: &HistoryEvidence,
+    right: &HistoryEvidence,
+) -> std::cmp::Ordering {
+    compare_instants(&left.first_commit_at, &right.first_commit_at)
+        .then_with(|| left.first_commit_id.cmp(&right.first_commit_id))
+}
+
+fn is_history_ancestor(
+    ancestor: &HistoryEvidence,
+    descendant: &HistoryEvidence,
+) -> bool {
+    ancestor.first_commit_id != descendant.first_commit_id
+        && descendant
+            .ancestor_commit_ids
+            .contains(&ancestor.first_commit_id)
+}
+
+fn compare_instants(
+    left: &DateTime<FixedOffset>,
+    right: &DateTime<FixedOffset>,
+) -> std::cmp::Ordering {
+    left.timestamp().cmp(&right.timestamp()).then_with(|| {
+        left.timestamp_subsec_nanos()
+            .cmp(&right.timestamp_subsec_nanos())
+    })
+}
+
+fn validate_history_ancestry(
+    entries: &[DigestEntry],
+) -> Result<(), ArtifactLinkError> {
+    let history: Vec<HistoryEvidence> = entries
+        .iter()
+        .flat_map(|entry| entry.history.iter().cloned())
+        .collect();
+    if has_ancestry_cycle(&history) {
+        return Err(ArtifactLinkError::validation(
+            "conflicting first-add ancestry evidence contains a cycle",
+        ));
     }
+    Ok(())
+}
+
+fn has_ancestry_cycle(history: &[HistoryEvidence]) -> bool {
+    let mut remaining: Vec<&HistoryEvidence> = history.iter().collect();
+    while !remaining.is_empty() {
+        let roots: BTreeSet<&str> = remaining
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                !remaining.iter().any(|other| {
+                    candidate.first_commit_id != other.first_commit_id
+                        && is_history_ancestor(other, candidate)
+                })
+            })
+            .map(|entry| entry.first_commit_id.as_str())
+            .collect();
+        if roots.is_empty() {
+            return true;
+        }
+        remaining
+            .retain(|entry| !roots.contains(entry.first_commit_id.as_str()));
+    }
+    false
 }
 
 fn evidence_strength(entry: &DigestEntry) -> u8 {
@@ -705,62 +879,90 @@ fn evidence_strength(entry: &DigestEntry) -> u8 {
     }
 }
 
-fn select_winner(entries: &[DigestEntry]) -> String {
-    let mut best = &entries[0];
-    for candidate in &entries[1..] {
-        if compares_greater(candidate, best) {
-            best = candidate;
-        }
+fn selection_pool(entries: &[DigestEntry]) -> Vec<&DigestEntry> {
+    let strongest_tier = entries
+        .iter()
+        .map(|entry| entry.tier.rank())
+        .max()
+        .expect("collision group has entries");
+    let tier_entries: Vec<&DigestEntry> = entries
+        .iter()
+        .filter(|entry| entry.tier.rank() == strongest_tier)
+        .collect();
+    let strongest_evidence = tier_entries
+        .iter()
+        .map(|entry| evidence_strength(entry))
+        .max()
+        .expect("tier has entries");
+    let evidence_entries: Vec<&DigestEntry> = tier_entries
+        .into_iter()
+        .filter(|entry| evidence_strength(entry) == strongest_evidence)
+        .collect();
+    if strongest_evidence != 2 {
+        return evidence_entries;
     }
-    best.digest.clone()
+    let ancestry_minima: Vec<&DigestEntry> = evidence_entries
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            !evidence_entries.iter().any(|other| {
+                candidate.digest != other.digest
+                    && is_proven_ancestor(other, candidate)
+                    && !is_proven_ancestor(candidate, other)
+            })
+        })
+        .collect();
+    if ancestry_minima.is_empty() {
+        evidence_entries
+    } else {
+        ancestry_minima
+    }
 }
 
-fn compares_greater(left: &DigestEntry, right: &DigestEntry) -> bool {
-    if left.tier.rank() != right.tier.rank() {
-        return left.tier.rank() > right.tier.rank();
+fn select_winner(entries: &[DigestEntry]) -> &DigestEntry {
+    let pool = selection_pool(entries);
+    pool.into_iter()
+        .min_by(|left, right| compare_selection_order(left, right))
+        .expect("collision group has a selection candidate")
+}
+
+fn compare_selection_order(
+    left: &DigestEntry,
+    right: &DigestEntry,
+) -> std::cmp::Ordering {
+    let strength = evidence_strength(left);
+    if strength == 2 {
+        compare_instants(
+            left.evidence.first_commit_at.as_ref().expect("checked"),
+            right.evidence.first_commit_at.as_ref().expect("checked"),
+        )
+        .then_with(|| left.digest.cmp(&right.digest))
+    } else if strength == 1 {
+        left.evidence
+            .admission_sequence
+            .expect("checked")
+            .cmp(&right.evidence.admission_sequence.expect("checked"))
+            .then_with(|| left.digest.cmp(&right.digest))
+    } else {
+        left.digest.cmp(&right.digest)
     }
-    let left_strength = evidence_strength(left);
-    let right_strength = evidence_strength(right);
-    if left_strength != right_strength {
-        return left_strength > right_strength;
-    }
-    if left_strength == 2 {
-        let left_commit =
-            left.evidence.first_commit_id.as_ref().expect("checked");
-        let right_commit =
-            right.evidence.first_commit_id.as_ref().expect("checked");
-        let left_ancestors: BTreeSet<&String> =
-            left.evidence.ancestor_commit_ids.iter().collect();
-        let right_ancestors: BTreeSet<&String> =
-            right.evidence.ancestor_commit_ids.iter().collect();
-        let left_is_ancestor = right_ancestors.contains(left_commit);
-        let right_is_ancestor = left_ancestors.contains(right_commit);
-        if left_is_ancestor != right_is_ancestor {
-            return left_is_ancestor;
-        }
-        let left_at = left.evidence.first_commit_at.as_ref().expect("checked");
-        let right_at =
-            right.evidence.first_commit_at.as_ref().expect("checked");
-        if left_at != right_at {
-            return left_at < right_at;
-        }
-        return left.digest < right.digest;
-    }
-    if left_strength == 1 {
-        let left_sequence = left.evidence.admission_sequence.expect("checked");
-        let right_sequence =
-            right.evidence.admission_sequence.expect("checked");
-        if left_sequence != right_sequence {
-            return left_sequence < right_sequence;
-        }
-        return left.digest < right.digest;
-    }
-    left.digest < right.digest
+}
+
+fn is_proven_ancestor(
+    ancestor: &DigestEntry,
+    descendant: &DigestEntry,
+) -> bool {
+    ancestor.history.iter().any(|ancestor_evidence| {
+        descendant.history.iter().any(|descendant_evidence| {
+            is_history_ancestor(ancestor_evidence, descendant_evidence)
+        })
+    })
 }
 
 fn pairwise_basis(
     winner: &DigestEntry,
     loser: &DigestEntry,
+    entries: &[DigestEntry],
 ) -> (ArtifactLinkCollisionBasisWire, String, Vec<String>) {
     if winner.tier.rank() != loser.tier.rank() {
         let basis = match (winner.tier, loser.tier) {
@@ -808,22 +1010,22 @@ fn pairwise_basis(
         );
     }
     if winner_strength == 2 {
-        let winner_commit =
-            winner.evidence.first_commit_id.as_ref().expect("checked");
-        let loser_commit =
-            loser.evidence.first_commit_id.as_ref().expect("checked");
-        let winner_ancestors: BTreeSet<&String> =
-            winner.evidence.ancestor_commit_ids.iter().collect();
-        let loser_ancestors: BTreeSet<&String> =
-            loser.evidence.ancestor_commit_ids.iter().collect();
-        if loser_ancestors.contains(winner_commit)
-            && !winner_ancestors.contains(loser_commit)
+        if let Some(ancestor) = entries
+            .iter()
+            .filter(|entry| {
+                entry.digest != loser.digest
+                    && entry.tier == loser.tier
+                    && evidence_strength(entry) == loser_strength
+                    && is_proven_ancestor(entry, loser)
+                    && !is_proven_ancestor(loser, entry)
+            })
+            .min_by(|left, right| left.digest.cmp(&right.digest))
         {
             return (
                 ArtifactLinkCollisionBasisWire::HistoricalAncestorWins,
                 format!(
-                    "first-add ancestor {} wins over descendant {}",
-                    winner.digest, loser.digest,
+                    "first-add ancestor {} proves digest {} is a later replay; descendants are excluded before selecting {} from the complete history group",
+                    ancestor.digest, loser.digest, winner.digest,
                 ),
                 Vec::new(),
             );
@@ -832,15 +1034,28 @@ fn pairwise_basis(
             winner.evidence.first_commit_at.as_ref().expect("checked");
         let loser_at =
             loser.evidence.first_commit_at.as_ref().expect("checked");
-        if winner_at != loser_at {
-            return (
-                ArtifactLinkCollisionBasisWire::HistoricalCommitTimeWins,
-                format!(
-                    "earlier first-add {} wins over {}",
-                    winner.digest, loser.digest,
-                ),
-                Vec::new(),
-            );
+        match compare_instants(winner_at, loser_at) {
+            std::cmp::Ordering::Less => {
+                return (
+                    ArtifactLinkCollisionBasisWire::HistoricalCommitTimeWins,
+                    format!(
+                        "earlier first-add {} wins over {}",
+                        winner.digest, loser.digest,
+                    ),
+                    Vec::new(),
+                );
+            }
+            std::cmp::Ordering::Greater => {
+                return (
+                    ArtifactLinkCollisionBasisWire::HistoricalAncestorWins,
+                    format!(
+                        "complete-group ancestry and time ordering selects {} over {}",
+                        winner.digest, loser.digest,
+                    ),
+                    Vec::new(),
+                );
+            }
+            std::cmp::Ordering::Equal => {}
         }
         return (
             ArtifactLinkCollisionBasisWire::DigestTieBreakUnordered,
