@@ -1,6 +1,7 @@
 //! First-class artifact link graph: row schema, relation registry, managed
 //! tables, companion paths, and frontmatter inlet.
 
+mod collision;
 mod cutover;
 mod events;
 mod index;
@@ -14,6 +15,20 @@ mod relation;
 mod row_resolution;
 mod wire;
 
+pub use collision::{
+    artifact_link_quarantine_record_canonical_json,
+    artifact_link_quarantine_record_path,
+    partition_artifact_link_collision_events,
+    validate_artifact_link_quarantine_record, ArtifactLinkCollisionBasisWire,
+    ArtifactLinkCollisionCandidateWire, ArtifactLinkCollisionEvidenceWire,
+    ArtifactLinkCollisionFindingWire, ArtifactLinkCollisionGroupWire,
+    ArtifactLinkCollisionOutcomeWire, ArtifactLinkCollisionPartitionWire,
+    ArtifactLinkCollisionRequestWire, ArtifactLinkCollisionTierWire,
+    ArtifactLinkQuarantineRecordWire,
+    ARTIFACT_LINK_COLLISION_WIRE_SCHEMA_VERSION,
+    ARTIFACT_LINK_QUARANTINE_PATH_PREFIX,
+    ARTIFACT_LINK_QUARANTINE_WIRE_SCHEMA_VERSION,
+};
 pub use cutover::{
     artifact_link_cutover_attestation, artifact_link_cutover_baseline_event,
     artifact_link_cutover_import_identity, artifact_link_cutover_marker,

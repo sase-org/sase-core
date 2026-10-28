@@ -419,3 +419,138 @@ fn artifact_link_index_binding_preserves_tolerant_read_model_coercions() {
         assert_eq!(projected["edges"][1]["uses"], json!(5000));
     });
 }
+
+#[test]
+fn artifact_link_collision_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        for name in [
+            "artifact_link_collision_wire_schema_version",
+            "artifact_link_quarantine_wire_schema_version",
+            "artifact_link_collision_partition",
+            "artifact_link_quarantine_record_path",
+            "artifact_link_quarantine_record_canonical_json",
+            "artifact_link_quarantine_record_validate",
+        ] {
+            assert!(module.getattr(name).is_ok(), "missing {name}");
+        }
+        assert_eq!(py_artifact_link_collision_wire_schema_version(), 1);
+        assert_eq!(py_artifact_link_quarantine_wire_schema_version(), 1);
+
+        let op_id = "a".repeat(32);
+        let event = |target: &str| {
+            json!({
+                "schema_version": 1,
+                "project_key": "gh_acme__widget",
+                "operation_id": op_id,
+                "created_by": "agent:reader",
+                "origin": "read",
+                "created_at": "2026-09-09T12:00:00Z",
+                "kind": {
+                    "type": "observation",
+                    "edge": {
+                        "kind": "directed",
+                        "source_ref": "agent:reader",
+                        "relation": "read",
+                        "target_ref": target,
+                    },
+                    "description": "read the artifact",
+                    "occurrences": 1,
+                },
+            })
+        };
+        let durable_event = event("plan:202609/a.md");
+        let replay_event = event("plan:202609/b.md");
+        let durable_dict = request_dict(py, durable_event.clone());
+        let replay_dict = request_dict(py, replay_event.clone());
+        let durable_canonical =
+            py_artifact_link_event_canonical_json(&durable_dict).unwrap();
+        let replay_canonical =
+            py_artifact_link_event_canonical_json(&replay_dict).unwrap();
+        let durable_digest =
+            py_artifact_link_event_digest(&durable_dict).unwrap();
+        let replay_digest =
+            py_artifact_link_event_digest(&replay_dict).unwrap();
+        assert_ne!(durable_digest, replay_digest);
+
+        let candidate = |event: serde_json::Value,
+                         canonical: &str,
+                         digest: &str,
+                         tier: &str| {
+            json!({
+                "event": event,
+                "digest": digest,
+                "canonical_json": canonical,
+                "tier": tier,
+                "evidence": {},
+                "source_locator": format!("{tier}:root"),
+            })
+        };
+        let partition_request = request_dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "candidates": [
+                    candidate(
+                        replay_event.clone(),
+                        &replay_canonical,
+                        &replay_digest,
+                        "incoming",
+                    ),
+                    candidate(
+                        durable_event.clone(),
+                        &durable_canonical,
+                        &durable_digest,
+                        "durable",
+                    ),
+                ],
+            }),
+        );
+        let partition_obj =
+            py_artifact_link_collision_partition(py, &partition_request)
+                .unwrap();
+        let partition = py_to_json_value(partition_obj.bind(py)).unwrap();
+        assert_eq!(partition["schema_version"], json!(1));
+        assert_eq!(partition["groups"].as_array().unwrap().len(), 1);
+        let group = &partition["groups"][0];
+        assert_eq!(group["basis"], json!("durable_beats_incoming"));
+        assert_eq!(group["rejected"].as_array().unwrap().len(), 1);
+        assert_eq!(group["accepted"]["digest"], json!(durable_digest));
+        assert_eq!(group["rejected"][0]["digest"], json!(replay_digest));
+
+        let path =
+            py_artifact_link_quarantine_record_path(&op_id, &replay_digest)
+                .unwrap();
+        assert_eq!(
+            path,
+            format!("link-events/quarantine/v1/{op_id}/{replay_digest}.json")
+        );
+
+        let record = request_dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "project_key": "gh_acme__widget",
+                "operation_id": op_id,
+                "accepted_digest": durable_digest,
+                "rejected_digest": replay_digest,
+                "rejected_event": replay_event,
+                "rejected_canonical_json": replay_canonical,
+                "selection_basis": "durable_beats_incoming",
+                "ambiguity": [],
+                "source_locator": "incoming:root",
+                "detail": "durable beats incoming",
+            }),
+        );
+        let validated_obj =
+            py_artifact_link_quarantine_record_validate(py, &record).unwrap();
+        let validated = py_to_json_value(validated_obj.bind(py)).unwrap();
+        assert_eq!(validated["rejected_digest"], json!(replay_digest));
+        let canonical =
+            py_artifact_link_quarantine_record_canonical_json(&record).unwrap();
+        assert!(canonical.ends_with('\n'));
+        assert!(canonical.contains(&replay_digest));
+    });
+}

@@ -798,6 +798,95 @@ pub(crate) fn py_artifact_link_events_reduce(
     json_value_to_py(py, &value)
 }
 
+/// Return the collision partition wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_link_collision_wire_schema_version")]
+pub(crate) fn py_artifact_link_collision_wire_schema_version() -> u64 {
+    ARTIFACT_LINK_COLLISION_WIRE_SCHEMA_VERSION
+}
+
+/// Return the quarantine record wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_link_quarantine_wire_schema_version")]
+pub(crate) fn py_artifact_link_quarantine_wire_schema_version() -> u64 {
+    ARTIFACT_LINK_QUARANTINE_WIRE_SCHEMA_VERSION
+}
+
+/// Partition collision candidates into accepted payloads and quarantine findings.
+#[pyfunction]
+#[pyo3(name = "artifact_link_collision_partition")]
+pub(crate) fn py_artifact_link_collision_partition(
+    py: Python<'_>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ArtifactLinkCollisionRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid ArtifactLinkCollisionRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    let partition = core_partition_artifact_link_collision_events(&request)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(partition).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the persisted path for one quarantine record.
+#[pyfunction]
+#[pyo3(name = "artifact_link_quarantine_record_path")]
+pub(crate) fn py_artifact_link_quarantine_record_path(
+    operation_id: &str,
+    rejected_digest: &str,
+) -> PyResult<String> {
+    core_artifact_link_quarantine_record_path(operation_id, rejected_digest)
+        .map_err(artifact_link_error_to_pyerr)
+}
+
+/// Return canonical JSON for one quarantine record.
+#[pyfunction]
+#[pyo3(name = "artifact_link_quarantine_record_canonical_json")]
+pub(crate) fn py_artifact_link_quarantine_record_canonical_json(
+    record: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let record: ArtifactLinkQuarantineRecordWire = serde_json::from_value(
+        py_to_json_value(record.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "record is not a valid ArtifactLinkQuarantineRecordWire dict: {error}"
+        ))
+    })?;
+    core_artifact_link_quarantine_record_canonical_json(&record)
+        .map_err(artifact_link_error_to_pyerr)
+}
+
+/// Validate one quarantine record and return its canonical form.
+#[pyfunction]
+#[pyo3(name = "artifact_link_quarantine_record_validate")]
+pub(crate) fn py_artifact_link_quarantine_record_validate(
+    py: Python<'_>,
+    record: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let record: ArtifactLinkQuarantineRecordWire = serde_json::from_value(
+        py_to_json_value(record.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "record is not a valid ArtifactLinkQuarantineRecordWire dict: {error}"
+        ))
+    })?;
+    let validated = core_validate_artifact_link_quarantine_record(&record)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(validated).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Split an artifact-link ref string into canonical kind and payload.
 #[pyfunction]
 #[pyo3(name = "artifact_link_ref_parts")]
@@ -1349,6 +1438,27 @@ pub(crate) fn register_artifact_links(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_events_reduce, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_collision_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_quarantine_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_collision_partition, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_quarantine_record_path,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_quarantine_record_canonical_json,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_quarantine_record_validate,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_ref_parts, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_row_index_keys, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_row_ref_lookup_keys, m)?)?;
