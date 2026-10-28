@@ -10,7 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::super::catalog::parse_day;
 use super::super::store::{
     bounded_busy_timeout, meta_get, meta_get_u64, open_read_store,
-    open_write_store,
+    open_write_store, table_exists,
 };
 use super::super::wire::{
     ns_of, require_member, surface_for_ns, ActorUsesWire, AreaRowWire,
@@ -19,6 +19,10 @@ use super::super::wire::{
     SURFACES,
 };
 use super::super::FootprintError;
+use super::merge::{
+    load_imported, merge_feature_week_days, merge_surface_days,
+    overlapping_weeks, ImportedData, LocalFeatureDays,
+};
 use super::overlay::OverlayIndex;
 
 const NS_ORDER: &[&str] = &[
@@ -89,6 +93,13 @@ impl Lens {
             "coverage" => Self::Coverage,
             _ => Self::Decisions,
         })
+    }
+
+    fn merges_usage(self) -> bool {
+        matches!(
+            self,
+            Self::Map | Self::Cold | Self::Fading | Self::AgentOnly | Self::Hot
+        )
     }
 }
 
@@ -162,6 +173,10 @@ pub(crate) struct FeatureStats {
     pub via_other: i64,
     pub n_total: i64,
     pub n_friction: i64,
+    pub days_scope_count: u32,
+    pub days_human_count: u32,
+    pub days_agent_count: u32,
+    pub days_anyone_count: u32,
     pub state: String,
     pub coverage_incomplete: bool,
     pub protected: Option<String>,
@@ -174,7 +189,7 @@ pub(crate) struct FeatureStats {
 
 impl FeatureStats {
     fn days_used(&self) -> u32 {
-        self.days_scope.len() as u32
+        self.days_scope_count
     }
 
     fn uses_anyone(&self) -> i64 {
@@ -185,7 +200,7 @@ impl FeatureStats {
     }
 
     fn is_agent_only(&self) -> bool {
-        !self.days_agent.is_empty() && self.days_human.is_empty()
+        self.days_agent_count > 0 && self.days_human_count == 0
     }
 
     fn snooze_expired(&self, today: &str) -> bool {
@@ -232,6 +247,9 @@ pub(crate) struct Engine {
     pub generation: u64,
     pub recording_since: Option<String>,
     pub imported_pack_count: u64,
+    pub imported_day: Option<String>,
+    pub merged_observed: BTreeMap<String, u32>,
+    pub merged_gate: BTreeMap<String, u32>,
     pub latest_catalog_day: Option<String>,
     stats: BTreeMap<String, FeatureStats>,
     reviews: Vec<ReviewRec>,
@@ -266,7 +284,7 @@ impl Engine {
         let recording_since = meta_get(&conn, "first_record_day")?;
         let generation = meta_get_u64(&conn, "generation")?;
         let latest_catalog_day = latest_catalog_day(&conn)?;
-        let imported_pack_count = imported_pack_count(&conn)?;
+        let imported = load_imported(&conn)?;
         let window_start = window_start(
             request.window_days,
             today,
@@ -304,7 +322,10 @@ impl Engine {
             overlay,
             generation,
             recording_since,
-            imported_pack_count,
+            imported_pack_count: imported.pack_count,
+            imported_day: imported.imported_day.clone(),
+            merged_observed: BTreeMap::new(),
+            merged_gate: BTreeMap::new(),
             latest_catalog_day,
             stats: BTreeMap::new(),
             reviews,
@@ -315,6 +336,7 @@ impl Engine {
             daily,
         };
         engine.build_stats(features);
+        engine.apply_imports(&imported);
         Ok(engine)
     }
 
@@ -342,6 +364,9 @@ impl Engine {
             generation: 0,
             recording_since: None,
             imported_pack_count: 0,
+            imported_day: None,
+            merged_observed: BTreeMap::new(),
+            merged_gate: BTreeMap::new(),
             latest_catalog_day: None,
             stats: BTreeMap::new(),
             reviews: Vec::new(),
@@ -446,15 +471,21 @@ impl Engine {
                 }
             }
             finish_last_used(entry, &self.daily, self.actor_scope);
+            entry.days_scope_count = entry.days_scope.len() as u32;
+            entry.days_human_count = entry.days_human.len() as u32;
+            entry.days_agent_count = entry.days_agent.len() as u32;
+            entry.days_anyone_count = entry.days_anyone.len() as u32;
             let surface = surface_for_ns(&entry.ns).unwrap_or("cli");
             entry.coverage_incomplete = incomplete.contains(surface);
+            let measured_any =
+                measured.get(surface).is_some_and(|set| !set.is_empty());
             entry.state = evidence_state(
                 entry,
                 &today_s,
                 latest.as_deref(),
                 min_catalog,
                 min_active,
-                measured.get(surface),
+                measured_any,
                 gate_days.get(surface).copied().unwrap_or(0),
             );
             assert!(
@@ -469,18 +500,24 @@ impl Engine {
     pub(crate) fn header(&self) -> ReportHeaderWire {
         let mut observed = BTreeMap::new();
         for surface in SURFACES {
-            let days = self
-                .active_days
-                .get(*surface)
-                .map(|set| set.len() as u32)
-                .unwrap_or(0);
+            let days = if self.merged_observed.is_empty() {
+                self.active_days
+                    .get(*surface)
+                    .map(|set| set.len() as u32)
+                    .unwrap_or(0)
+            } else {
+                self.merged_observed.get(*surface).copied().unwrap_or(0)
+            };
             observed.insert((*surface).to_string(), days);
         }
+        let gate_source = if self.merged_gate.is_empty() {
+            &self.gate_active_days
+        } else {
+            &self.merged_gate
+        };
         let live_progress = ["cli", "tui"]
             .iter()
-            .map(|surface| {
-                self.gate_active_days.get(*surface).copied().unwrap_or(0)
-            })
+            .map(|surface| gate_source.get(*surface).copied().unwrap_or(0))
             .max()
             .unwrap_or(0);
         ReportHeaderWire {
@@ -495,6 +532,7 @@ impl Engine {
             gate_met: live_progress >= self.min_active_days,
             generation: self.generation,
             imported_pack_count: self.imported_pack_count,
+            imported_day: self.imported_day.clone(),
         }
     }
 
@@ -772,9 +810,8 @@ impl Engine {
                 .cmp(&right.last_used_day)
                 .then(left.id.cmp(&right.id)),
             Lens::AgentOnly => right
-                .days_agent
-                .len()
-                .cmp(&left.days_agent.len())
+                .days_agent_count
+                .cmp(&left.days_agent_count)
                 .then(left.id.cmp(&right.id)),
             Lens::DeadPaths => self
                 .parent_days(right)
@@ -824,6 +861,93 @@ impl Engine {
             None
         }
     }
+
+    fn apply_imports(&mut self, imported: &ImportedData) {
+        let weeks = overlapping_weeks(imported, self.window_start, self.today);
+        self.merged_observed = merge_surface_days(
+            &self.active_days,
+            imported,
+            &weeks,
+            self.window_start,
+            self.today,
+        );
+        self.merged_gate = merge_surface_days(
+            &self.active_days,
+            imported,
+            &weeks,
+            self.window_start,
+            self.today,
+        );
+        if imported.pack_count == 0 || !self.lens.merges_usage() {
+            return;
+        }
+        let ids: Vec<String> = self.stats.keys().cloned().collect();
+        for id in ids {
+            let Some(entry) = self.stats.get(&id) else {
+                continue;
+            };
+            let merged = merge_feature_week_days(
+                LocalFeatureDays {
+                    human: &entry.days_human,
+                    agent: &entry.days_agent,
+                    scope: &entry.days_scope,
+                    anyone: &entry.days_anyone,
+                },
+                &id,
+                &self.actor,
+                imported,
+                &weeks,
+                self.window_start,
+                self.today,
+            );
+            let Some(entry) = self.stats.get_mut(&id) else {
+                continue;
+            };
+            entry.days_scope_count = merged.scope;
+            entry.days_human_count = merged.human;
+            entry.days_agent_count = merged.agent;
+            entry.days_anyone_count = merged.anyone;
+            for (actor, n) in merged.extra_uses {
+                add_uses(&mut entry.uses, &actor, n);
+            }
+            if let Some((day, actor)) = merged.last_used {
+                let better = match entry.last_used_day.as_deref() {
+                    None => true,
+                    Some(existing) => day.as_str() > existing,
+                };
+                if better {
+                    entry.last_used_day = Some(day);
+                    entry.last_used_actor = Some(actor);
+                }
+            }
+        }
+        let today_s = self.today_s.clone();
+        let latest = self.latest_catalog_day.clone();
+        let min_catalog = self.min_catalog_days;
+        let min_active = self.min_active_days;
+        let incomplete = incomplete_surfaces(&self.coverage_rows);
+        for entry in self.stats.values_mut() {
+            let surface = surface_for_ns(&entry.ns).unwrap_or("cli");
+            let measured_any =
+                self.merged_observed.get(surface).copied().unwrap_or(0) > 0
+                    || self
+                        .measured_days
+                        .get(surface)
+                        .is_some_and(|set| !set.is_empty());
+            let gate_active =
+                self.merged_gate.get(surface).copied().unwrap_or(0);
+            entry.coverage_incomplete = incomplete.contains(surface);
+            entry.state = evidence_state(
+                entry,
+                &today_s,
+                latest.as_deref(),
+                min_catalog,
+                min_active,
+                measured_any,
+                gate_active,
+            );
+        }
+    }
 }
 
 pub(crate) fn feature_row(stats: &FeatureStats) -> FeatureRowWire {
@@ -869,7 +993,7 @@ fn evidence_state(
     latest_catalog_day: Option<&str>,
     min_catalog_days: u32,
     min_active_days: u32,
-    measured: Option<&BTreeSet<String>>,
+    measured_any: bool,
     gate_active: u32,
 ) -> String {
     let retired = match (row.last_in_catalog.as_deref(), latest_catalog_day) {
@@ -880,11 +1004,10 @@ fn evidence_state(
     if retired {
         return "retired".to_string();
     }
-    let measured_any = measured.is_some_and(|set| !set.is_empty());
     if !measured_any {
         return "not_measured".to_string();
     }
-    if !row.days_scope.is_empty() {
+    if row.days_scope_count > 0 {
         return "used".to_string();
     }
     if row.protected.is_some() {
@@ -968,7 +1091,7 @@ fn ns_rank(ns: &str) -> usize {
     NS_ORDER.iter().position(|item| *item == ns).unwrap_or(99)
 }
 
-fn add_uses(uses: &mut ActorUsesWire, actor: &str, n: i64) {
+pub(crate) fn add_uses(uses: &mut ActorUsesWire, actor: &str, n: i64) {
     match actor {
         "human" => uses.human += n,
         "agent" => uses.agent += n,
@@ -1138,34 +1261,6 @@ fn latest_catalog_day(
     )
     .optional()
     .map_err(FootprintError::from_sqlite)
-}
-
-fn imported_pack_count(conn: &Connection) -> Result<u64, FootprintError> {
-    let exists: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'import_packs'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(FootprintError::from_sqlite)?;
-    if exists.is_none() {
-        return Ok(0);
-    }
-    conn.query_row("SELECT COUNT(*) FROM import_packs", [], |row| row.get(0))
-        .map_err(FootprintError::from_sqlite)
-}
-
-fn table_exists(conn: &Connection, name: &str) -> Result<bool, FootprintError> {
-    let exists: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            params![name],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(FootprintError::from_sqlite)?;
-    Ok(exists.is_some())
 }
 
 fn load_features(conn: &Connection) -> Result<Vec<FeatureRec>, FootprintError> {

@@ -2,6 +2,7 @@
 
 mod decide;
 mod engine;
+mod merge;
 mod overlay;
 mod report;
 

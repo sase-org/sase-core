@@ -3,12 +3,15 @@
 
 mod catalog;
 mod derived;
+mod export;
 mod fold;
+mod import;
 mod maintenance;
 mod query;
 mod spool;
 mod status;
 mod store;
+mod week;
 mod wire;
 
 pub use catalog::{
@@ -16,7 +19,9 @@ pub use catalog::{
     validate_overlay_shape, CatalogFile,
 };
 pub use derived::upsert_derived;
+pub use export::export;
 pub use fold::fold;
+pub use import::import;
 pub use maintenance::{clear, prune};
 pub use query::{card, decide, report};
 pub use spool::{
@@ -31,9 +36,12 @@ pub use store::{
 pub use wire::{
     footprint_wire_schema_version, CardWire, ClearResultWire, CoverageRowWire,
     DecideResultWire, DerivedCoverageRowWire, DerivedDailyRowWire,
-    FoldResultWire, FootprintError, PruneResultWire, QueryRequestWire,
-    ReportWire, SpoolPendingWire, StatusWire, FOOTPRINT_WIRE_SCHEMA_VERSION,
+    ExportRequestWire, FoldResultWire, FootprintError, ImportResultWire,
+    PackFeatureWire, PackWire, PruneResultWire, QueryRequestWire, ReportWire,
+    SpoolPendingWire, StatusWire, FOOTPRINT_WIRE_SCHEMA_VERSION,
 };
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transfer_tests;

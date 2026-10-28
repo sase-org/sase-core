@@ -64,6 +64,9 @@ pub fn clear(
         "catalog_revs",
         "fold_checkpoints",
         "reviews",
+        "import_packs",
+        "imported_weekly",
+        "imported_observed",
     ] {
         tx.execute(&format!("DELETE FROM {table}"), [])
             .map_err(FootprintError::from_sqlite)?;

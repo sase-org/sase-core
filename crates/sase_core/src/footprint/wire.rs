@@ -104,6 +104,21 @@ pub const REVIEW_DECISIONS: &[&str] = &["keep", "later", "cut"];
 /// Catalog JSONL schema identifier.
 pub const CATALOG_SCHEMA: &str = "sase.footprint.catalog/1";
 
+/// Weekly export-pack schema identifier.
+pub const EXPORT_SCHEMA: &str = "sase.footprint.export/1";
+
+/// Closed OS vocabulary on export packs.
+pub const EXPORT_OS: &[&str] = &["linux", "darwin"];
+
+/// Count buckets on export packs (nonzero rows only).
+pub const N_BUCKETS: &[&str] = &["1", "2-5", "6-20", "21+"];
+
+/// ISO week label `YYYY-Www`.
+pub const ISO_WEEK_PATTERN: &str = r"^[0-9]{4}-W[0-9]{2}$";
+
+/// `sase` field on an export pack: major.minor only.
+pub const EXPORT_SASE_PATTERN: &str = r"^[0-9]+\.[0-9]+$";
+
 /// Overlay schema identifier.
 pub const OVERLAY_SCHEMA: &str = "sase.footprint.overlay/1";
 
@@ -363,6 +378,8 @@ pub struct ReportHeaderWire {
     pub gate_met: bool,
     pub generation: u64,
     pub imported_pack_count: u64,
+    #[serde(default)]
+    pub imported_day: Option<String>,
 }
 
 /// Summary tiles on a report.
@@ -502,6 +519,51 @@ pub struct DecideResultWire {
     pub reason: Option<String>,
     pub decided_day: Option<String>,
     pub snooze_until: Option<String>,
+}
+
+/// Request for `footprint_export`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportRequestWire {
+    pub store_path: String,
+    pub today: String,
+    #[serde(default)]
+    pub weeks: Option<u32>,
+    pub sase: String,
+    pub os: String,
+}
+
+/// One feature row inside an export pack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackFeatureWire {
+    pub id: String,
+    pub actor: String,
+    pub days: u32,
+    pub n: String,
+}
+
+/// One identity-free weekly export pack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackWire {
+    pub schema: String,
+    pub nonce: String,
+    pub week: String,
+    pub sase: String,
+    pub os: String,
+    pub observed: BTreeMap<String, u32>,
+    pub features: Vec<PackFeatureWire>,
+    pub not_measured: Vec<String>,
+}
+
+/// Result of `footprint_import`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportResultWire {
+    pub schema_version: u32,
+    pub packs_imported: u64,
+    pub packs_deduped: u64,
+    pub feature_rows: u64,
+    pub dry_run: bool,
 }
 
 pub(crate) fn require_member(

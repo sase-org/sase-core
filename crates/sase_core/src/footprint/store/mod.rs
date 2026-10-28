@@ -85,6 +85,27 @@ CREATE TABLE IF NOT EXISTS reviews (
     decided_day TEXT NOT NULL,
     snooze_until TEXT
 );
+CREATE TABLE IF NOT EXISTS import_packs (
+    nonce TEXT PRIMARY KEY,
+    week TEXT NOT NULL,
+    imported_day TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS imported_weekly (
+    nonce TEXT NOT NULL,
+    week TEXT NOT NULL,
+    feature_id TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    days INTEGER NOT NULL,
+    n_bucket TEXT NOT NULL,
+    PRIMARY KEY (nonce, week, feature_id, actor)
+);
+CREATE TABLE IF NOT EXISTS imported_observed (
+    nonce TEXT NOT NULL,
+    week TEXT NOT NULL,
+    surface TEXT NOT NULL,
+    days INTEGER NOT NULL,
+    PRIMARY KEY (nonce, week, surface)
+);
 CREATE INDEX IF NOT EXISTS idx_footprint_daily_day ON daily(day);
 CREATE INDEX IF NOT EXISTS idx_footprint_daily_feature
     ON daily(feature_id, day);
@@ -162,6 +183,12 @@ pub const SCHEMA_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "snooze_until",
         ],
     ),
+    ("import_packs", &["nonce", "week", "imported_day"]),
+    (
+        "imported_weekly",
+        &["nonce", "week", "feature_id", "actor", "days", "n_bucket"],
+    ),
+    ("imported_observed", &["nonce", "week", "surface", "days"]),
 ];
 
 #[cfg(test)]
@@ -333,6 +360,22 @@ pub(crate) fn meta_set(
     )
     .map_err(FootprintError::from_sqlite)?;
     Ok(())
+}
+
+/// True when `name` is a table in this connection.
+pub(crate) fn table_exists(
+    conn: &Connection,
+    name: &str,
+) -> Result<bool, FootprintError> {
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(FootprintError::from_sqlite)?;
+    Ok(exists.is_some())
 }
 
 /// Return live column names for `table`, ordered by cid.

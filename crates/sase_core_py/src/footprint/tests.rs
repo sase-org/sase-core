@@ -134,6 +134,30 @@ fn footprint_bindings_round_trip() {
         let decided = py_to_json_value(decided.bind(py)).unwrap();
         assert_eq!(decided["decision"], json!("keep"));
 
+        let export_request = PyDict::new_bound(py);
+        export_request
+            .set_item("store_path", store.to_str().unwrap())
+            .unwrap();
+        export_request.set_item("today", "2026-10-27").unwrap();
+        export_request.set_item("sase", "0.18.1").unwrap();
+        export_request.set_item("os", "linux").unwrap();
+        let exported = py_footprint_export(py, &export_request, 5_000).unwrap();
+        let exported = py_to_json_value(exported.bind(py)).unwrap();
+        assert!(exported.as_array().unwrap().len() <= 1);
+
+        let packs = PyList::empty_bound(py);
+        let imported = py_footprint_import(
+            py,
+            store.to_str().unwrap(),
+            &packs,
+            "2026-10-27",
+            true,
+            5_000,
+        )
+        .unwrap();
+        let imported = py_to_json_value(imported.bind(py)).unwrap();
+        assert_eq!(imported["dry_run"], json!(true));
+
         let cleared = py_footprint_clear(
             py,
             store.to_str().unwrap(),

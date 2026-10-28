@@ -10,14 +10,14 @@ use pyo3::types::PyList;
 use pyo3::wrap_pyfunction;
 use sase_core::footprint::{
     card as core_card, catalog_status as core_catalog_status,
-    clear as core_clear, decide as core_decide, fold as core_fold,
-    footprint_wire_schema_version as core_wire_version,
-    ingest_catalog as core_ingest_catalog, prune as core_prune,
-    report as core_report, status as core_status,
+    clear as core_clear, decide as core_decide, export as core_export,
+    fold as core_fold, footprint_wire_schema_version as core_wire_version,
+    import as core_import, ingest_catalog as core_ingest_catalog,
+    prune as core_prune, report as core_report, status as core_status,
     upsert_derived as core_upsert_derived,
     validate_overlay_shape as core_validate_overlay_shape,
-    DerivedCoverageRowWire, DerivedDailyRowWire, FootprintError,
-    QueryRequestWire,
+    DerivedCoverageRowWire, DerivedDailyRowWire, ExportRequestWire,
+    FootprintError, PackWire, QueryRequestWire,
 };
 
 fn footprint_error(error: FootprintError) -> PyErr {
@@ -387,6 +387,70 @@ fn py_footprint_decide<'py>(
     serialize_to_py(py, &result)
 }
 
+/// Project complete ISO weeks into identity-free export packs.
+#[pyfunction]
+#[pyo3(
+    name = "footprint_export",
+    signature = (request, busy_timeout_ms=250)
+)]
+fn py_footprint_export<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: ExportRequestWire =
+        serde_json::from_value(value).map_err(|error| {
+            PyValueError::new_err(format!(
+                "request is not a valid ExportRequestWire dict: {error}"
+            ))
+        })?;
+    let result = py
+        .allow_threads(|| {
+            core_export(&request, Duration::from_millis(busy_timeout_ms))
+        })
+        .map_err(footprint_error)?;
+    serialize_to_py(py, &result)
+}
+
+/// Replace imported weekly tables with the given packs.
+#[pyfunction]
+#[pyo3(
+    name = "footprint_import",
+    signature = (store_path, packs, today, dry_run=false, busy_timeout_ms=250)
+)]
+fn py_footprint_import<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    packs: &Bound<'py, PyList>,
+    today: &str,
+    dry_run: bool,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let packs: Vec<PackWire> = serde_json::from_value(py_to_json_value(
+        packs.as_any(),
+    )?)
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "packs is not a valid PackWire list: {error}"
+        ))
+    })?;
+    let store_path = PathBuf::from(store_path);
+    let today = today.to_string();
+    let result = py
+        .allow_threads(|| {
+            core_import(
+                &store_path,
+                &packs,
+                &today,
+                dry_run,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(footprint_error)?;
+    serialize_to_py(py, &result)
+}
+
 pub(crate) fn register_footprint(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_footprint_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_footprint_catalog_status, m)?)?;
@@ -400,6 +464,8 @@ pub(crate) fn register_footprint(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_footprint_report, m)?)?;
     m.add_function(wrap_pyfunction!(py_footprint_card, m)?)?;
     m.add_function(wrap_pyfunction!(py_footprint_decide, m)?)?;
+    m.add_function(wrap_pyfunction!(py_footprint_export, m)?)?;
+    m.add_function(wrap_pyfunction!(py_footprint_import, m)?)?;
     Ok(())
 }
 
