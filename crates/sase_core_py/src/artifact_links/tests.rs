@@ -687,6 +687,74 @@ fn artifact_link_collision_bindings_round_trip() {
         assert_eq!(copy_group["accepted"]["digest"], json!(repeated_digest));
         assert_eq!(copy_group["basis"], json!("historical_commit_time_wins"));
 
+        let first_copy_commit = "d".repeat(40);
+        let skewed_copy_commit = "e".repeat(40);
+        let independent_commit = "f".repeat(40);
+        let skewed_copy_request = request_dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "candidates": [
+                    candidate(
+                        repeated_event.clone(),
+                        &repeated_canonical,
+                        &repeated_digest,
+                        "durable",
+                        json!({
+                            "history_complete": true,
+                            "first_commit_id": first_copy_commit.clone(),
+                            "first_commit_at": "2026-10-27T12:00:00Z",
+                            "ancestor_commit_ids": [],
+                        }),
+                    ),
+                    candidate(
+                        repeated_event.clone(),
+                        &repeated_canonical,
+                        &repeated_digest,
+                        "durable",
+                        json!({
+                            "history_complete": true,
+                            "first_commit_id": skewed_copy_commit,
+                            "first_commit_at": "2026-10-27T10:00:00Z",
+                            "ancestor_commit_ids": [first_copy_commit],
+                        }),
+                    ),
+                    candidate(
+                        competitor_event.clone(),
+                        &competitor_canonical,
+                        &competitor_digest,
+                        "durable",
+                        json!({
+                            "history_complete": true,
+                            "first_commit_id": independent_commit,
+                            "first_commit_at": "2026-10-27T11:00:00Z",
+                            "ancestor_commit_ids": [],
+                        }),
+                    ),
+                ],
+            }),
+        );
+        let skewed_copy_obj =
+            py_artifact_link_collision_partition(py, &skewed_copy_request)
+                .unwrap();
+        let skewed_copy = py_to_json_value(skewed_copy_obj.bind(py)).unwrap();
+        let skewed_group = &skewed_copy["groups"][0];
+        assert_eq!(
+            skewed_group["accepted"]["digest"],
+            json!(competitor_digest)
+        );
+        assert_eq!(skewed_group["basis"], json!("historical_commit_time_wins"));
+        let repeated_finding = skewed_group["rejected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| finding["digest"] == json!(repeated_digest))
+            .expect("the repeated payload is rejected");
+        assert_eq!(
+            repeated_finding["basis"],
+            json!("historical_commit_time_wins")
+        );
+
         let path =
             py_artifact_link_quarantine_record_path(&op_id, &replay_digest)
                 .unwrap();

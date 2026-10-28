@@ -645,11 +645,14 @@ fn decide_group(
     rejected.sort_by(|left, right| left.digest.cmp(&right.digest));
     let selection_pool = selection_pool(&plain);
     let group_decision = if selection_pool.len() > 1 {
+        let selection_scope = selection_scope(&plain);
         let runner_up = selection_pool
             .iter()
             .copied()
             .filter(|entry| entry.digest != winner_entry.digest)
-            .min_by(|left, right| compare_selection_order(left, right))
+            .min_by(|left, right| {
+                compare_surviving_selection_order(left, right, &selection_scope)
+            })
             .expect("a selection alternative exists");
         let (basis, _, ambiguity) =
             pairwise_basis(&winner_entry, runner_up, &plain);
@@ -904,15 +907,13 @@ fn evidence_strength(entry: &DigestEntry) -> u8 {
 
 fn occurrence_is_eliminated(
     occurrence: &HistoryEvidence,
-    owner_digest: &str,
     scope: &[&DigestEntry],
 ) -> bool {
     scope.iter().any(|other| {
-        other.digest != owner_digest
-            && other.history.iter().any(|other_occurrence| {
-                is_history_ancestor(other_occurrence, occurrence)
-                    && !is_history_ancestor(occurrence, other_occurrence)
-            })
+        other.history.iter().any(|other_occurrence| {
+            is_history_ancestor(other_occurrence, occurrence)
+                && !is_history_ancestor(occurrence, other_occurrence)
+        })
     })
 }
 
@@ -923,9 +924,7 @@ fn surviving_histories<'a>(
     entry
         .history
         .iter()
-        .filter(|occurrence| {
-            !occurrence_is_eliminated(occurrence, &entry.digest, scope)
-        })
+        .filter(|occurrence| !occurrence_is_eliminated(occurrence, scope))
         .collect()
 }
 
@@ -939,7 +938,7 @@ fn best_surviving_instant(
         .min_by(compare_instants)
 }
 
-fn selection_pool(entries: &[DigestEntry]) -> Vec<&DigestEntry> {
+fn selection_scope(entries: &[DigestEntry]) -> Vec<&DigestEntry> {
     let strongest_tier = entries
         .iter()
         .map(|entry| entry.tier.rank())
@@ -958,7 +957,17 @@ fn selection_pool(entries: &[DigestEntry]) -> Vec<&DigestEntry> {
         .into_iter()
         .filter(|entry| evidence_strength(entry) == strongest_evidence)
         .collect();
-    if strongest_evidence != 2 {
+    evidence_entries
+}
+
+fn selection_pool(entries: &[DigestEntry]) -> Vec<&DigestEntry> {
+    let evidence_entries = selection_scope(entries);
+    if evidence_strength(
+        evidence_entries
+            .first()
+            .expect("collision group has entries"),
+    ) != 2
+    {
         return evidence_entries;
     }
     let ancestry_minima: Vec<&DigestEntry> = evidence_entries
@@ -988,29 +997,35 @@ fn select_winner(entries: &[DigestEntry]) -> &DigestEntry {
             .min_by(|left, right| compare_selection_order(left, right))
             .expect("collision group has a selection candidate");
     }
-    let scope: Vec<&DigestEntry> = entries
-        .iter()
-        .filter(|entry| {
-            entry.tier.rank() == first_tier
-                && evidence_strength(entry) == first_strength
-        })
-        .collect();
+    let scope = selection_scope(entries);
+    debug_assert!(scope.iter().all(|entry| {
+        entry.tier.rank() == first_tier
+            && evidence_strength(entry) == first_strength
+    }));
     pool.into_iter()
         .min_by(|left, right| {
-            match (
-                best_surviving_instant(left, &scope),
-                best_surviving_instant(right, &scope),
-            ) {
-                (Some(left_at), Some(right_at)) => {
-                    compare_instants(&left_at, &right_at)
-                        .then_with(|| left.digest.cmp(&right.digest))
-                }
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => compare_selection_order(left, right),
-            }
+            compare_surviving_selection_order(left, right, &scope)
         })
         .expect("collision group has a selection candidate")
+}
+
+fn compare_surviving_selection_order(
+    left: &DigestEntry,
+    right: &DigestEntry,
+    scope: &[&DigestEntry],
+) -> std::cmp::Ordering {
+    match (
+        best_surviving_instant(left, scope),
+        best_surviving_instant(right, scope),
+    ) {
+        (Some(left_at), Some(right_at)) => {
+            compare_instants(&left_at, &right_at)
+                .then_with(|| left.digest.cmp(&right.digest))
+        }
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => compare_selection_order(left, right),
+    }
 }
 
 fn compare_selection_order(

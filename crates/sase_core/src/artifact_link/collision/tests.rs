@@ -551,6 +551,352 @@ fn identical_digest_copies_keep_the_earliest_history_across_roots() {
 }
 
 #[test]
+fn same_payload_descendant_clock_does_not_replace_earliest_history() {
+    let repeated = observation(&op('a'), "plan:202610/repeated.md", 1);
+    let competitor = observation(&op('a'), "plan:202610/competitor.md", 1);
+    let repeated_digest = artifact_link_event_digest(&repeated).unwrap();
+    let competitor_digest = artifact_link_event_digest(&competitor).unwrap();
+    let first_copy_commit = commit('a');
+    let skewed_copy_commit = commit('b');
+    let competitor_commit = commit('c');
+    let candidates = [
+        candidate(
+            repeated.clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&first_copy_commit, "2026-10-27T12:00:00Z", &[]),
+            Some("durable:root-a0"),
+        ),
+        candidate(
+            repeated.clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(
+                &skewed_copy_commit,
+                "2026-10-27T10:00:00Z",
+                &[first_copy_commit.as_str()],
+            ),
+            Some("durable:root-a1"),
+        ),
+        candidate(
+            competitor,
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&competitor_commit, "2026-10-27T11:00:00Z", &[]),
+            Some("durable:root-b0"),
+        ),
+    ];
+    let permutations = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let baseline = partition_artifact_link_collision_events(&request(
+        permutations[0]
+            .iter()
+            .map(|index| candidates[*index].clone())
+            .collect(),
+    ))
+    .unwrap();
+    let group = &baseline.groups[0];
+    assert_eq!(group.accepted.digest, competitor_digest);
+    assert_eq!(
+        group.basis,
+        ArtifactLinkCollisionBasisWire::HistoricalCommitTimeWins
+    );
+    let repeated_finding = group
+        .rejected
+        .iter()
+        .find(|finding| finding.digest == repeated_digest)
+        .expect("the repeated payload is rejected");
+    assert_eq!(
+        repeated_finding.basis,
+        ArtifactLinkCollisionBasisWire::HistoricalCommitTimeWins
+    );
+    assert!(repeated_finding.detail.contains("earlier first-add"));
+
+    for permutation in permutations.iter().skip(1) {
+        let result = partition_artifact_link_collision_events(&request(
+            permutation
+                .iter()
+                .map(|index| candidates[*index].clone())
+                .collect(),
+        ))
+        .unwrap();
+        assert_eq!(result, baseline);
+    }
+
+    let relabeled: Vec<_> = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let mut relabeled = entry.clone();
+            relabeled.source_locator =
+                Some(format!("durable:relabeled-{index}"));
+            relabeled
+        })
+        .collect();
+    let relabeled_result =
+        partition_artifact_link_collision_events(&request(relabeled)).unwrap();
+    assert_eq!(
+        relabeled_result.groups[0].accepted.digest,
+        baseline.groups[0].accepted.digest
+    );
+    assert_eq!(relabeled_result.groups[0].basis, baseline.groups[0].basis);
+    assert_eq!(
+        relabeled_result.groups[0].ambiguity,
+        baseline.groups[0].ambiguity
+    );
+    assert_eq!(
+        relabeled_result.groups[0]
+            .rejected
+            .iter()
+            .map(|finding| (&finding.digest, finding.basis))
+            .collect::<Vec<_>>(),
+        baseline.groups[0]
+            .rejected
+            .iter()
+            .map(|finding| (&finding.digest, finding.basis))
+            .collect::<Vec<_>>()
+    );
+
+    let unlabeled: Vec<_> = candidates
+        .iter()
+        .map(|entry| {
+            let mut unlabeled = entry.clone();
+            unlabeled.source_locator = None;
+            unlabeled
+        })
+        .collect();
+    let unlabeled_result =
+        partition_artifact_link_collision_events(&request(unlabeled)).unwrap();
+    assert_eq!(
+        unlabeled_result.groups[0].accepted.digest,
+        competitor_digest
+    );
+    assert_eq!(
+        unlabeled_result.groups[0].basis,
+        ArtifactLinkCollisionBasisWire::HistoricalCommitTimeWins
+    );
+}
+
+#[test]
+fn same_payload_descendant_uses_surviving_offset_instants_for_ties() {
+    let repeated = observation(&op('a'), "plan:202610/repeated.md", 1);
+    let competitor = observation(&op('a'), "plan:202610/competitor.md", 1);
+    let repeated_digest = artifact_link_event_digest(&repeated).unwrap();
+    let competitor_digest = artifact_link_event_digest(&competitor).unwrap();
+    let first_copy_commit = commit('a');
+    let skewed_copy_commit = commit('b');
+    let competitor_commit = commit('c');
+    let partition = partition_artifact_link_collision_events(&request(vec![
+        candidate(
+            repeated.clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(
+                &first_copy_commit,
+                "2026-10-27T12:00:00+02:00",
+                &[],
+            ),
+            Some("durable:root-a0"),
+        ),
+        candidate(
+            repeated,
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(
+                &skewed_copy_commit,
+                "2026-10-27T09:00:00Z",
+                &[first_copy_commit.as_str()],
+            ),
+            Some("durable:root-a1"),
+        ),
+        candidate(
+            competitor,
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&competitor_commit, "2026-10-27T10:00:00Z", &[]),
+            Some("durable:root-b0"),
+        ),
+    ]))
+    .unwrap();
+    let expected_digest = repeated_digest.min(competitor_digest);
+    let group = &partition.groups[0];
+    assert_eq!(group.accepted.digest, expected_digest);
+    assert_eq!(
+        group.basis,
+        ArtifactLinkCollisionBasisWire::DigestTieBreakUnordered
+    );
+    assert!(group
+        .ambiguity
+        .iter()
+        .any(|note| note.contains("identical first-add times")));
+}
+
+#[test]
+fn multi_generation_identical_copies_do_not_outvote_their_earliest_history() {
+    let repeated = observation(&op('a'), "plan:202610/repeated.md", 1);
+    let competitor = observation(&op('a'), "plan:202610/competitor.md", 1);
+    let competitor_digest = artifact_link_event_digest(&competitor).unwrap();
+    let first_copy_commit = commit('a');
+    let second_copy_commit = commit('b');
+    let third_copy_commit = commit('c');
+    let competitor_commit = commit('d');
+    let partition = partition_artifact_link_collision_events(&request(vec![
+        candidate(
+            repeated.clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&first_copy_commit, "2026-10-27T12:00:00Z", &[]),
+            Some("durable:root-a0"),
+        ),
+        candidate(
+            repeated.clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(
+                &second_copy_commit,
+                "2026-10-27T11:00:00Z",
+                &[first_copy_commit.as_str()],
+            ),
+            Some("durable:root-a1"),
+        ),
+        candidate(
+            repeated,
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(
+                &third_copy_commit,
+                "2026-10-27T08:00:00Z",
+                &[first_copy_commit.as_str(), second_copy_commit.as_str()],
+            ),
+            Some("durable:root-a2"),
+        ),
+        candidate(
+            competitor,
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&competitor_commit, "2026-10-27T10:00:00Z", &[]),
+            Some("durable:root-b0"),
+        ),
+    ]))
+    .unwrap();
+
+    assert_eq!(partition.groups[0].accepted.digest, competitor_digest);
+    assert_eq!(
+        partition.groups[0].basis,
+        ArtifactLinkCollisionBasisWire::HistoricalCommitTimeWins
+    );
+}
+
+#[test]
+fn same_payload_ancestor_evidence_still_rejects_a_competitor_descendant() {
+    let repeated = observation(&op('a'), "plan:202610/repeated.md", 1);
+    let competitor = observation(&op('a'), "plan:202610/competitor.md", 1);
+    let repeated_digest = artifact_link_event_digest(&repeated).unwrap();
+    let first_copy_commit = commit('a');
+    let later_copy_commit = commit('b');
+    let competitor_commit = commit('c');
+    let partition = partition_artifact_link_collision_events(&request(vec![
+        candidate(
+            repeated.clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&first_copy_commit, "2026-10-27T12:00:00Z", &[]),
+            Some("durable:root-a0"),
+        ),
+        candidate(
+            repeated.clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(
+                &later_copy_commit,
+                "2026-10-27T10:00:00Z",
+                &[first_copy_commit.as_str()],
+            ),
+            Some("durable:root-a1"),
+        ),
+        candidate(
+            competitor,
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(
+                &competitor_commit,
+                "2026-10-27T11:00:00Z",
+                &[first_copy_commit.as_str(), later_copy_commit.as_str()],
+            ),
+            Some("durable:root-b0"),
+        ),
+    ]))
+    .unwrap();
+
+    assert_eq!(partition.groups[0].accepted.digest, repeated_digest);
+    assert_eq!(
+        partition.groups[0].basis,
+        ArtifactLinkCollisionBasisWire::HistoricalAncestorWins
+    );
+}
+
+#[test]
+fn group_basis_uses_the_same_surviving_order_as_winner_selection() {
+    let repeated = observation(&op('a'), "plan:202610/repeated.md", 1);
+    let second = observation(&op('a'), "plan:202610/second.md", 1);
+    let third = observation(&op('a'), "plan:202610/third.md", 1);
+    let repeated_digest = artifact_link_event_digest(&repeated).unwrap();
+    let second_digest = artifact_link_event_digest(&second).unwrap();
+    let third_digest = artifact_link_event_digest(&third).unwrap();
+    let early_copy_commit = commit('a');
+    let competitor_commit = commit('b');
+    let independent_copy_commit = commit('c');
+    let third_commit = commit('e');
+    let partition = partition_artifact_link_collision_events(&request(vec![
+        candidate(
+            repeated.clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&early_copy_commit, "2026-10-27T12:00:00Z", &[]),
+            Some("durable:root-a0"),
+        ),
+        candidate(
+            repeated.clone(),
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(
+                &independent_copy_commit,
+                "2026-10-27T08:00:00Z",
+                &[competitor_commit.as_str()],
+            ),
+            Some("durable:root-a1"),
+        ),
+        candidate(
+            second,
+            ArtifactLinkCollisionTierWire::Durable,
+            // The skewed copy of `repeated` above descends from this competitor.
+            history_evidence(&competitor_commit, "2026-10-27T10:00:00Z", &[]),
+            Some("durable:root-b0"),
+        ),
+        candidate(
+            third,
+            ArtifactLinkCollisionTierWire::Durable,
+            history_evidence(&third_commit, "2026-10-27T10:00:00Z", &[]),
+            Some("durable:root-c0"),
+        ),
+    ]))
+    .unwrap();
+
+    let expected_tied_winner = second_digest.clone().min(third_digest.clone());
+    let group = &partition.groups[0];
+    assert_ne!(expected_tied_winner, repeated_digest);
+    assert_eq!(group.accepted.digest, expected_tied_winner);
+    assert_eq!(
+        group.basis,
+        ArtifactLinkCollisionBasisWire::DigestTieBreakUnordered
+    );
+    assert!(group.ambiguity.iter().any(|note| {
+        note.contains(&format!("{} and {}", second_digest, third_digest))
+            || note.contains(&format!("{} and {}", third_digest, second_digest))
+    }));
+    let repeated_finding = group
+        .rejected
+        .iter()
+        .find(|finding| finding.digest == repeated_digest)
+        .expect("the payload with only a late survivor is rejected");
+    assert_eq!(
+        repeated_finding.basis,
+        ArtifactLinkCollisionBasisWire::HistoricalCommitTimeWins
+    );
+}
+
+#[test]
 fn duplicate_root_ancestry_is_retained_for_complete_group_selection() {
     let repeated = observation(&op('a'), "plan:202610/repeated.md", 1);
     let descendant = observation(&op('a'), "plan:202610/descendant.md", 1);
