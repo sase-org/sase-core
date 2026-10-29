@@ -30,11 +30,57 @@ fn staged_handoff_bindings_are_registered() {
             "validate_staged_handoff_receipt",
             "evaluate_stage_admission",
             "staged_handoff_receipt_authorizes",
+            "gate_staged_payload_schema_version",
+            "validate_gate_staged_payload",
+            "build_gate_staged_payload",
         ] {
             assert!(module.getattr(name).is_ok(), "{name}");
         }
         assert_eq!(py_staged_handoff_wire_schema_version(), 1);
+        assert_eq!(py_gate_staged_payload_schema_version(), 1);
     });
+}
+
+fn gate_payload() -> serde_json::Value {
+    json!({
+        "gate_schema_version": 1,
+        "request_id": "custom-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "spec": {
+            "request_id": "custom-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "resources": [
+                {
+                    "path": "notes.md",
+                    "role": "editable",
+                    "executable": false,
+                    "source": "/tmp/work/notes.md"
+                }
+            ]
+        },
+        "auto": {
+            "decision": {"profile": "manual"},
+            "policy_block": {},
+            "auto_execute": false
+        },
+        "resources": [
+            {
+                "path": "notes.md",
+                "role": "editable",
+                "executable": false,
+                "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+                "size_bytes": 3,
+                "origin": "/tmp/work/notes.md",
+                "staged_relpath": "snapshots/notes.md"
+            }
+        ],
+        "creator": {
+            "project": "sase",
+            "project_file": "/tmp/sase.project.json",
+            "artifacts_dir": "/tmp/artifacts/20261029T000000Z",
+            "timestamp": "20261029T000000Z",
+            "agent": "agent-1"
+        },
+        "workspace_mode": "inherit"
+    })
 }
 
 #[test]
@@ -125,5 +171,51 @@ fn receipt_authorizes_binding_round_trips() {
             "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee"
         )
         .unwrap());
+    });
+}
+
+#[test]
+fn gate_payload_binding_round_trips() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let raw = gate_payload();
+        let record = json_value_to_py(py, &raw).unwrap();
+        let record = record.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_build_gate_staged_payload(py, record).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["gate_schema_version"], json!(1));
+        let validated = {
+            let normalized = json_value_to_py(py, &value).unwrap();
+            let normalized = normalized.bind(py).downcast::<PyDict>().unwrap();
+            let result =
+                py_validate_gate_staged_payload(py, normalized).unwrap();
+            py_to_json_value(result.bind(py)).unwrap()
+        };
+        assert_eq!(validated, value);
+    });
+}
+
+#[test]
+fn gate_payload_binding_rejects_request_id_mismatch() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let mut raw = gate_payload();
+        raw["request_id"] = json!("custom-other-id");
+        let record = json_value_to_py(py, &raw).unwrap();
+        let record = record.bind(py).downcast::<PyDict>().unwrap();
+        let error = py_build_gate_staged_payload(py, record).unwrap_err();
+        assert!(error.to_string().contains("payload.spec.request_id"));
+
+        let mut missing = gate_payload();
+        missing["spec"]["resources"][0]
+            .as_object_mut()
+            .expect("object")
+            .remove("source");
+        let record = json_value_to_py(py, &missing).unwrap();
+        let record = record.bind(py).downcast::<PyDict>().unwrap();
+        let error = py_validate_gate_staged_payload(py, record).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("exactly one of content or source"));
     });
 }

@@ -6,9 +6,12 @@ use crate::prelude::*;
 use pyo3::wrap_pyfunction;
 
 use sase_core::staged_handoff::{
+    build_gate_staged_payload as core_build_gate_payload,
     evaluate_stage_admission as core_evaluate_stage_admission,
+    gate_staged_payload_schema_version as core_gate_payload_version,
     receipt_authorizes as core_receipt_authorizes,
     staged_handoff_wire_schema_version as core_wire_version,
+    validate_gate_staged_payload as core_validate_gate_payload,
     validate_staged_handoff as core_validate_staged_handoff,
     validate_staged_handoff_receipt as core_validate_receipt,
 };
@@ -67,6 +70,39 @@ fn py_staged_handoff_receipt_authorizes(
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Return the staged gate payload schema version.
+#[pyfunction]
+#[pyo3(name = "gate_staged_payload_schema_version")]
+fn py_gate_staged_payload_schema_version() -> u32 {
+    core_gate_payload_version()
+}
+
+/// Validate a staged gate payload dict.
+#[pyfunction]
+#[pyo3(name = "validate_gate_staged_payload")]
+fn py_validate_gate_staged_payload<'py>(
+    py: Python<'py>,
+    payload: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(payload.as_any())?;
+    let normalized = core_validate_gate_payload(&value)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &normalized)
+}
+
+/// Assemble a staged gate payload from its parts, then validate it.
+#[pyfunction]
+#[pyo3(name = "build_gate_staged_payload")]
+fn py_build_gate_staged_payload<'py>(
+    py: Python<'py>,
+    payload: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(payload.as_any())?;
+    let normalized = core_build_gate_payload(&value)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &normalized)
+}
+
 pub(crate) fn register_staged_handoff(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(
         py_staged_handoff_wire_schema_version,
@@ -76,6 +112,12 @@ pub(crate) fn register_staged_handoff(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_staged_handoff_receipt, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_stage_admission, m)?)?;
     m.add_function(wrap_pyfunction!(py_staged_handoff_receipt_authorizes, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_gate_staged_payload_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_validate_gate_staged_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(py_build_gate_staged_payload, m)?)?;
     Ok(())
 }
 

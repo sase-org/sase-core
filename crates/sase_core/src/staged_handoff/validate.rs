@@ -4,6 +4,10 @@ use chrono::DateTime;
 use serde_json::{Map, Value as JsonValue};
 use thiserror::Error;
 
+use super::gate::{
+    gate_payload_workspace_mode, validate_gate_staged_payload,
+    GateWorkspaceModeWire,
+};
 use super::wire::{
     StageAdmissionRequestWire, StagedHandoffKindWire, StagedHandoffReceiptWire,
     StagedHandoffWire, SuccessorWorkspaceWire, STAGED_HANDOFF_OUTCOME_ADOPTED,
@@ -188,16 +192,47 @@ fn validate_kind_invariants(
             )?;
         }
         StagedHandoffKindWire::Gate => {
-            if record.successor_workspace == SuccessorWorkspaceWire::None
-                && record.carry_allowed
-            {
-                return Err(invalid(
-                    "gate handoffs with successor_workspace none cannot set carry_allowed",
-                ));
-            }
+            validate_gate_record(record)?;
         }
     }
     Ok(())
+}
+
+fn validate_gate_record(
+    record: &StagedHandoffWire,
+) -> Result<(), StagedHandoffError> {
+    let payload = JsonValue::Object(record.payload.clone());
+    validate_gate_staged_payload(&payload)?;
+    match gate_payload_workspace_mode(&payload)? {
+        GateWorkspaceModeWire::Inherit => {
+            require_workspace(
+                record,
+                SuccessorWorkspaceWire::Inherit,
+                "gate handoffs with workspace_mode inherit require \
+                 successor_workspace inherit",
+            )?;
+            if !record.carry_allowed {
+                return Err(invalid(
+                    "gate handoffs with workspace_mode inherit require carry_allowed",
+                ));
+            }
+            Ok(())
+        }
+        GateWorkspaceModeWire::Release => {
+            require_workspace(
+                record,
+                SuccessorWorkspaceWire::None,
+                "gate handoffs with workspace_mode release require \
+                 successor_workspace none",
+            )?;
+            if record.carry_allowed {
+                return Err(invalid(
+                    "gate handoffs with workspace_mode release cannot set carry_allowed",
+                ));
+            }
+            Ok(())
+        }
+    }
 }
 
 fn require_workspace(
