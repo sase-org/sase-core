@@ -13,11 +13,14 @@ use super::super::{lock_paths, ToolRunError};
 use crate::store_lock::{acquire_store_lock, LockMode, StoreLockError};
 use rusqlite::config::DbConfig;
 use rusqlite::{
-    Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction,
+    ffi, Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction,
     TransactionBehavior,
 };
+use std::ffi::c_void;
 use std::fs;
 use std::io::ErrorKind;
+use std::ops::{Deref, DerefMut};
+use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -307,10 +310,107 @@ struct BusyBudget {
     deadline: Instant,
 }
 
-/// Cap one SQLite `busy_timeout` so `sqlite3_open_v2` (which ignores it)
-/// is retried from the outer loop instead of one statement consuming the
-/// whole remaining budget and leaving nothing to reopen with.
-const SQLITE_BUSY_SLICE: Duration = Duration::from_millis(25);
+/// Keep quarantine's store-lock acquisition short so the outer operation can
+/// retry while its original deadline still has time remaining.
+const STORE_LOCK_WAIT_SLICE: Duration = Duration::from_millis(25);
+
+/// Limit one sleep in SQLite's busy callback. Checking the wall clock after
+/// every sleep bounds overshoot to one scheduler delay, even on hosts where a
+/// requested short sleep takes much longer than requested.
+const SQLITE_BUSY_SLEEP_SLICE: Duration = Duration::from_millis(1);
+
+fn should_retry_busy_until(
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+) -> bool {
+    let remaining = deadline.saturating_duration_since(now());
+    if remaining.is_zero() {
+        return false;
+    }
+    sleep(SQLITE_BUSY_SLEEP_SLICE.min(remaining));
+    now() < deadline
+}
+
+unsafe extern "C" fn sqlite_busy_until_deadline(
+    context: *mut c_void,
+    _prior_retries: c_int,
+) -> c_int {
+    if context.is_null() {
+        return 0;
+    }
+    // SAFETY: BusyConnection owns this boxed Instant until its SQLite
+    // connection is closed, and SQLite calls this callback synchronously.
+    let deadline = unsafe { *context.cast::<Instant>() };
+    c_int::from(should_retry_busy_until(
+        deadline,
+        Instant::now,
+        thread::sleep,
+    ))
+}
+
+/// A SQLite connection whose busy handler shares the store operation's
+/// absolute wall-clock deadline. Keep `connection` first so it is dropped
+/// before the boxed callback context.
+struct BusyConnection {
+    connection: Connection,
+    deadline: Box<Instant>,
+}
+
+impl BusyConnection {
+    fn new(
+        connection: Connection,
+        deadline: Instant,
+    ) -> Result<Self, ToolRunError> {
+        let mut busy_connection = Self {
+            connection,
+            deadline: Box::new(deadline),
+        };
+        // SAFETY: the callback argument points into the stable Box stored in
+        // this wrapper. Drop clears the callback before releasing that Box.
+        let result = unsafe {
+            ffi::sqlite3_busy_handler(
+                busy_connection.connection.handle(),
+                Some(sqlite_busy_until_deadline),
+                (&mut *busy_connection.deadline as *mut Instant).cast(),
+            )
+        };
+        if result != ffi::SQLITE_OK {
+            return Err(ToolRunError::store(format!(
+                "failed to install SQLite wall-clock busy handler: {result}"
+            )));
+        }
+        Ok(busy_connection)
+    }
+}
+
+impl Deref for BusyConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+impl DerefMut for BusyConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.connection
+    }
+}
+
+impl Drop for BusyConnection {
+    fn drop(&mut self) {
+        // SAFETY: the connection is live here and no SQLite operation is in
+        // progress. Clear the raw callback before its boxed deadline is freed.
+        unsafe {
+            ffi::sqlite3_busy_handler(
+                self.connection.handle(),
+                None,
+                std::ptr::null_mut(),
+            );
+        }
+    }
+}
 
 impl BusyBudget {
     fn new(timeout: Duration) -> Self {
@@ -328,12 +428,12 @@ impl BusyBudget {
         self.remaining().is_zero()
     }
 
-    fn sqlite_wait(&self) -> Duration {
+    fn lock_wait_slice(&self) -> Duration {
         let remaining = self.remaining();
         if remaining.is_zero() {
             remaining
         } else {
-            remaining.min(SQLITE_BUSY_SLICE)
+            remaining.min(STORE_LOCK_WAIT_SLICE)
         }
     }
 }
@@ -372,11 +472,9 @@ pub(super) fn with_write_store<T>(
             }));
         }
         attempt_owed = false;
-        let slice = budget.sqlite_wait();
-        match open_write_store(store_path, slice).and_then(|mut conn| {
-            conn.busy_timeout(budget.sqlite_wait())?;
-            operation(&mut conn)
-        }) {
+        match open_write_store(store_path, &budget)
+            .and_then(|mut conn| operation(&mut conn))
+        {
             Ok(value) => return Ok(value),
             Err(error) if is_transient_contention(&error) => {
                 // Replay is safe: callers commit inside `operation`, and a
@@ -391,7 +489,7 @@ pub(super) fn with_write_store<T>(
                     && store_path.exists()
                     && !file_too_new_to_quarantine(store_path) =>
             {
-                quarantine_corrupt_store(store_path, budget.sqlite_wait())?;
+                quarantine_corrupt_store(store_path, budget.lock_wait_slice())?;
                 // One owed recreate per call: a store corrupt again after
                 // its quarantine falls back to the elapsed budget.
                 attempt_owed = !quarantined;
@@ -419,11 +517,9 @@ pub(crate) fn with_read_store<T>(
             }));
         }
         attempt_owed = false;
-        let slice = budget.sqlite_wait();
-        match open_read_store(store_path, slice).and_then(|conn| {
-            conn.busy_timeout(budget.sqlite_wait())?;
-            operation(&conn)
-        }) {
+        match open_read_store(store_path, &budget)
+            .and_then(|conn| operation(&conn))
+        {
             Ok(value) => return Ok(value),
             Err(error) if is_transient_contention(&error) => {
                 last_busy = Some(error);
@@ -529,18 +625,18 @@ fn sqlite_sidecar_path(store_path: &Path, suffix: &str) -> PathBuf {
 
 fn open_write_store(
     store_path: &Path,
-    busy_timeout: Duration,
-) -> Result<Connection, ToolRunError> {
+    budget: &BusyBudget,
+) -> Result<BusyConnection, ToolRunError> {
     if let Some(parent) = store_path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
             restrict_mode(parent, 0o700)?;
         }
     }
-    let mut conn = Connection::open(store_path)?;
+    let connection = Connection::open(store_path)?;
     restrict_mode(store_path, 0o600)?;
-    conn.busy_timeout(busy_timeout)?;
-    enable_wal_mode(&conn, busy_timeout)?;
+    let mut conn = BusyConnection::new(connection, budget.deadline)?;
+    enable_wal_mode(&conn, budget.deadline)?;
     conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     ensure_current_schema(&mut conn, true)?;
@@ -549,9 +645,9 @@ fn open_write_store(
 
 fn open_read_store(
     store_path: &Path,
-    busy_timeout: Duration,
-) -> Result<Connection, ToolRunError> {
-    let mut conn = Connection::open_with_flags(
+    budget: &BusyBudget,
+) -> Result<BusyConnection, ToolRunError> {
+    let connection = Connection::open_with_flags(
         store_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
@@ -567,7 +663,7 @@ fn open_read_store(
             error.into()
         }
     })?;
-    conn.busy_timeout(busy_timeout)?;
+    let mut conn = BusyConnection::new(connection, budget.deadline)?;
     configure_wal_persistence(&conn);
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     ensure_current_schema(&mut conn, false)?;
@@ -672,11 +768,10 @@ fn write_schema_version(conn: &Connection) -> Result<(), ToolRunError> {
 
 fn enable_wal_mode(
     conn: &Connection,
-    busy_timeout: Duration,
+    deadline: Instant,
 ) -> Result<(), ToolRunError> {
-    // The initial read can itself consume the whole SQLite busy allowance.
-    // Starting the timer after it would grant WAL conversion a second budget.
-    let started = Instant::now();
+    // The connection's handler applies this same deadline to both the initial
+    // probe and any subsequent WAL conversion attempt.
     let current: Result<String, _> =
         conn.query_row("PRAGMA journal_mode", [], |row| row.get(0));
     match current {
@@ -700,8 +795,6 @@ fn enable_wal_mode(
         // Attempt the conversion before honoring the deadline: with no time
         // left the attempt just does not wait, so an uncontended store that
         // a spent budget still owes an open can convert.
-        let remaining = busy_timeout.saturating_sub(started.elapsed());
-        conn.busy_timeout(remaining)?;
         match conn.query_row("PRAGMA journal_mode = WAL", [], |row| {
             row.get::<_, String>(0)
         }) {
@@ -720,7 +813,8 @@ fn enable_wal_mode(
                     Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
                 ) =>
             {
-                let remaining = busy_timeout.saturating_sub(started.elapsed());
+                let remaining =
+                    deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     return Err(ToolRunError::Busy {
                         message: format!(
@@ -791,11 +885,9 @@ mod tests {
             .unwrap();
         // The holder owns its lock before the contender starts and retains
         // it throughout both the journal-mode probe and possible conversion.
-        let contender = Connection::open(&path).unwrap();
         let budget = Duration::from_millis(250);
-        contender.busy_timeout(budget).unwrap();
         let started = Instant::now();
-        let result = enable_wal_mode(&contender, budget);
+        let result = with_write_store(&path, budget, |_| Ok(()));
         let elapsed = started.elapsed();
         drop(holder);
 
@@ -806,5 +898,28 @@ mod tests {
             elapsed < Duration::from_millis(425),
             "WAL setup renewed an exhausted budget: {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn busy_handler_stops_after_a_scheduler_oversleep() {
+        use std::cell::Cell;
+
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(10);
+        let now = Cell::new(start);
+        let mut requested_sleeps = Vec::new();
+
+        let retry = should_retry_busy_until(
+            deadline,
+            || now.get(),
+            |requested| {
+                requested_sleeps.push(requested);
+                // Model a host where a 1ms sleep wakes after the deadline.
+                now.set(now.get() + requested + Duration::from_millis(10));
+            },
+        );
+
+        assert!(!retry, "an overslept busy wait must not renew its budget");
+        assert_eq!(requested_sleeps, [SQLITE_BUSY_SLEEP_SLICE]);
     }
 }
