@@ -42,6 +42,13 @@ MACOS = (
     f"sase_core_rs-{VERSION}-cp312-abi3-"
     "macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl"
 )
+# Maturin 1.16 sorts the compressed platform tags, so the universal2 tag moves
+# first (this is the file name that the 0.43.1 dist gate refused).
+MACOS_116 = (
+    f"sase_core_rs-{VERSION}-cp312-abi3-"
+    "macosx_10_12_universal2.macosx_10_12_x86_64.macosx_11_0_arm64.whl"
+)
+MACOS_ARM64_ONLY = f"sase_core_rs-{VERSION}-cp312-abi3-macosx_11_0_arm64.whl"
 WINDOWS = f"sase_core_rs-{VERSION}-cp312-abi3-win_amd64.whl"
 SDIST = f"sase_core_rs-{VERSION}.tar.gz"
 
@@ -125,6 +132,28 @@ class ClassifyTests(unittest.TestCase):
         names = [LINUX_X86, LINUX_ARM, drifted, WINDOWS, SDIST]
         self.assertEqual(self.classify(urls(names)).state, gate.COMPLETE)
 
+    def test_maturin_116_tag_order_is_complete(self) -> None:
+        names = [LINUX_X86, LINUX_ARM, MACOS_116, WINDOWS, SDIST]
+        self.assertEqual(
+            self.classify(urls(names)), gate.ReleaseFiles(gate.COMPLETE, (), ())
+        )
+
+    def test_arm64_only_macos_wheel_is_not_universal2(self) -> None:
+        names = [LINUX_X86, LINUX_ARM, MACOS_ARM64_ONLY, WINDOWS, SDIST]
+        result = self.classify(urls(names))
+        self.assertEqual(result.state, gate.PARTIAL)
+        self.assertEqual(result.missing, ("universal2.whl",))
+
+    def test_version_prefix_neighbour_never_matches(self) -> None:
+        neighbour = VERSION + "0"
+        wheel = f"sase_core_rs-{neighbour}-cp312-abi3-manylinux_2_28_x86_64.whl"
+        sdist = f"sase_core_rs-{neighbour}.tar.gz"
+        self.assertFalse(gate.matches(wheel, VERSION, "manylinux_2_28_x86_64.whl"))
+        self.assertFalse(gate.matches(sdist, VERSION, ".tar.gz"))
+        result = self.classify(urls([wheel, sdist]))
+        self.assertEqual(result.state, gate.PARTIAL)
+        self.assertEqual(result.missing, tuple(SUFFIXES))
+
 
 class ParseSuffixesTests(unittest.TestCase):
     def test_reads_whitespace_separated_entries_in_order(self) -> None:
@@ -167,6 +196,20 @@ class DistTests(unittest.TestCase):
         problems = self.problems([*COMPLETE_NAMES, second])
         self.assertEqual(len(problems), 1)
         self.assertIn("2 files match *manylinux_2_28_x86_64.whl", problems[0])
+
+    def test_maturin_116_tag_order_has_no_problems(self) -> None:
+        names = [LINUX_X86, LINUX_ARM, MACOS_116, WINDOWS, SDIST]
+        self.assertEqual(self.problems(names), [])
+
+    def test_arm64_only_macos_wheel_reports_gap_and_stray_file(self) -> None:
+        names = [LINUX_X86, LINUX_ARM, MACOS_ARM64_ONLY, WINDOWS, SDIST]
+        self.assertEqual(
+            self.problems(names),
+            [
+                "no file matches *universal2.whl",
+                f"{MACOS_ARM64_ONLY} matches no expected entry",
+            ],
+        )
 
     def test_cli_reports_and_fails_on_incomplete_dist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -233,6 +276,19 @@ class WorkflowWiringTests(unittest.TestCase):
         complete = gate.classify(VERSION, urls(COMPLETE_NAMES), suffixes)
         self.assertEqual(partial.state, gate.PARTIAL)
         self.assertEqual(complete.state, gate.COMPLETE)
+
+    def test_workflow_set_accepts_maturin_116_macos_name(self) -> None:
+        suffixes = self.workflow_suffixes()
+        names = [
+            name.replace(
+                "macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2",
+                "macosx_10_12_universal2.macosx_10_12_x86_64.macosx_11_0_arm64",
+            )
+            for name in COMPLETE_NAMES
+        ]
+        result = gate.classify(VERSION, urls(names), suffixes)
+        self.assertEqual(result.state, gate.COMPLETE)
+        self.assertEqual(gate.dist_problems(sorted(names), VERSION, suffixes), [])
 
     def test_workflow_no_longer_gates_on_version_existence(self) -> None:
         text = WORKFLOW.read_text()

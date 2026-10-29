@@ -71,10 +71,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  MATURIN_VERSION: "1.7"
   # The one list of distributions a complete release holds: one entry per
   # build job below (linux x86_64, linux aarch64, macos universal2, windows
-  # x86_64, sdist), each the tail of the file name after the version. The
+  # x86_64, sdist). A wheel entry matches one of the wheel's compressed
+  # platform tags in any order, and .tar.gz is the sdist's tail. The
   # publish-plan gate treats a release missing any of them as unpublished, and
   # the publish job refuses a dist/ that differs from it, so a build-matrix
   # change that does not update this list fails loudly instead of drifting.
@@ -281,7 +281,7 @@ jobs:
     name: macos universal2
     needs: [release-plz-release, publish-plan]
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     if: ${{ github.repository_owner == 'sase-org' && ((github.event_name != 'workflow_dispatch' && needs.publish-plan.outputs.needs_publish == 'true') || (github.event_name == 'workflow_dispatch' && inputs.build_wheels)) }}
     steps:
       - uses: actions/checkout@v4
@@ -401,10 +401,10 @@ jobs:
     runs-on: ubuntu-latest
     # This job's own commands run in seconds, but the timeout must also cover
     # runner-queue starvation, not just command runtime. Keep it matched to
-    # the longest wheel job (60m) so a busy runner queue can't strand a
+    # the longest wheel job (75m) so a busy runner queue can't strand a
     # built-and-ready release short of PyPI publish; do not shrink this back
     # down to a "fast job" budget like 15m.
-    timeout-minutes: 60
+    timeout-minutes: 75
     if: ${{ github.repository_owner == 'sase-org' && ((github.event_name != 'workflow_dispatch' && needs.publish-plan.outputs.needs_publish == 'true') || (github.event_name == 'workflow_dispatch' && inputs.build_wheels)) }}
     steps:
       - uses: actions/download-artifact@v4

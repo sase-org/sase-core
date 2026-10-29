@@ -31,6 +31,12 @@ loudly": the remedy is to bump the version, not to rebuild.
 ``dist DIR VERSION``
     Check that ``DIR`` holds exactly one file per expected entry and nothing else, so a
     build-matrix change that the expected set was not updated for fails before upload.
+
+Matching rule: a wheel entry names one compressed platform tag, not the file's
+literal tail, so maturin's tag order does not matter. A ``.whl`` file matches a
+``.whl`` suffix when one of its dot-separated platform tags plus ``".whl"`` ends
+with the suffix (with an exact match on the distribution name and version
+components). Anything else (the sdist) matches only ``stem(version) + suffix``.
 """
 
 from __future__ import annotations
@@ -90,7 +96,22 @@ def stem(version: str) -> str:
 
 
 def matches(filename: str, version: str, suffix: str) -> bool:
-    return filename.startswith(stem(version)) and filename.endswith(suffix)
+    """A wheel entry names one platform tag; the sdist names its exact tail."""
+    if filename.endswith(".whl"):
+        if not suffix.endswith(".whl"):
+            return False
+        stemmed = filename[: -len(".whl")]
+        parts = stemmed.split("-")
+        if len(parts) == 6:
+            name, file_version, _build, _py, _abi, plat = parts
+        elif len(parts) == 5:
+            name, file_version, _py, _abi, plat = parts
+        else:
+            return False
+        if name != FILENAME_STEM or file_version != version:
+            return False
+        return any((tag + ".whl").endswith(suffix) for tag in plat.split("."))
+    return filename == stem(version) + suffix
 
 
 def classify(

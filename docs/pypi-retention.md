@@ -235,6 +235,8 @@ have.
 - The expected set lives in the workflow and nowhere else. When the build matrix changes, update
   `EXPECTED_DIST_SUFFIXES` in the same commit: the `publish` job compares `dist/` to it one-to-one and fails before
   uploading anything if a build is missing from either side.
+- A wheel entry matches a single compressed platform tag in any order, not the file name's literal tail. That is
+  what `0.43.1` taught us: maturin 1.16 reordered the universal2 tags and the dist gate refused a good release.
 - The automatic gate only examines the current workspace version. It never republishes history, so an older partial
   release is not healed automatically.
 - A yanked file does not count as present, but it is reported as `yanked` rather than `partial`, and `yanked` does
