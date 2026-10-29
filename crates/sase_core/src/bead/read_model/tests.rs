@@ -238,6 +238,42 @@ fn failed_rebuild_backs_off_for_the_process_window() {
 }
 
 #[test]
+fn rebuild_superseded_by_a_concurrent_mutation_does_not_back_off() {
+    let temp = tempfile::tempdir().unwrap();
+    let (beads_dir, cache_path) = test_git_store_path(&temp);
+    seed_event_store(&beads_dir);
+    rebuild_read_model_at(&beads_dir, &cache_path).unwrap();
+    let expected =
+        crate::bead::read::read_event_store_issues(&beads_dir).unwrap();
+    let streams_dir = beads_dir.join("events/streams");
+    let stream_path = fs::read_dir(&streams_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .expect("seeded event store has a stream");
+    let temp_path = stream_path.with_extension("jsonl.tmp");
+    super::store::rebuild_write_stats::set_after_rebuild_commit_hook(
+        move || {
+            let bytes = fs::read(&stream_path).unwrap();
+            fs::write(&temp_path, bytes).unwrap();
+            fs::rename(&temp_path, &stream_path).unwrap();
+        },
+    );
+
+    assert!(rebuild_read_model_at(&beads_dir, &cache_path)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        crate::bead::read::read_store_issues(&beads_dir).unwrap(),
+        expected
+    );
+    let status = read_model_status_at(&beads_dir, &cache_path);
+    assert!(status.fresh, "{}", status.reason);
+    let verify = read_model_verify_cache_at(&beads_dir, &cache_path);
+    assert!(verify.compared && verify.matched, "{}", verify.reason);
+}
+
+#[test]
 fn rebuild_and_serve_round_trip() {
     let temp = tempfile::tempdir().unwrap();
     let (beads_dir, cache_path) = test_store_path(&temp);

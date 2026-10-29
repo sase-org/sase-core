@@ -33,6 +33,9 @@
 //!   rebuild commits, a fresh sweep revalidates what was stored, and any
 //!   concurrent change invalidates the file in place and serves a replay
 //!   instead.
+//! - The failed-rebuild backoff arms only when a rebuild cannot complete.
+//!   A committed rebuild superseded by a concurrent mutation is invalidated
+//!   in place and leaves the next read free to refresh.
 //!
 //! Known limitation for `read-model-tail` to close: the rebuild reads the
 //! store without the mutation lock, so a mutation landing mid-rebuild can
@@ -99,7 +102,7 @@ const VERIFY_DIFF_ID_LIMIT: usize = 50;
 pub(super) const SERVE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 /// Bounded wait for a rebuild transaction before replaying instead.
 pub(super) const REBUILD_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-/// A cache that failed to rebuild is left to replay-only reads for this window.
+/// A cache whose rebuild failed is left to replay-only reads for this window.
 const FAILED_REBUILD_BACKOFF: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Default)]
@@ -1241,22 +1244,41 @@ pub(super) fn rebuild_from_replay(
             clear_failed_rebuild(cache_path);
             clear_cache_diagnostic(cache_path);
         }
-        Err(Fault::Cache)
+        Err(RebuildMiss::Superseded(_)) => {}
+        Err(RebuildMiss::Failed(Fault::Cache))
             if another_writer_advanced_cache(cache_path, start_generation) => {}
-        Err(Fault::Cache) => {
+        Err(RebuildMiss::Failed(Fault::Cache)) => {
             mark_failed_rebuild(cache_path);
             set_cache_diagnostic(
                 cache_path,
                 "read-model rebuild failed; replay served this read",
             );
         }
-        Err(Fault::CacheDiagnostic(reason)) => {
+        Err(RebuildMiss::Failed(Fault::CacheDiagnostic(reason))) => {
             mark_failed_rebuild(cache_path);
             set_cache_diagnostic(cache_path, reason.clone());
         }
-        Err(Fault::Store(_)) => {}
+        Err(RebuildMiss::Failed(Fault::Store(_))) => {}
     }
-    result
+    result.map_err(|miss| match miss {
+        RebuildMiss::Failed(fault) | RebuildMiss::Superseded(fault) => fault,
+    })
+}
+
+/// Why a rebuild attempt did not serve its own rows.
+enum RebuildMiss {
+    /// The rebuild could not complete; arms the failed-rebuild backoff.
+    Failed(Fault),
+    /// The rebuild committed, but a concurrent mutation moved the store
+    /// before the post-commit sweep. The file was invalidated in place and
+    /// the next read refreshes normally, so this never arms the backoff.
+    Superseded(Fault),
+}
+
+impl From<Fault> for RebuildMiss {
+    fn from(fault: Fault) -> Self {
+        Self::Failed(fault)
+    }
 }
 
 /// A generation change while replay was in progress is a lost race, not a
@@ -1277,16 +1299,16 @@ fn rebuild_from_replay_inner(
     token: &str,
     start_generation: u64,
     reason: &str,
-) -> Result<CachedStoreSnapshot, Fault> {
+) -> Result<CachedStoreSnapshot, RebuildMiss> {
     let (streams, signatures) =
         match read_event_store_with_stream_signatures(beads_dir) {
             Ok((_, streams, signatures)) => (streams, signatures),
-            Err(error) => return Err(Fault::Store(error)),
+            Err(error) => return Err(Fault::Store(error).into()),
         };
     let (issues, provenance) =
         match reduce_parsed_event_streams_with_link_provenance(&streams) {
             Ok(outcome) => outcome,
-            Err(error) => return Err(Fault::Store(error)),
+            Err(error) => return Err(Fault::Store(error).into()),
         };
     let snapshot = CachedStoreSnapshot { issues, provenance };
     let signature_map: BTreeMap<String, StreamFileSignature> =
@@ -1294,7 +1316,7 @@ fn rebuild_from_replay_inner(
     let frontier = merge_frontier(&streams);
     let fingerprint = match fingerprint_manifest_config(beads_dir) {
         Ok(fingerprint) => fingerprint,
-        Err(error) => return Err(Fault::Store(error)),
+        Err(error) => return Err(Fault::Store(error).into()),
     };
     let connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
     let outcome = run_cache_write_with_repair(cache_path, &connection, || {
@@ -1334,21 +1356,23 @@ fn rebuild_from_replay_inner(
             drop(connection);
             return match open_and_serve(beads_dir, cache_path) {
                 Ok(ServeOutcome::Hit(fresh)) => Ok(fresh),
-                _ => Err(Fault::Cache),
+                _ => Err(Fault::Cache.into()),
             };
         }
         Err(WriteFault::Recreated(reason)) => {
             drop(connection);
             set_cache_diagnostic(cache_path, reason.clone());
-            return Err(Fault::CacheDiagnostic(reason));
+            return Err(Fault::CacheDiagnostic(reason).into());
         }
         Err(fault @ (WriteFault::Other(_) | WriteFault::Corrupt(_))) => {
             let message = format!("read-model rebuild write failed: {fault:?}");
             drop(connection);
-            return Err(invalidate_cache_and_report(cache_path, message));
+            return Err(invalidate_cache_and_report(cache_path, message).into());
         }
     }
     drop(connection);
+    #[cfg(test)]
+    rebuild_write_stats::run_after_rebuild_commit_hook();
     // A concurrent mutation may have landed mid-rebuild. Re-sweep: any
     // visible change discards the file and serves a replay instead, so
     // the cache never serves stale data.
@@ -1358,9 +1382,11 @@ fn rebuild_from_replay_inner(
                 .map_err(|_| Fault::Cache)?;
             if load_stream_signatures(&connection) != current.streams {
                 drop(connection);
-                return Err(invalidate_cache_and_report(
-                    cache_path,
-                    "post-rebuild stream sweep changed",
+                return Err(RebuildMiss::Superseded(
+                    invalidate_cache_and_report(
+                        cache_path,
+                        "post-rebuild stream sweep changed",
+                    ),
                 ));
             }
         }
@@ -1368,7 +1394,8 @@ fn rebuild_from_replay_inner(
             return Err(invalidate_cache_and_report(
                 cache_path,
                 "post-rebuild stream sweep unreadable",
-            ));
+            )
+            .into());
         }
     }
     Ok(snapshot)
@@ -2995,16 +3022,19 @@ pub(super) fn invalidate_cache_for_reason(
 /// measures mutation-load replay, not these replacement writes.
 #[cfg(test)]
 pub(super) mod rebuild_write_stats {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     thread_local! {
         static TABLE_REWRITES: Cell<u64> = const { Cell::new(0) };
         static INVALIDATION_FAULT: Cell<bool> = const { Cell::new(false) };
+        static AFTER_REBUILD_COMMIT_HOOK: RefCell<Option<Box<dyn FnOnce()>>> =
+            RefCell::new(None);
     }
 
     pub fn reset() {
         TABLE_REWRITES.with(|cell| cell.set(0));
         INVALIDATION_FAULT.with(|cell| cell.set(false));
+        AFTER_REBUILD_COMMIT_HOOK.with(|cell| *cell.borrow_mut() = None);
     }
 
     pub fn table_rewrites() -> u64 {
@@ -3021,5 +3051,18 @@ pub(super) mod rebuild_write_stats {
 
     pub(super) fn take_invalidation_fault() -> bool {
         INVALIDATION_FAULT.with(|cell| cell.replace(false))
+    }
+
+    pub fn set_after_rebuild_commit_hook(hook: impl FnOnce() + 'static) {
+        AFTER_REBUILD_COMMIT_HOOK
+            .with(|cell| *cell.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn run_after_rebuild_commit_hook() {
+        let hook =
+            AFTER_REBUILD_COMMIT_HOOK.with(|cell| cell.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 }
