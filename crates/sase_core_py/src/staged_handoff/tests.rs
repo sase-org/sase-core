@@ -33,6 +33,11 @@ fn staged_handoff_bindings_are_registered() {
             "gate_staged_payload_schema_version",
             "validate_gate_staged_payload",
             "build_gate_staged_payload",
+            "staged_monitor_launch_payload_schema_version",
+            "validate_staged_monitor_launch_payload",
+            "evaluate_staged_monitor_membership",
+            "evaluate_staged_owner_liveness",
+            "evaluate_staged_self_wait",
         ] {
             assert!(module.getattr(name).is_ok(), "{name}");
         }
@@ -195,6 +200,45 @@ fn gate_payload_binding_round_trips() {
     });
 }
 
+fn launch_payload() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "staged_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "monitor_id": "monitor-1",
+        "member_id": "member-1",
+        "request_fingerprint": "fp-1",
+        "command": ["sase", "tool", "run", "check"],
+        "execution_argv": ["sase", "tool", "run", "check"],
+        "label": "check",
+        "policy_digest": "a".repeat(64),
+        "lane": "followup",
+        "cwd": "/tmp/work",
+        "starter": {
+            "agent_id": "agent-1",
+            "run_id": "run-1",
+            "artifacts_dir": "/tmp/artifacts/1"
+        },
+        "workspace": {"mode": "inherit"},
+        "continuation": {"parent_node_ids": [], "protocol": "legacy"},
+        "resources": {"tool_run_id": "run-abc"}
+    })
+}
+
+#[test]
+fn launch_payload_binding_round_trips() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        assert_eq!(py_staged_monitor_launch_payload_schema_version(), 1);
+        let raw = launch_payload();
+        let payload = json_value_to_py(py, &raw).unwrap();
+        let payload = payload.bind(py).downcast::<PyDict>().unwrap();
+        let result =
+            py_validate_staged_monitor_launch_payload(py, payload).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value, raw);
+    });
+}
+
 #[test]
 fn gate_payload_binding_rejects_request_id_mismatch() {
     pyo3::prepare_freethreaded_python();
@@ -217,5 +261,54 @@ fn gate_payload_binding_rejects_request_id_mismatch() {
         assert!(error
             .to_string()
             .contains("exactly one of content or source"));
+    });
+}
+
+#[test]
+fn membership_liveness_self_wait_bindings_decide() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let membership = serde_json::json!({
+            "schema_version": 1,
+            "monitor_state": "staged",
+            "supervisor_present": false
+        });
+        let request = json_value_to_py(py, &membership).unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let result =
+            py_evaluate_staged_monitor_membership(py, request).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["nonterminal"], serde_json::json!(true));
+        assert_eq!(value["has_supervisor"], serde_json::json!(false));
+
+        let liveness = serde_json::json!({
+            "schema_version": 1,
+            "owner_kind": "monitor",
+            "owner_id": "monitor-1",
+            "staged_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "stage_record_present": true,
+            "proc_exists": false
+        });
+        let request = json_value_to_py(py, &liveness).unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_evaluate_staged_owner_liveness(py, request).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["pending_owner"], serde_json::json!(true));
+
+        let wait = serde_json::json!({
+            "schema_version": 1,
+            "caller_owner_kind": "monitor",
+            "caller_owner_id": "monitor-1",
+            "caller_staged_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "run_owner_kind": "monitor",
+            "run_owner_id": "monitor-1",
+            "run_staged_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "run_proc_exists": false
+        });
+        let request = json_value_to_py(py, &wait).unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_evaluate_staged_self_wait(py, request).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["is_self_wait"], serde_json::json!(true));
     });
 }

@@ -11,6 +11,7 @@ pub mod delivery;
 pub mod evidence;
 pub mod policy;
 pub mod prepared_coverage;
+pub mod prepared_reservation;
 pub mod replay;
 pub mod retention;
 pub mod schema;
@@ -69,6 +70,12 @@ pub use policy::{
 pub use prepared_coverage::{
     evaluate_prepared_starter_coverage, PreparedReservationWire,
     PreparedStarterCoverageDecisionWire, PreparedStarterCoverageRequestWire,
+};
+pub use prepared_reservation::{
+    evaluate_prepared_reservation_access,
+    PreparedReservationAccessDecisionWire,
+    PreparedReservationAccessRequestWire, PreparedReservationActionWire,
+    StoredPreparedReservationWire,
 };
 pub use replay::{
     plan_continuation_replay, ContinuationBranchAttributionWire,

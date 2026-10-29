@@ -6,12 +6,18 @@
 //! never transition the run themselves.
 
 use super::super::handoff_wire::{
-    ToolRunClaimOutcomeWire, ToolRunClaimRefusalWire, ToolRunClaimRequestWire,
-    ToolRunClaimResultWire, ToolRunJoinOutcomeWire, ToolRunJoinRefusalWire,
+    StagedJoinReservationWire, ToolRunActivateStagedJoinOutcomeWire,
+    ToolRunActivateStagedJoinRefusalWire, ToolRunActivateStagedJoinRequestWire,
+    ToolRunActivateStagedJoinResultWire, ToolRunClaimOutcomeWire,
+    ToolRunClaimRefusalWire, ToolRunClaimRequestWire, ToolRunClaimResultWire,
+    ToolRunJoinOutcomeWire, ToolRunJoinRecordWire, ToolRunJoinRefusalWire,
     ToolRunJoinRequestWire, ToolRunJoinResultWire,
     ToolRunReleaseJoinOutcomeWire, ToolRunReleaseJoinRequestWire,
-    ToolRunReleaseJoinResultWire, ToolRunStopOutcomeWire,
-    ToolRunStopRequestWire, ToolRunStopResultWire,
+    ToolRunReleaseJoinResultWire, ToolRunReleaseStagedJoinOutcomeWire,
+    ToolRunReleaseStagedJoinRequestWire, ToolRunReleaseStagedJoinResultWire,
+    ToolRunReserveStagedJoinOutcomeWire, ToolRunReserveStagedJoinRefusalWire,
+    ToolRunReserveStagedJoinRequestWire, ToolRunReserveStagedJoinResultWire,
+    ToolRunStopOutcomeWire, ToolRunStopRequestWire, ToolRunStopResultWire,
 };
 use super::super::wire::{
     ToolRunEventKindWire, ToolRunEventWire, ToolRunStateWire,
@@ -391,6 +397,12 @@ pub fn join(
             tx.commit()?;
             return Ok(refused(run, ToolRunJoinRefusalWire::Settled));
         }
+        // A staged reservation holds the run for its staged monitor: an
+        // ordinary join must go through activation instead of taking it.
+        if run.staged_join_reservation.is_some() {
+            tx.commit()?;
+            return Ok(refused(run, ToolRunJoinRefusalWire::StagedReserved));
+        }
         if run.stop_request.is_some() {
             tx.commit()?;
             return Ok(refused(run, ToolRunJoinRefusalWire::StopRequested));
@@ -524,4 +536,348 @@ fn load_existing_stop(
         ToolRunError::invalid("stored stop request was unreadable")
     })?;
     Ok(Some(record))
+}
+
+fn reserve_refused(
+    run: super::super::wire::ToolRunWire,
+    refusal: ToolRunReserveStagedJoinRefusalWire,
+) -> ToolRunReserveStagedJoinResultWire {
+    ToolRunReserveStagedJoinResultWire {
+        schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+        outcome: ToolRunReserveStagedJoinOutcomeWire::Refused,
+        refusal: Some(refusal),
+        replayed: false,
+        run,
+        diagnostics: Vec::new(),
+    }
+}
+
+fn reservation_matches(
+    reservation: &StagedJoinReservationWire,
+    staged_id: &str,
+    monitor_id: &str,
+) -> bool {
+    reservation.staged_id == staged_id && reservation.monitor_id == monitor_id
+}
+
+/// Reserve a detached run for one staged monitor.
+///
+/// The reservation is identified by staged ID plus monitor ID, validates
+/// the starter agent, and prevents another joiner from taking the run. A
+/// run that is already terminal is still refused; a run that settles after
+/// a successful reservation can later be activated.
+pub fn reserve_staged_join(
+    store_path: &Path,
+    request: ToolRunReserveStagedJoinRequestWire,
+    busy_timeout: Duration,
+) -> Result<ToolRunReserveStagedJoinResultWire, ToolRunError> {
+    validate_schema(request.schema_version)?;
+    if request.run_id.trim().is_empty() {
+        return Err(ToolRunError::invalid("run_id must not be empty"));
+    }
+    let staged_id = request.staged_id.trim().to_string();
+    let monitor_id = request.monitor_id.trim().to_string();
+    let agent = request.agent.trim().to_string();
+    if staged_id.is_empty() || monitor_id.is_empty() || agent.is_empty() {
+        return Err(ToolRunError::invalid(
+            "reserve staged join requires non-empty staged_id, monitor_id, and agent",
+        ));
+    }
+    with_write_store(store_path, busy_timeout, |conn| {
+        let tx =
+            conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(run) = load_run(&tx, &request.run_id)? else {
+            return Err(ToolRunError::NotFound {
+                run_id: request.run_id.clone(),
+            });
+        };
+        if run.state.is_terminal() {
+            tx.commit()?;
+            return Ok(reserve_refused(
+                run,
+                ToolRunReserveStagedJoinRefusalWire::Settled,
+            ));
+        }
+        if run.stop_request.is_some() {
+            tx.commit()?;
+            return Ok(reserve_refused(
+                run,
+                ToolRunReserveStagedJoinRefusalWire::StopRequested,
+            ));
+        }
+        let Some(starter) = run.starter.clone() else {
+            tx.commit()?;
+            return Ok(reserve_refused(
+                run,
+                ToolRunReserveStagedJoinRefusalWire::NotDetached,
+            ));
+        };
+        if starter.agent != agent {
+            tx.commit()?;
+            return Ok(reserve_refused(
+                run,
+                ToolRunReserveStagedJoinRefusalWire::AgentMismatch,
+            ));
+        }
+        if run.join.is_some() {
+            tx.commit()?;
+            return Ok(reserve_refused(
+                run,
+                ToolRunReserveStagedJoinRefusalWire::JoinedElsewhere,
+            ));
+        }
+        if let Some(existing) = run.staged_join_reservation.clone() {
+            tx.commit()?;
+            if reservation_matches(&existing, &staged_id, &monitor_id) {
+                return Ok(ToolRunReserveStagedJoinResultWire {
+                    schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                    outcome: ToolRunReserveStagedJoinOutcomeWire::Reserved,
+                    refusal: None,
+                    replayed: true,
+                    run,
+                    diagnostics: Vec::new(),
+                });
+            }
+            return Ok(reserve_refused(
+                run,
+                ToolRunReserveStagedJoinRefusalWire::ReservationElsewhere,
+            ));
+        }
+        let now = request.now_ts.unwrap_or_else(unix_now);
+        let reservation = StagedJoinReservationWire {
+            staged_id: staged_id.clone(),
+            monitor_id: monitor_id.clone(),
+            agent: agent.clone(),
+            reserved_ts: now,
+            requested_by: request.requested_by.clone(),
+        };
+        let json = serde_json::to_string(&reservation)
+            .map_err(|error| ToolRunError::store(error.to_string()))?;
+        tx.execute(
+            "UPDATE runs SET staged_join_reservation_json = ?2 WHERE run_id = ?1",
+            params![request.run_id, json],
+        )?;
+        touch_write_meta(&tx, now)?;
+        let run = load_run(&tx, &request.run_id)?.expect("reserved run");
+        tx.commit()?;
+        Ok(ToolRunReserveStagedJoinResultWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            outcome: ToolRunReserveStagedJoinOutcomeWire::Reserved,
+            refusal: None,
+            replayed: false,
+            run,
+            diagnostics: Vec::new(),
+        })
+    })
+}
+
+fn activate_refused(
+    run: super::super::wire::ToolRunWire,
+    refusal: ToolRunActivateStagedJoinRefusalWire,
+) -> ToolRunActivateStagedJoinResultWire {
+    ToolRunActivateStagedJoinResultWire {
+        schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+        outcome: ToolRunActivateStagedJoinOutcomeWire::Refused,
+        refusal: Some(refusal),
+        replayed: false,
+        run,
+        diagnostics: Vec::new(),
+    }
+}
+
+fn ordinary_join_matches(
+    run: &super::super::wire::ToolRunWire,
+    monitor_id: &str,
+) -> bool {
+    matches!(
+        run.join.as_ref(),
+        Some(join) if join.kind == "monitor" && join.id == monitor_id
+    )
+}
+
+/// Activate a staged-join reservation into the ordinary monitor join.
+///
+/// Activation converts the reservation to the same join record an
+/// ordinary monitor join would write, so observers cannot tell a staged
+/// adoption apart. A run that settled after reservation activates and its
+/// result is consumed; a stop request still refuses. Matching replay
+/// succeeds; foreign ownership refuses.
+pub fn activate_staged_join(
+    store_path: &Path,
+    request: ToolRunActivateStagedJoinRequestWire,
+    busy_timeout: Duration,
+) -> Result<ToolRunActivateStagedJoinResultWire, ToolRunError> {
+    validate_schema(request.schema_version)?;
+    if request.run_id.trim().is_empty() {
+        return Err(ToolRunError::invalid("run_id must not be empty"));
+    }
+    let staged_id = request.staged_id.trim().to_string();
+    let monitor_id = request.monitor_id.trim().to_string();
+    if staged_id.is_empty() || monitor_id.is_empty() {
+        return Err(ToolRunError::invalid(
+            "activate staged join requires non-empty staged_id and monitor_id",
+        ));
+    }
+    with_write_store(store_path, busy_timeout, |conn| {
+        let tx =
+            conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(run) = load_run(&tx, &request.run_id)? else {
+            return Err(ToolRunError::NotFound {
+                run_id: request.run_id.clone(),
+            });
+        };
+        if run.stop_request.is_some() {
+            tx.commit()?;
+            return Ok(activate_refused(
+                run,
+                ToolRunActivateStagedJoinRefusalWire::StopRequested,
+            ));
+        }
+        let reservation = run.staged_join_reservation.clone();
+        match reservation {
+            None => {
+                // No reservation: only a matching ordinary join replays a
+                // completed adoption; anything else never reserved this run.
+                tx.commit()?;
+                if ordinary_join_matches(&run, &monitor_id) {
+                    return Ok(ToolRunActivateStagedJoinResultWire {
+                        schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                        outcome:
+                            ToolRunActivateStagedJoinOutcomeWire::Activated,
+                        refusal: None,
+                        replayed: true,
+                        run,
+                        diagnostics: Vec::new(),
+                    });
+                }
+                return Ok(activate_refused(
+                    run,
+                    ToolRunActivateStagedJoinRefusalWire::NoReservation,
+                ));
+            }
+            Some(reservation)
+                if !reservation_matches(
+                    &reservation,
+                    &staged_id,
+                    &monitor_id,
+                ) =>
+            {
+                tx.commit()?;
+                return Ok(activate_refused(
+                    run,
+                    ToolRunActivateStagedJoinRefusalWire::ReservationMismatch,
+                ));
+            }
+            Some(_) => {}
+        }
+        if ordinary_join_matches(&run, &monitor_id) {
+            let now = request.now_ts.unwrap_or_else(unix_now);
+            tx.execute(
+                "UPDATE runs SET staged_join_reservation_json = NULL WHERE run_id = ?1",
+                params![request.run_id],
+            )?;
+            touch_write_meta(&tx, now)?;
+            let run = load_run(&tx, &request.run_id)?.expect("activated run");
+            tx.commit()?;
+            return Ok(ToolRunActivateStagedJoinResultWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                outcome: ToolRunActivateStagedJoinOutcomeWire::Activated,
+                refusal: None,
+                replayed: true,
+                run,
+                diagnostics: Vec::new(),
+            });
+        }
+        if run.join.is_some() {
+            tx.commit()?;
+            return Ok(activate_refused(
+                run,
+                ToolRunActivateStagedJoinRefusalWire::JoinedElsewhere,
+            ));
+        }
+        let now = request.now_ts.unwrap_or_else(unix_now);
+        let join = ToolRunJoinRecordWire {
+            kind: "monitor".to_string(),
+            id: monitor_id.clone(),
+            joined_ts: now,
+            requested_by: request.requested_by.clone(),
+        };
+        let json = serde_json::to_string(&join)
+            .map_err(|error| ToolRunError::store(error.to_string()))?;
+        tx.execute(
+            "UPDATE runs SET join_json = ?2, staged_join_reservation_json = NULL
+             WHERE run_id = ?1",
+            params![request.run_id, json],
+        )?;
+        touch_write_meta(&tx, now)?;
+        let run = load_run(&tx, &request.run_id)?.expect("activated run");
+        tx.commit()?;
+        Ok(ToolRunActivateStagedJoinResultWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            outcome: ToolRunActivateStagedJoinOutcomeWire::Activated,
+            refusal: None,
+            replayed: false,
+            run,
+            diagnostics: Vec::new(),
+        })
+    })
+}
+
+/// Release one stage's join reservation.
+///
+/// Identity-scoped and safe to repeat, including after settlement: only a
+/// matching reservation is cleared, and an ordinary join is never touched.
+pub fn release_staged_join(
+    store_path: &Path,
+    request: ToolRunReleaseStagedJoinRequestWire,
+    busy_timeout: Duration,
+) -> Result<ToolRunReleaseStagedJoinResultWire, ToolRunError> {
+    validate_schema(request.schema_version)?;
+    if request.run_id.trim().is_empty() {
+        return Err(ToolRunError::invalid("run_id must not be empty"));
+    }
+    let staged_id = request.staged_id.trim().to_string();
+    let monitor_id = request.monitor_id.trim().to_string();
+    if staged_id.is_empty() || monitor_id.is_empty() {
+        return Err(ToolRunError::invalid(
+            "release staged join requires non-empty staged_id and monitor_id",
+        ));
+    }
+    with_write_store(store_path, busy_timeout, |conn| {
+        let tx =
+            conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(run) = load_run(&tx, &request.run_id)? else {
+            return Err(ToolRunError::NotFound {
+                run_id: request.run_id.clone(),
+            });
+        };
+        let outcome = match run.staged_join_reservation.clone() {
+            None => ToolRunReleaseStagedJoinOutcomeWire::NotReserved,
+            Some(reservation)
+                if reservation_matches(
+                    &reservation,
+                    &staged_id,
+                    &monitor_id,
+                ) =>
+            {
+                let now = request.now_ts.unwrap_or_else(unix_now);
+                tx.execute(
+                    "UPDATE runs SET staged_join_reservation_json = NULL
+                     WHERE run_id = ?1",
+                    params![request.run_id],
+                )?;
+                touch_write_meta(&tx, now)?;
+                ToolRunReleaseStagedJoinOutcomeWire::Released
+            }
+            Some(_) => ToolRunReleaseStagedJoinOutcomeWire::ReservedElsewhere,
+        };
+        let run = load_run(&tx, &request.run_id)?.expect("released run");
+        tx.commit()?;
+        Ok(ToolRunReleaseStagedJoinResultWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            outcome,
+            run,
+            diagnostics: Vec::new(),
+        })
+    })
 }

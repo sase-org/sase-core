@@ -479,6 +479,93 @@ fn py_tool_run_release_join<'py>(
 }
 
 #[pyfunction]
+#[pyo3(
+    name = "tool_run_reserve_staged_join",
+    signature = (store_path, request, busy_timeout_ms=0)
+)]
+fn py_tool_run_reserve_staged_join<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: sase_core::tool_run::ToolRunReserveStagedJoinRequestWire =
+        telemetry_request_from_pydict(
+            request,
+            "ToolRunReserveStagedJoinRequestWire",
+        )?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            sase_core::tool_run::reserve_staged_join(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_activate_staged_join",
+    signature = (store_path, request, busy_timeout_ms=0)
+)]
+fn py_tool_run_activate_staged_join<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: sase_core::tool_run::ToolRunActivateStagedJoinRequestWire =
+        telemetry_request_from_pydict(
+            request,
+            "ToolRunActivateStagedJoinRequestWire",
+        )?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            sase_core::tool_run::activate_staged_join(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_release_staged_join",
+    signature = (store_path, request, busy_timeout_ms=0)
+)]
+fn py_tool_run_release_staged_join<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: sase_core::tool_run::ToolRunReleaseStagedJoinRequestWire =
+        telemetry_request_from_pydict(
+            request,
+            "ToolRunReleaseStagedJoinRequestWire",
+        )?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            sase_core::tool_run::release_staged_join(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(name = "tool_run_sync_wait_budget")]
 fn py_tool_run_sync_wait_budget<'py>(
     py: Python<'py>,
@@ -1152,6 +1239,9 @@ pub(crate) fn register_telemetry(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_tool_run_claim, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_join, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_release_join, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_reserve_staged_join, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_activate_staged_join, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_release_staged_join, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_sync_wait_budget, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_request_stop, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_list, m)?)?;

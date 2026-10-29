@@ -59,12 +59,12 @@ pub use receipt::{
     RECEIPT_MAX_CHANGED_PATHS, RECEIPT_MAX_TTL_SECONDS, RECEIPT_POLICY_VERSION,
 };
 pub use store::{
-    append_event, begin, claim, finish, join, list_runs, observe,
-    receipt_lookup, receipt_settle, reconcile, record_demand, release_join,
-    request_stop, retention_apply, retention_preview, show_run, store_stats,
-    summarize, tool_run_failures, tool_run_receipts_report,
-    tool_run_stats_report, triage_record, triage_settle, triage_show,
-    triage_stage,
+    activate_staged_join, append_event, begin, claim, finish, join, list_runs,
+    observe, receipt_lookup, receipt_settle, reconcile, record_demand,
+    release_join, release_staged_join, request_stop, reserve_staged_join,
+    retention_apply, retention_preview, show_run, store_stats, summarize,
+    tool_run_failures, tool_run_receipts_report, tool_run_stats_report,
+    triage_record, triage_settle, triage_show, triage_stage,
 };
 pub use triage::*;
 pub use triage::{

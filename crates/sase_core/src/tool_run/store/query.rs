@@ -362,6 +362,7 @@ pub(super) fn load_run(
     let owner_log_projection = projection("owner_log_path");
     let starter_projection = projection("starter_json");
     let join_projection = projection("join_json");
+    let reservation_projection = projection("staged_join_reservation_json");
     let demand_projection = projection("demand_json");
     let sql = format!(
         "SELECT run_id, state, source, executor, attempt, tool_name,
@@ -378,7 +379,8 @@ pub(super) fn load_run(
                 {launcher_projection}, {terminal_cause_projection},
                 {settled_by_projection}, {stop_request_projection},
                 {owner_log_projection}, {starter_projection},
-                {join_projection}, {demand_projection}
+                {join_projection}, {reservation_projection},
+                {demand_projection}
          FROM runs WHERE run_id = ?1"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -401,7 +403,8 @@ pub(super) fn load_run(
     let owner_log_path: Option<String> = row.get(45)?;
     let starter_json: Option<String> = row.get(46)?;
     let join_json: Option<String> = row.get(47)?;
-    let demand_json: Option<String> = row.get(48)?;
+    let reservation_json: Option<String> = row.get(48)?;
+    let demand_json: Option<String> = row.get(49)?;
     let mut diagnostics: Vec<String> =
         serde_json::from_str(&diagnostics_raw)
             .map_err(|error| ToolRunError::store(error.to_string()))?;
@@ -430,6 +433,17 @@ pub(super) fn load_run(
         "stored join was unreadable",
     );
     if let Some(diagnostic) = join_diagnostic {
+        diagnostics.push(diagnostic);
+    }
+    // Malformed staged reservations read as absent plus a diagnostic and
+    // never fail the load, matching the other stored records.
+    let (staged_join_reservation, reservation_diagnostic) = parse_stored_record::<
+        super::super::handoff_wire::StagedJoinReservationWire,
+    >(
+        reservation_json,
+        "stored staged join reservation was unreadable",
+    );
+    if let Some(diagnostic) = reservation_diagnostic {
         diagnostics.push(diagnostic);
     }
     // Malformed demand reads as absent plus a diagnostic and never fails
@@ -501,6 +515,7 @@ pub(super) fn load_run(
         launcher,
         starter,
         join,
+        staged_join_reservation,
         demand,
     }))
 }

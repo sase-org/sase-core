@@ -29,7 +29,10 @@ mod triage_stage;
 
 pub use demand::record_demand;
 pub use failures::tool_run_failures;
-pub use handoff::{claim, join, release_join, request_stop};
+pub use handoff::{
+    activate_staged_join, claim, join, release_join, release_staged_join,
+    request_stop, reserve_staged_join,
+};
 pub use lifecycle::{append_event, begin, finish, observe};
 pub(crate) use query::typical_duration_for;
 pub use query::{list_runs, show_run, store_stats, summarize};

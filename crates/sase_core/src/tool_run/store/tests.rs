@@ -29,6 +29,7 @@ mod contention;
 mod handoff;
 mod receipt;
 mod reconcile_owner;
+mod staged_join;
 mod triage;
 mod triage_stage;
 

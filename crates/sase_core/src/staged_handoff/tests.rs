@@ -2,10 +2,14 @@ use serde_json::{json, Value as JsonValue};
 
 use super::{
     build_gate_staged_payload, evaluate_stage_admission,
-    gate_staged_payload_schema_version, receipt_authorizes,
-    staged_handoff_wire_schema_version, validate_gate_staged_payload,
+    evaluate_staged_monitor_membership, evaluate_staged_owner_liveness,
+    evaluate_staged_self_wait, gate_staged_payload_schema_version,
+    receipt_authorizes, staged_handoff_wire_schema_version,
+    staged_monitor_launch_payload_schema_version, validate_gate_staged_payload,
     validate_staged_handoff, validate_staged_handoff_receipt,
-    StagedHandoffError, GATE_STAGED_PAYLOAD_SCHEMA_VERSION,
+    validate_staged_monitor_launch_payload, StagedHandoffError,
+    StagedMonitorMembershipRequestWire, StagedOwnerLivenessRequestWire,
+    StagedSelfWaitRequestWire, GATE_STAGED_PAYLOAD_SCHEMA_VERSION,
     STAGED_HANDOFF_WIRE_SCHEMA_VERSION,
 };
 
@@ -334,6 +338,43 @@ fn gate_record(mode: &str) -> JsonValue {
     })
 }
 
+fn launch_payload() -> JsonValue {
+    json!({
+        "schema_version": 1,
+        "staged_id": STAGED_ID,
+        "monitor_id": "monitor-1",
+        "member_id": "member-1",
+        "request_fingerprint": "fp-1",
+        "command": ["sase", "tool", "run", "check"],
+        "execution_argv": ["sase", "tool", "run", "check"],
+        "label": "check",
+        "policy_digest": "a".repeat(64),
+        "lane": "followup",
+        "cwd": "/tmp/work",
+        "starter": {
+            "agent_id": "agent-1",
+            "run_id": "run-1",
+            "artifacts_dir": "/tmp/artifacts/1",
+            "workspace_id": "ws-1"
+        },
+        "workspace": {"mode": "inherit"},
+        "continuation": {
+            "parent_node_ids": [],
+            "protocol": "legacy"
+        },
+        "resources": {
+            "tool_run_id": "run-abc",
+            "prepared_intent_ref": "local:continuation/completion_intents/intent.json",
+            "prepared_reservation": {
+                "staged_id": STAGED_ID,
+                "monitor_id": "monitor-1",
+                "request_fingerprint": "fp-1",
+                "command": ["sase", "tool", "run", "check"]
+            }
+        }
+    })
+}
+
 #[test]
 fn gate_payload_schema_version_is_one() {
     assert_eq!(GATE_STAGED_PAYLOAD_SCHEMA_VERSION, 1);
@@ -345,6 +386,15 @@ fn valid_gate_payload_round_trips() {
     let payload = gate_payload();
     let normalized = validate_gate_staged_payload(&payload)
         .expect("gate payload must validate");
+    assert_eq!(normalized, payload);
+}
+
+#[test]
+fn monitor_launch_payload_round_trips() {
+    assert_eq!(staged_monitor_launch_payload_schema_version(), 1);
+    let payload = launch_payload();
+    let normalized = validate_staged_monitor_launch_payload(&payload)
+        .expect("valid payload");
     assert_eq!(normalized, payload);
 }
 
@@ -501,12 +551,104 @@ fn gate_payload_rejects_incomplete_creator() {
 }
 
 #[test]
+fn monitor_launch_payload_rejects_unknown_fields() {
+    let mut payload = launch_payload();
+    payload["extra"] = json!(true);
+    let error = validate_staged_monitor_launch_payload(&payload)
+        .expect_err("unknown field");
+    assert!(error.to_string().contains("StagedMonitorLaunchPayloadWire"));
+}
+
+#[test]
+fn monitor_launch_payload_requires_frozen_fields() {
+    for field in [
+        "staged_id",
+        "monitor_id",
+        "request_fingerprint",
+        "command",
+        "label",
+        "policy_digest",
+        "lane",
+        "cwd",
+    ] {
+        let mut payload = launch_payload();
+        if field == "command" {
+            payload[field] = json!([]);
+        } else {
+            payload[field] = json!("");
+        }
+        assert!(
+            validate_staged_monitor_launch_payload(&payload).is_err(),
+            "{field} must be validated"
+        );
+    }
+}
+
+#[test]
 fn valid_gate_records_round_trip_for_both_dispositions() {
     for mode in ["inherit", "release"] {
         let record = gate_record(mode);
         let normalized = validate_staged_handoff(&record)
             .unwrap_or_else(|_| panic!("gate {mode} must validate"));
         assert_eq!(normalized, record);
+    }
+}
+
+#[test]
+fn monitor_launch_payload_rejects_bad_digest_and_workspace() {
+    let mut payload = launch_payload();
+    payload["policy_digest"] = json!("not-a-digest");
+    assert!(
+        validate_staged_monitor_launch_payload(&payload).is_err(),
+        "policy digest must be sha256"
+    );
+
+    let mut payload = launch_payload();
+    payload["workspace"] = json!({"mode": "none"});
+    let error = validate_staged_monitor_launch_payload(&payload)
+        .expect_err("workspace mode");
+    assert!(error.to_string().contains("inherit"));
+}
+
+#[test]
+fn monitor_launch_payload_rejects_bad_protocol() {
+    let mut payload = launch_payload();
+    payload["continuation"]["protocol"] = json!("someday");
+    assert!(
+        validate_staged_monitor_launch_payload(&payload).is_err(),
+        "protocol is a closed vocabulary"
+    );
+    let mut payload = launch_payload();
+    payload["continuation"]["protocol"] = json!("records_v1");
+    assert!(
+        validate_staged_monitor_launch_payload(&payload).is_ok(),
+        "records_v1 is supported"
+    );
+}
+
+#[test]
+fn historic_minimal_monitor_records_still_validate() {
+    let record = json!({
+        "schema_version": 1,
+        "staged_id": STAGED_ID,
+        "kind": "monitor",
+        "created_at": "2026-10-28T12:00:00Z",
+        "payload": {},
+        "successor_workspace": "inherit",
+        "carry_allowed": false,
+        "dirty_obligations_at_stage": []
+    });
+    assert!(validate_staged_handoff(&record).is_ok());
+}
+
+fn membership(
+    state: &str,
+    supervisor_present: bool,
+) -> StagedMonitorMembershipRequestWire {
+    StagedMonitorMembershipRequestWire {
+        schema_version: STAGED_HANDOFF_WIRE_SCHEMA_VERSION,
+        monitor_state: state.to_string(),
+        supervisor_present,
     }
 }
 
@@ -548,4 +690,191 @@ fn gate_record_rejects_malformed_payload() {
     record["payload"]["request_id"] = json!("other-id");
     let error = validate_staged_handoff(&record).expect_err("bad gate payload");
     assert!(error.to_string().contains("payload.spec.request_id"));
+}
+
+#[test]
+fn staged_membership_has_no_supervisor_or_capacity() {
+    let facts = evaluate_staged_monitor_membership(membership("staged", false))
+        .expect("staged membership");
+    assert!(facts.nonterminal);
+    assert!(facts.blocks_lane_start);
+    assert!(!facts.has_supervisor);
+    assert!(!facts.occupies_runner_capacity);
+}
+
+#[test]
+fn staged_membership_refuses_a_supervisor() {
+    assert!(
+        evaluate_staged_monitor_membership(membership("staged", true)).is_err(),
+        "staged monitors never spawn a supervisor"
+    );
+}
+
+#[test]
+fn running_membership_preserves_current_behavior() {
+    let facts = evaluate_staged_monitor_membership(membership("running", true))
+        .expect("running membership");
+    assert!(facts.nonterminal);
+    assert!(facts.blocks_lane_start);
+    assert!(facts.has_supervisor);
+    assert!(facts.occupies_runner_capacity);
+}
+
+#[test]
+fn terminal_membership_is_not_pending() {
+    for state in ["completed", "failed", "timeout", "stopped", "lost"] {
+        let facts =
+            evaluate_staged_monitor_membership(membership(state, false))
+                .expect("terminal membership");
+        assert!(!facts.nonterminal, "{state}");
+        assert!(!facts.blocks_lane_start, "{state}");
+        assert!(!facts.has_supervisor, "{state}");
+        assert!(!facts.occupies_runner_capacity, "{state}");
+    }
+    assert!(
+        evaluate_staged_monitor_membership(membership("adrift", false))
+            .is_err(),
+        "unknown states are not membership facts"
+    );
+}
+
+fn liveness(
+    owner_id: &str,
+    staged_id: &str,
+    stage_record_present: bool,
+    proc_exists: bool,
+) -> StagedOwnerLivenessRequestWire {
+    StagedOwnerLivenessRequestWire {
+        schema_version: STAGED_HANDOFF_WIRE_SCHEMA_VERSION,
+        owner_kind: "monitor".to_string(),
+        owner_id: owner_id.to_string(),
+        staged_id: staged_id.to_string(),
+        stage_record_present,
+        proc_exists,
+    }
+}
+
+#[test]
+fn staged_owner_stays_pending_before_its_proc_exists() {
+    let decision = evaluate_staged_owner_liveness(liveness(
+        "monitor-1",
+        STAGED_ID,
+        true,
+        false,
+    ))
+    .expect("liveness");
+    assert!(decision.pending_owner);
+    assert!(decision.reason.is_none());
+}
+
+#[test]
+fn liveness_fails_closed_on_unknown_facts() {
+    for (owner_id, staged_id, present, proc, reason) in [
+        ("", STAGED_ID, true, false, "owner_id_is_missing"),
+        (
+            "monitor-1",
+            "not-a-uuid",
+            true,
+            false,
+            "staged_id_is_not_a_uuid",
+        ),
+        (
+            "monitor-1",
+            STAGED_ID,
+            false,
+            false,
+            "no_durable_staged_record",
+        ),
+        ("monitor-1", STAGED_ID, true, true, "proc_already_exists"),
+    ] {
+        let decision = evaluate_staged_owner_liveness(liveness(
+            owner_id, staged_id, present, proc,
+        ))
+        .expect("liveness decides");
+        assert!(!decision.pending_owner, "{reason}");
+        assert_eq!(decision.reason.as_deref(), Some(reason));
+    }
+    let mut request = liveness("monitor-1", STAGED_ID, true, false);
+    request.owner_kind = "proc".to_string();
+    let decision =
+        evaluate_staged_owner_liveness(request).expect("liveness decides");
+    assert!(!decision.pending_owner);
+    assert_eq!(decision.reason.as_deref(), Some("owner_is_not_a_monitor"));
+}
+
+fn self_wait(
+    caller_owner_id: &str,
+    caller_staged_id: Option<&str>,
+    run_staged_id: Option<&str>,
+    run_proc_exists: bool,
+) -> StagedSelfWaitRequestWire {
+    StagedSelfWaitRequestWire {
+        schema_version: STAGED_HANDOFF_WIRE_SCHEMA_VERSION,
+        caller_owner_kind: "monitor".to_string(),
+        caller_owner_id: caller_owner_id.to_string(),
+        caller_staged_id: caller_staged_id.map(str::to_string),
+        caller_agent_name: Some("agent-1".to_string()),
+        run_owner_kind: "monitor".to_string(),
+        run_owner_id: "monitor-1".to_string(),
+        run_staged_id: run_staged_id.map(str::to_string),
+        run_starter_agent_name: Some("agent-1".to_string()),
+        run_proc_exists,
+    }
+}
+
+#[test]
+fn caller_cannot_wait_on_its_own_pending_staged_run() {
+    let decision = evaluate_staged_self_wait(self_wait(
+        "monitor-1",
+        Some(STAGED_ID),
+        Some(STAGED_ID),
+        false,
+    ))
+    .expect("self wait");
+    assert!(decision.is_self_wait);
+    assert!(decision.reason.is_none());
+}
+
+#[test]
+fn self_wait_ignores_agent_name_coincidence() {
+    // Same agent name on both sides, but different durable owners: not self.
+    let decision = evaluate_staged_self_wait(self_wait(
+        "monitor-2",
+        Some(STAGED_ID),
+        Some(STAGED_ID),
+        false,
+    ))
+    .expect("self wait decides");
+    assert!(!decision.is_self_wait);
+    assert_eq!(decision.reason.as_deref(), Some("different_owner"));
+}
+
+#[test]
+fn self_wait_requires_durable_stage_ownership() {
+    for (caller, run, proc, reason) in [
+        (Some(STAGED_ID), None, false, "run_is_not_staged"),
+        (
+            Some(STAGED_ID),
+            Some(STAGED_ID),
+            true,
+            "run_already_launched",
+        ),
+        (None, Some(STAGED_ID), false, "stage_identity_mismatch"),
+        (
+            Some("bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"),
+            Some(STAGED_ID),
+            false,
+            "stage_identity_mismatch",
+        ),
+    ] {
+        let decision = evaluate_staged_self_wait(self_wait(
+            "monitor-1",
+            caller,
+            run,
+            proc,
+        ))
+        .expect("self wait decides");
+        assert!(!decision.is_self_wait, "{reason}");
+        assert_eq!(decision.reason.as_deref(), Some(reason));
+    }
 }

@@ -575,6 +575,7 @@ pub(crate) use sase_core::continuation::{
     consume_conditional_completion_request as core_consume_conditional_completion,
     decide_resume_adoption as core_decide_resume_adoption,
     evaluate_conditional_completion as core_evaluate_conditional_completion,
+    evaluate_prepared_reservation_access as core_evaluate_prepared_reservation_access,
     evaluate_prepared_starter_coverage as core_evaluate_prepared_starter_coverage,
     freeze_continuation_policy as core_freeze_continuation_policy,
     invalidate_conditional_completion_request as core_invalidate_conditional_completion,
@@ -613,7 +614,8 @@ pub(crate) use sase_core::continuation::{
     ContinuationPolicyResolutionRequestWire, ContinuationReplayPlanRequestWire,
     ContinuationResumeAdoptionRequestWire, ContinuationRetentionRequestWire,
     DiagnosticManifestWire, LaunchRequesterContinuationWire, MonitorResultWire,
-    PreparedStarterCoverageRequestWire, CONTINUATION_WIRE_SCHEMA_VERSION,
+    PreparedReservationAccessRequestWire, PreparedStarterCoverageRequestWire,
+    CONTINUATION_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::disk_cleanup_outcome::{
     normalize_disk_cleanup_outcome as core_normalize_disk_cleanup_outcome,

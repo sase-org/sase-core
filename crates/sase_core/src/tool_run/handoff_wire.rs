@@ -259,6 +259,7 @@ pub enum ToolRunJoinRefusalWire {
     StopRequested,
     JoinedElsewhere,
     AgentMismatch,
+    StagedReserved,
 }
 
 impl ToolRunJoinRefusalWire {
@@ -269,6 +270,7 @@ impl ToolRunJoinRefusalWire {
             Self::StopRequested => "stop_requested",
             Self::JoinedElsewhere => "joined_elsewhere",
             Self::AgentMismatch => "agent_mismatch",
+            Self::StagedReserved => "staged_reserved",
         }
     }
 }
@@ -444,4 +446,196 @@ pub struct ToolRunReconcileSettlementWire {
     pub state: ToolRunStateWire,
     pub terminal_cause: String,
     pub settled_by: String,
+}
+
+// Staged-join reservation wires: atomic reservation/activation/release for
+// staged monitors.
+//
+// A staged monitor reserves the ToolRun at stage time (identified by staged
+// ID plus monitor ID), activates the reservation into the ordinary monitor
+// join at adoption, and releases it when staging is discarded. Reservation
+// prevents another joiner from taking the run; activation consumes a run
+// that settled after reservation.
+
+/// Durable staged-join reservation stored on the run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StagedJoinReservationWire {
+    pub staged_id: String,
+    pub monitor_id: String,
+    pub agent: String,
+    pub reserved_ts: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRunReserveStagedJoinOutcomeWire {
+    Reserved,
+    Refused,
+}
+
+impl ToolRunReserveStagedJoinOutcomeWire {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reserved => "reserved",
+            Self::Refused => "refused",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRunReserveStagedJoinRefusalWire {
+    Settled,
+    StopRequested,
+    NotDetached,
+    AgentMismatch,
+    JoinedElsewhere,
+    ReservationElsewhere,
+}
+
+impl ToolRunReserveStagedJoinRefusalWire {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Settled => "settled",
+            Self::StopRequested => "stop_requested",
+            Self::NotDetached => "not_detached",
+            Self::AgentMismatch => "agent_mismatch",
+            Self::JoinedElsewhere => "joined_elsewhere",
+            Self::ReservationElsewhere => "reservation_elsewhere",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRunReserveStagedJoinRequestWire {
+    #[serde(default = "handoff_schema_version")]
+    pub schema_version: u32,
+    pub run_id: String,
+    pub staged_id: String,
+    pub monitor_id: String,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now_ts: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolRunReserveStagedJoinResultWire {
+    #[serde(default = "handoff_schema_version")]
+    pub schema_version: u32,
+    pub outcome: ToolRunReserveStagedJoinOutcomeWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<ToolRunReserveStagedJoinRefusalWire>,
+    pub replayed: bool,
+    pub run: ToolRunWire,
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRunActivateStagedJoinOutcomeWire {
+    Activated,
+    Refused,
+}
+
+impl ToolRunActivateStagedJoinOutcomeWire {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Activated => "activated",
+            Self::Refused => "refused",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRunActivateStagedJoinRefusalWire {
+    NoReservation,
+    ReservationMismatch,
+    StopRequested,
+    JoinedElsewhere,
+}
+
+impl ToolRunActivateStagedJoinRefusalWire {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoReservation => "no_reservation",
+            Self::ReservationMismatch => "reservation_mismatch",
+            Self::StopRequested => "stop_requested",
+            Self::JoinedElsewhere => "joined_elsewhere",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRunActivateStagedJoinRequestWire {
+    #[serde(default = "handoff_schema_version")]
+    pub schema_version: u32,
+    pub run_id: String,
+    pub staged_id: String,
+    pub monitor_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now_ts: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolRunActivateStagedJoinResultWire {
+    #[serde(default = "handoff_schema_version")]
+    pub schema_version: u32,
+    pub outcome: ToolRunActivateStagedJoinOutcomeWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<ToolRunActivateStagedJoinRefusalWire>,
+    pub replayed: bool,
+    pub run: ToolRunWire,
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRunReleaseStagedJoinOutcomeWire {
+    Released,
+    NotReserved,
+    ReservedElsewhere,
+}
+
+impl ToolRunReleaseStagedJoinOutcomeWire {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Released => "released",
+            Self::NotReserved => "not_reserved",
+            Self::ReservedElsewhere => "reserved_elsewhere",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRunReleaseStagedJoinRequestWire {
+    #[serde(default = "handoff_schema_version")]
+    pub schema_version: u32,
+    pub run_id: String,
+    pub staged_id: String,
+    pub monitor_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now_ts: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolRunReleaseStagedJoinResultWire {
+    #[serde(default = "handoff_schema_version")]
+    pub schema_version: u32,
+    pub outcome: ToolRunReleaseStagedJoinOutcomeWire,
+    pub run: ToolRunWire,
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
 }

@@ -743,6 +743,9 @@ pub struct ToolRunWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub join: Option<super::handoff_wire::ToolRunJoinRecordWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_join_reservation:
+        Option<super::handoff_wire::StagedJoinReservationWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub demand: Option<super::demand_wire::ToolRunDemandWire>,
 }
 

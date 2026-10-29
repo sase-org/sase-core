@@ -311,7 +311,10 @@ pub fn evaluate_prepared_starter_coverage(
     })
 }
 
-fn validate_uuid(value: &str, field: &str) -> Result<(), ContinuationError> {
+pub(crate) fn validate_uuid(
+    value: &str,
+    field: &str,
+) -> Result<(), ContinuationError> {
     if is_uuid(value) {
         Ok(())
     } else {

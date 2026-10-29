@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS runs (
     stop_request_json TEXT,
     starter_json TEXT,
     join_json TEXT,
+    staged_join_reservation_json TEXT,
     demand_json TEXT,
     owner_log_path TEXT,
     mutated_input INTEGER,
@@ -241,6 +242,7 @@ const CHILD_OBSERVATION_COLUMNS: &[(&str, &str)] = &[
     ("stop_request_json", "TEXT"),
     ("starter_json", "TEXT"),
     ("join_json", "TEXT"),
+    ("staged_join_reservation_json", "TEXT"),
     ("demand_json", "TEXT"),
     ("owner_log_path", "TEXT"),
 ];
