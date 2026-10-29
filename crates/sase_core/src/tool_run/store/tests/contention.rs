@@ -9,9 +9,11 @@
 //! exhausted a 25 ms budget in 27 ms.
 
 use super::{begin_named, definition, store};
+use crate::tool_run::store::connection::with_write_store;
 use crate::tool_run::store::{begin, show_run, store_stats};
 use crate::tool_run::wire::{
     ToolRunBeginRequestWire, ToolRunShowRequestWire,
+    TOOL_RUN_DEFAULT_BUSY_TIMEOUT, TOOL_RUN_MAX_BUSY_TIMEOUT,
     TOOL_RUN_WIRE_SCHEMA_VERSION,
 };
 use crate::tool_run::ToolRunError;
@@ -20,6 +22,13 @@ use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::sync::{mpsc, Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Budget for schedules whose oracle is eventual success once contention
+/// clears. The releasing thread, and the holder's close-time WAL checkpoint,
+/// run on a loaded `cargo test` run queue and can outlast the 250 ms
+/// production default there (sase-1p6), turning scheduler delay into a false
+/// Busy. `zero_budget_waits_the_core_default_before_busy` pins the default.
+const RELEASE_BUDGET: Duration = Duration::from_secs(10);
 
 fn show_req(run_id: &str) -> ToolRunShowRequestWire {
     ToolRunShowRequestWire {
@@ -117,6 +126,10 @@ fn no_quarantine(path: &std::path::Path) {
 
 /// WAL reserved (BEGIN IMMEDIATE) must not block a reader. An ordinary
 /// writer lock is not an explanation for the read-only `show` failure.
+///
+/// The holder keeps RESERVED for the whole call, so a reader that needed
+/// the lock could only end Busy: success alone is the oracle. Wall-clock
+/// time is not, because a loaded run queue can stretch an uncontended show.
 #[test]
 fn wal_reserved_writer_coexists_with_readonly_show() {
     let (_temp, path) = store();
@@ -124,16 +137,13 @@ fn wal_reserved_writer_coexists_with_readonly_show() {
     let holder = Connection::open(&path).unwrap();
     holder.pragma_update(None, "journal_mode", "WAL").unwrap();
     holder.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let started = Instant::now();
     let result = show_run(
         &path,
         show_req(&started_run.run.run_id),
         Duration::from_millis(250),
     );
-    let elapsed = started.elapsed();
     holder.execute_batch("ROLLBACK").unwrap();
     result.expect("WAL reader must coexist with a reserved writer");
-    assert!(elapsed < Duration::from_millis(250));
 }
 
 /// WAL `BEGIN EXCLUSIVE` is equivalent to IMMEDIATE for readers.
@@ -218,14 +228,40 @@ fn unreleased_exclusive_exhausts_explicit_budget() {
     no_quarantine(&path);
 }
 
-/// A releasable exclusive lock succeeds under the production zero-means-default
-/// budget: the store retries open until the holder drops.
-///
-/// The holder thread blocks only on the release channel so drop runs as
-/// soon as the reader exists. A sleep on the test thread under a loaded
-/// `cargo test` run queue can delay that drop past the 250 ms budget.
+/// A zero budget means the core default, not an immediate failure: with an
+/// exclusive holder that never releases, the call waits at least the
+/// default before Busy and stays under the core cap. Load only lengthens
+/// the wait, so the lower bound cannot flake.
 #[test]
-fn releasable_exclusive_lock_succeeds_under_production_budget() {
+fn zero_budget_waits_the_core_default_before_busy() {
+    let (_temp, path) = store();
+    let started_run = begin_named(&path, 1);
+    let holder = hold_exclusive(&path);
+    let started = Instant::now();
+    let result =
+        show_run(&path, show_req(&started_run.run.run_id), Duration::ZERO);
+    let elapsed = started.elapsed();
+    drop(holder);
+    assert!(
+        matches!(result, Err(ToolRunError::Busy { .. })),
+        "an unreleased exclusive holder must end the call Busy"
+    );
+    assert!(
+        elapsed >= TOOL_RUN_DEFAULT_BUSY_TIMEOUT,
+        "zero must wait the core default, elapsed={elapsed:?}"
+    );
+    assert!(
+        elapsed < TOOL_RUN_MAX_BUSY_TIMEOUT,
+        "zero must not wait the core cap, elapsed={elapsed:?}"
+    );
+    no_quarantine(&path);
+}
+
+/// A releasable exclusive lock succeeds: the store retries open until the
+/// holder drops. The holder releases only after the reader thread starts,
+/// so the reader meets the lock rather than racing past it.
+#[test]
+fn releasable_exclusive_lock_succeeds_once_released() {
     let (_temp, path) = store();
     let started_run = begin_named(&path, 1);
     let run_id = started_run.run.run_id.clone();
@@ -235,20 +271,17 @@ fn releasable_exclusive_lock_succeeds_under_production_budget() {
         let _ = release_rx.recv();
         drop(holder);
     });
+    let (reader_started_tx, reader_started_rx) = mpsc::channel();
     let path_reader = path.clone();
     let handle = thread::spawn(move || {
-        let started = Instant::now();
-        let result = show_run(&path_reader, show_req(&run_id), Duration::ZERO);
-        (result, started.elapsed())
+        reader_started_tx.send(()).unwrap();
+        show_run(&path_reader, show_req(&run_id), RELEASE_BUDGET)
     });
+    reader_started_rx.recv().unwrap();
     release_tx.send(()).unwrap();
-    let (result, elapsed) = handle.join().unwrap();
+    let result = handle.join().unwrap();
     holder_thread.join().unwrap();
     result.expect("show must succeed once the exclusive holder releases");
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "production budget must bound the wait, elapsed={elapsed:?}"
-    );
     no_quarantine(&path);
 }
 
@@ -263,14 +296,17 @@ fn retry_after_releasable_lock_does_not_duplicate_run() {
         let _ = release_rx.recv();
         drop(holder);
     });
+    let (writer_started_tx, writer_started_rx) = mpsc::channel();
     let path_writer = path.clone();
     let handle = thread::spawn(move || {
+        writer_started_tx.send(()).unwrap();
         begin(
             &path_writer,
             begin_req_with_id(Some("retry-run"), 2),
-            Duration::ZERO,
+            RELEASE_BUDGET,
         )
     });
+    writer_started_rx.recv().unwrap();
     release_tx.send(()).unwrap();
     holder_thread.join().unwrap();
     handle
@@ -317,10 +353,11 @@ fn concurrent_first_open_does_not_quarantine() {
     assert_eq!(stats.run_count, 2);
 }
 
-/// All eligible writers succeed under releasable contention with the
-/// production budget (zero → core default).
+/// All eligible writers succeed under releasable contention. Each writer's
+/// transaction is short, but a loaded run queue can preempt one while it
+/// holds the write lock, so the oracle uses the release budget.
 #[test]
-fn concurrent_begins_all_succeed_under_production_budget() {
+fn concurrent_begins_all_succeed_under_releasable_contention() {
     let (_temp, path) = store();
     begin_named(&path, 1);
     let barrier = Arc::new(Barrier::new(3));
@@ -330,7 +367,7 @@ fn concurrent_begins_all_succeed_under_production_budget() {
         let barrier = barrier.clone();
         handles.push(thread::spawn(move || {
             barrier.wait();
-            begin(&path, begin_req(now), Duration::ZERO)
+            begin(&path, begin_req(now), RELEASE_BUDGET)
         }));
     }
     barrier.wait();
@@ -400,8 +437,8 @@ fn uncommitted_schema_write_vs_show() {
         .expect("uncommitted CREATE IF NOT EXISTS must not busy a WAL reader");
 }
 
-/// Barrier-ordered lock: exclusive holder first, then show waits, then
-/// release. The channel is the oracle, not a timing hope.
+/// Barrier-ordered lock: exclusive holder first, then show starts, then
+/// release. The channels are the oracle, not a timing hope.
 #[test]
 fn barrier_orders_exclusive_holder_then_show() {
     let (_temp, path) = store();
@@ -418,10 +455,13 @@ fn barrier_orders_exclusive_holder_then_show() {
         drop(holder);
     });
     holder_ready.wait();
+    let (show_started_tx, show_started_rx) = mpsc::channel();
     let path_reader = path.clone();
     let show_thread = thread::spawn(move || {
-        show_run(&path_reader, show_req(&run_id), Duration::ZERO)
+        show_started_tx.send(()).unwrap();
+        show_run(&path_reader, show_req(&run_id), RELEASE_BUDGET)
     });
+    show_started_rx.recv().unwrap();
     tx.send(()).unwrap();
     show_thread
         .join()
@@ -429,4 +469,55 @@ fn barrier_orders_exclusive_holder_then_show() {
         .expect("show succeeds after the ordered release");
     holder_thread.join().unwrap();
     no_quarantine(&path);
+}
+
+/// The budget bounds contention retries, never the first open: a budget
+/// already spent when the call starts still reads an uncontended store.
+#[test]
+fn spent_budget_still_owes_the_first_open() {
+    let (_temp, path) = store();
+    let started_run = begin_named(&path, 1);
+    show_run(
+        &path,
+        show_req(&started_run.run.run_id),
+        Duration::from_nanos(1),
+    )
+    .expect("an uncontended store must not be Busy before its first open");
+}
+
+/// A quarantine is recovery, not contention. When the corrupt-store path
+/// outlasts the budget, the recreated store still gets its open rather
+/// than a Busy with no contender. The first operation sleeps past the
+/// budget and then reports corruption, so the schedule needs no timing luck.
+#[test]
+fn slow_quarantine_still_recreates_the_store() {
+    let (_temp, path) = store();
+    begin_named(&path, 1);
+    let budget = Duration::from_millis(25);
+    let mut calls = 0u32;
+    let result = with_write_store(&path, budget, |_conn| {
+        calls += 1;
+        if calls == 1 {
+            thread::sleep(budget * 4);
+            return Err(ToolRunError::store("file is not a database"));
+        }
+        Ok(calls)
+    });
+    assert_eq!(
+        result.expect("the recreated store must get its open"),
+        2,
+        "the operation must run once on the old store and once recreated"
+    );
+    let parent = path.parent().unwrap();
+    let quarantined = std::fs::read_dir(parent)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            name.contains(".corrupt-")
+                && !name.ends_with("-wal")
+                && !name.ends_with("-shm")
+        })
+        .count();
+    assert_eq!(quarantined, 1, "exactly one quarantine per recovery");
 }

@@ -360,12 +360,18 @@ pub(super) fn with_write_store<T>(
     let budget = BusyBudget::new(busy_timeout);
     let mut attempt = 0u32;
     let mut last_busy: Option<ToolRunError> = None;
+    // The elapsed budget bounds contention retries only. Every call opens at
+    // least once, and a quarantine is recovery rather than contention, so the
+    // recreated store also gets one open however long the quarantine took.
+    let mut attempt_owed = true;
+    let mut quarantined = false;
     loop {
-        if budget.exhausted() {
+        if !attempt_owed && budget.exhausted() {
             return Err(last_busy.unwrap_or_else(|| ToolRunError::Busy {
                 message: "timed out waiting for the tool run store".into(),
             }));
         }
+        attempt_owed = false;
         let slice = budget.sqlite_wait();
         match open_write_store(store_path, slice).and_then(|mut conn| {
             conn.busy_timeout(budget.sqlite_wait())?;
@@ -386,6 +392,10 @@ pub(super) fn with_write_store<T>(
                     && !file_too_new_to_quarantine(store_path) =>
             {
                 quarantine_corrupt_store(store_path, budget.sqlite_wait())?;
+                // One owed recreate per call: a store corrupt again after
+                // its quarantine falls back to the elapsed budget.
+                attempt_owed = !quarantined;
+                quarantined = true;
             }
             Err(error) => return Err(error),
         }
@@ -400,12 +410,15 @@ pub(crate) fn with_read_store<T>(
     let budget = BusyBudget::new(busy_timeout);
     let mut attempt = 0u32;
     let mut last_busy: Option<ToolRunError> = None;
+    // As for writes: the budget bounds retries, never the first open.
+    let mut attempt_owed = true;
     loop {
-        if budget.exhausted() {
+        if !attempt_owed && budget.exhausted() {
             return Err(last_busy.unwrap_or_else(|| ToolRunError::Busy {
                 message: "timed out waiting for the tool run store".into(),
             }));
         }
+        attempt_owed = false;
         let slice = budget.sqlite_wait();
         match open_read_store(store_path, slice).and_then(|conn| {
             conn.busy_timeout(budget.sqlite_wait())?;
@@ -684,13 +697,10 @@ fn enable_wal_mode(
         Err(error) => return Err(error.into()),
     }
     loop {
+        // Attempt the conversion before honoring the deadline: with no time
+        // left the attempt just does not wait, so an uncontended store that
+        // a spent budget still owes an open can convert.
         let remaining = busy_timeout.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            return Err(ToolRunError::Busy {
-                message: "timed out waiting to enable WAL journal mode"
-                    .to_string(),
-            });
-        }
         conn.busy_timeout(remaining)?;
         match conn.query_row("PRAGMA journal_mode = WAL", [], |row| {
             row.get::<_, String>(0)
@@ -712,7 +722,12 @@ fn enable_wal_mode(
             {
                 let remaining = busy_timeout.saturating_sub(started.elapsed());
                 if remaining.is_zero() {
-                    return Err(error.into());
+                    return Err(ToolRunError::Busy {
+                        message: format!(
+                            "timed out waiting to enable WAL journal mode: \
+                             {error}"
+                        ),
+                    });
                 }
                 thread::sleep(Duration::from_millis(5).min(remaining));
             }
