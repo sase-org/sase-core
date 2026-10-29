@@ -7,6 +7,15 @@ use crate::json_bridge::{json_value_to_py, py_to_json_value, serialize_to_py};
 mod git_lock;
 
 use crate::provider_policy::provider_priority_dict_from_py;
+use sase_core::rebase_gate::{
+    build_rebase_gate_context as core_build_rebase_gate_context,
+    classify_rebase_gate_result as core_classify_rebase_gate_result,
+    merge_rebase_gate_contexts as core_merge_rebase_gate_contexts,
+    update_rebase_gate_context as core_update_rebase_gate_context,
+    RebaseGateClassifyRequestWire, RebaseGateContextMergeRequestWire,
+    RebaseGateContextUpdateRequestWire, RebaseGateFactsWire,
+    REBASE_GATE_WIRE_SCHEMA_VERSION,
+};
 
 use pyo3::wrap_pyfunction;
 
@@ -57,6 +66,109 @@ fn py_decide_pending_commit_checkpoint_recovery<'py>(
             "pending commit checkpoint request",
         )?;
     let decision = core_decide_pending_commit_checkpoint_recovery(&request);
+    serialize_to_py(py, &decision)
+}
+
+fn rebase_gate_error_to_pyerr(
+    error: sase_core::rebase_gate::RebaseGateError,
+) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+#[pyfunction]
+#[pyo3(name = "rebase_gate_wire_schema_version")]
+fn py_rebase_gate_wire_schema_version() -> u32 {
+    REBASE_GATE_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "build_rebase_gate_context")]
+fn py_build_rebase_gate_context<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: RebaseGateFactsWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid RebaseGateFactsWire dict: {error}"
+        ))
+    })?;
+    let context = core_build_rebase_gate_context(&request)
+        .map_err(rebase_gate_error_to_pyerr)?;
+    serialize_to_py(py, &context)
+}
+
+#[pyfunction]
+#[pyo3(name = "merge_rebase_gate_contexts")]
+fn py_merge_rebase_gate_contexts<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: RebaseGateContextMergeRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid RebaseGateContextMergeRequestWire dict: {error}"
+        ))
+    })?;
+    if request.schema_version != REBASE_GATE_WIRE_SCHEMA_VERSION {
+        return Err(PyValueError::new_err(format!(
+            "unsupported rebase gate merge schema_version {}; expected {}",
+            request.schema_version, REBASE_GATE_WIRE_SCHEMA_VERSION
+        )));
+    }
+    let context = core_merge_rebase_gate_contexts(
+        request.existing.as_ref(),
+        request.incoming.as_ref(),
+    )
+    .map_err(rebase_gate_error_to_pyerr)?;
+    serialize_to_py(py, &context)
+}
+
+#[pyfunction]
+#[pyo3(name = "update_rebase_gate_context")]
+fn py_update_rebase_gate_context<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: RebaseGateContextUpdateRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid RebaseGateContextUpdateRequestWire dict: {error}"
+        ))
+    })?;
+    if request.schema_version != REBASE_GATE_WIRE_SCHEMA_VERSION {
+        return Err(PyValueError::new_err(format!(
+            "unsupported rebase gate update schema_version {}; expected {}",
+            request.schema_version, REBASE_GATE_WIRE_SCHEMA_VERSION
+        )));
+    }
+    let context =
+        core_update_rebase_gate_context(&request.context, &request.update)
+            .map_err(rebase_gate_error_to_pyerr)?;
+    serialize_to_py(py, &context)
+}
+
+#[pyfunction]
+#[pyo3(name = "classify_rebase_gate_result")]
+fn py_classify_rebase_gate_result<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: RebaseGateClassifyRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid RebaseGateClassifyRequestWire dict: {error}"
+        ))
+    })?;
+    let decision = core_classify_rebase_gate_result(&request);
     serialize_to_py(py, &decision)
 }
 
@@ -863,6 +975,11 @@ pub(crate) fn register_vcs(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_decide_pending_commit_checkpoint_recovery,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_rebase_gate_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_build_rebase_gate_context, m)?)?;
+    m.add_function(wrap_pyfunction!(py_merge_rebase_gate_contexts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_update_rebase_gate_context, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_rebase_gate_result, m)?)?;
     m.add_function(wrap_pyfunction!(py_commit_footer_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_commit_footer, m)?)?;
     m.add_function(wrap_pyfunction!(py_update_commit_footer, m)?)?;

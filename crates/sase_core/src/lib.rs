@@ -129,6 +129,7 @@ pub mod provider_usage;
 pub mod query;
 pub mod question_round;
 pub mod queue_directive;
+pub mod rebase_gate;
 mod reference_path;
 pub mod referenced_by;
 pub mod release_steward;

@@ -271,6 +271,141 @@ fn pending_commit_checkpoint_bindings_round_trip_json_shapes() {
 }
 
 #[test]
+fn rebase_gate_bindings_round_trip_context_updates_and_verdicts() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        assert_eq!(
+            module
+                .getattr("rebase_gate_wire_schema_version")
+                .unwrap()
+                .call0()
+                .unwrap()
+                .extract::<u32>()
+                .unwrap(),
+            1
+        );
+
+        let facts = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "repository_root": "/work/project",
+                "old_head": "1111111111111111111111111111111111111111",
+                "upstream_tip": "2222222222222222222222222222222222222222",
+                "merge_base": "3333333333333333333333333333333333333333",
+                "rebase_outcome": "applied",
+                "current_head": "4444444444444444444444444444444444444444",
+                "current_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "local_changes": [{
+                    "path": "src/deleted.py",
+                    "kind": "deleted"
+                }],
+                "upstream_changes": [{
+                    "path": "src/new.py",
+                    "kind": "renamed",
+                    "old_path": "src/old.py"
+                }]
+            }),
+        )
+        .unwrap();
+        let facts = facts.bind(py).downcast::<PyDict>().unwrap();
+        let context = module
+            .getattr("build_rebase_gate_context")
+            .unwrap()
+            .call1((facts,))
+            .unwrap();
+        let context = py_to_json_value(&context).unwrap();
+        assert_eq!(context["schema_version"], json!(1));
+        assert_eq!(context["changed_paths"].as_array().unwrap().len(), 2);
+
+        let merged_request = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "existing": context,
+                "incoming": context
+            }),
+        )
+        .unwrap();
+        let merged_request =
+            merged_request.bind(py).downcast::<PyDict>().unwrap();
+        let merged = module
+            .getattr("merge_rebase_gate_contexts")
+            .unwrap()
+            .call1((merged_request,))
+            .unwrap();
+        let merged = py_to_json_value(&merged).unwrap();
+        assert_eq!(merged["inputs"].as_array().unwrap().len(), 1);
+
+        let update_request = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "context": merged,
+                "update": {
+                    "schema_version": 1,
+                    "repository_root": "/work/project",
+                    "current_head": "5555555555555555555555555555555555555555",
+                    "current_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "changed_paths": [{"path": "repair.py", "kind": "modified"}]
+                }
+            }),
+        )
+        .unwrap();
+        let update_request =
+            update_request.bind(py).downcast::<PyDict>().unwrap();
+        let updated = module
+            .getattr("update_rebase_gate_context")
+            .unwrap()
+            .call1((update_request,))
+            .unwrap();
+        let updated = py_to_json_value(&updated).unwrap();
+        assert_eq!(
+            updated["current_head"],
+            json!("5555555555555555555555555555555555555555")
+        );
+        assert_eq!(updated["changed_paths"].as_array().unwrap().len(), 3);
+
+        let classify_request = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "context": updated,
+                "config": {"hook_command": "checker", "timeout_seconds": 10},
+                "command": {"exit_code": 1, "timed_out": false},
+                "report": {
+                    "schema_version": 1,
+                    "checked_head": "5555555555555555555555555555555555555555",
+                    "checked_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "status": "findings",
+                    "findings": [{
+                        "path": "repair.py",
+                        "line": 2,
+                        "module": "sase.old",
+                        "imported_name": "Thing",
+                        "explanation": "missing imported name"
+                    }],
+                    "diagnostics": null
+                }
+            }),
+        )
+        .unwrap();
+        let classify_request =
+            classify_request.bind(py).downcast::<PyDict>().unwrap();
+        let decision = module
+            .getattr("classify_rebase_gate_result")
+            .unwrap()
+            .call1((classify_request,))
+            .unwrap();
+        let decision = py_to_json_value(&decision).unwrap();
+        assert_eq!(decision["verdict"], json!("block"));
+        assert_eq!(decision["findings"].as_array().unwrap().len(), 1);
+    });
+}
+
+#[test]
 fn session_manifest_binding_classifies_current_legacy_and_slim() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
