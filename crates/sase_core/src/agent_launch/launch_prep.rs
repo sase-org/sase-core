@@ -109,6 +109,7 @@ pub fn prepare_agent_launch(
             artifacts_timestamp: String::new(),
             transfer_from_pid: request.retry_transfer_from_pid,
             pinned: false,
+            skip_workspaces: Vec::new(),
         })
     };
 

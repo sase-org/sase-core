@@ -22,6 +22,7 @@ fn request(workspace_num: u32) -> WorkspaceClaimRequestWire {
         artifacts_timestamp: String::new(),
         transfer_from_pid: None,
         pinned: false,
+        skip_workspaces: Vec::new(),
     }
 }
 
@@ -222,6 +223,34 @@ fn allocate_and_claim_picks_first_available_workspace() {
     assert!(plan
         .content
         .contains("#101 | 222 | run | b | 20260501120000 | PINNED"));
+}
+
+#[test]
+fn allocate_and_claim_skips_quarantined_workspaces() {
+    let content = "RUNNING:\n\n\nNAME: demo\n";
+    let mut req = request(0);
+    req.skip_workspaces = vec![10, 12];
+
+    let plan = allocate_and_claim_workspace_from_content(content, 10, 13, &req);
+
+    assert!(plan.outcome.success);
+    assert_eq!(plan.outcome.workspace_num, 11);
+    assert!(plan.content.contains("#11 | 222 | run | demo"));
+}
+
+#[test]
+fn allocate_and_claim_treats_skipped_slots_as_busy_when_nothing_else_is_free() {
+    let content = "RUNNING:\n  #10 | 111 | run | a\n\n\nNAME: demo\n";
+    let mut req = request(0);
+    req.skip_workspaces = vec![11];
+
+    let plan = allocate_and_claim_workspace_from_content(content, 10, 11, &req);
+
+    assert!(!plan.outcome.success);
+    assert_eq!(
+        plan.outcome.error.as_deref(),
+        Some("all workspaces (10-11) are claimed")
+    );
 }
 
 #[test]

@@ -144,12 +144,14 @@ pub fn allocate_and_claim_workspace_from_content(
     max_workspace: u32,
     request: &WorkspaceClaimRequestWire,
 ) -> WorkspaceClaimPlanWire {
-    let claimed: BTreeSet<u32> = list_workspace_claims_from_content(content)
-        .into_iter()
-        .map(|claim| claim.workspace_num)
-        .collect();
+    let mut occupied: BTreeSet<u32> =
+        list_workspace_claims_from_content(content)
+            .into_iter()
+            .map(|claim| claim.workspace_num)
+            .collect();
+    occupied.extend(request.skip_workspaces.iter().copied());
     let Some(workspace_num) =
-        (min_workspace..=max_workspace).find(|n| !claimed.contains(n))
+        (min_workspace..=max_workspace).find(|n| !occupied.contains(n))
     else {
         return claim_plan(
             content.to_string(),

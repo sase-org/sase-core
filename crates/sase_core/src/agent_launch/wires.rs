@@ -40,6 +40,10 @@ pub struct WorkspaceClaimRequestWire {
     pub transfer_from_pid: Option<u32>,
     #[serde(default)]
     pub pinned: bool,
+    /// Workspace numbers the allocator must not pick. Used to quarantine
+    /// slots whose nested-preservation refusal is still standing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_workspaces: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
