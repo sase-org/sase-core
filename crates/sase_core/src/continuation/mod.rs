@@ -10,6 +10,7 @@ pub mod completion_eval;
 pub mod delivery;
 pub mod evidence;
 pub mod policy;
+pub mod prepared_coverage;
 pub mod replay;
 pub mod retention;
 pub mod schema;
@@ -64,6 +65,10 @@ pub use policy::{
     ContinuationOutcomePolicyWire, ContinuationPolicyBranchWire,
     ContinuationPolicyDecisionWire, ContinuationPolicyFreezeRequestWire,
     ContinuationPolicyResolutionRequestWire,
+};
+pub use prepared_coverage::{
+    evaluate_prepared_starter_coverage, PreparedReservationWire,
+    PreparedStarterCoverageDecisionWire, PreparedStarterCoverageRequestWire,
 };
 pub use replay::{
     plan_continuation_replay, ContinuationBranchAttributionWire,

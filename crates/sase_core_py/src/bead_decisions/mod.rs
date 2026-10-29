@@ -327,6 +327,33 @@ fn py_validate_finalizer_submission<'py>(
     )
 }
 
+/// Validate one finalizer handoff descriptor.
+#[pyfunction]
+#[pyo3(name = "validate_finalizer_handoff")]
+fn py_validate_finalizer_handoff(handoff: &Bound<'_, PyDict>) -> PyResult<()> {
+    let handoff: FinalizerHandoffWire =
+        finalizer_wire_from_pydict(handoff, "handoff")?;
+    core_validate_finalizer_handoff(&handoff).map_err(finalizer_error_to_pyerr)
+}
+
+/// Adjudicate one repository action (`commit` or `carry`) against the host
+/// handoff. Unknown actions and carry without a valid inheriting handoff are
+/// rejected; typed deferrals stay on their own path.
+#[pyfunction]
+#[pyo3(name = "check_repository_action")]
+fn py_check_repository_action<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: RepositoryActionCheckRequestWire =
+        finalizer_wire_from_pydict(request, "repository action request")?;
+    finalizer_result_to_py(
+        py,
+        Ok(core_check_repository_action(&request)),
+        "repository action check",
+    )
+}
+
 /// Compute a canonical sha256 digest for an arbitrary JSON-shaped value.
 #[pyfunction]
 #[pyo3(name = "finalizer_json_digest")]
@@ -775,6 +802,8 @@ pub(crate) fn register_bead_decisions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_finalizer_context_digest, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_finalizer_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_finalizer_submission, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_finalizer_handoff, m)?)?;
+    m.add_function(wrap_pyfunction!(py_check_repository_action, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_select_remaining_commit_obligations,
         m

@@ -5,6 +5,9 @@ use super::selection::{
     finalizer_plan_digest, validate_digest, validate_instance_id,
     validate_list_len, validate_required_text, validate_schema,
 };
+use super::handoff::{
+    dirty_requirement_may_omit_submission, validate_finalizer_handoff,
+};
 use super::wire::{
     FinalizerContextWire, FinalizerDeferralWire, FinalizerPlanWire,
     FinalizerSubmissionEnvelopeWire, FinalizerSubmissionValidationWire,
@@ -103,6 +106,9 @@ pub fn validate_finalizer_context(
         }
     }
 
+    // Handoff fields participate in the context digest: verify the digest
+    // before semantic handoff checks so tampered handoff content reports a
+    // digest mismatch instead of being masked by a handoff validity error.
     let digest = finalizer_context_digest(context)?;
     if let Some(expected) = &context.context_digest {
         if expected != &digest {
@@ -111,6 +117,19 @@ pub fn validate_finalizer_context(
             ));
         }
     }
+    if let Some(handoff) = &context.handoff {
+        validate_finalizer_handoff(handoff)?;
+    }
+    for requirement in &context.requirements {
+        if requirement.trigger == FinalizerTriggerKindWire::DirtyRepository
+            && !requirement.submission_required
+        {
+            dirty_requirement_may_omit_submission(
+                context.handoff.as_ref(),
+            )?;
+        }
+    }
+
     Ok(digest)
 }
 
@@ -290,6 +309,7 @@ mod tests {
             }],
             obligations: Vec::new(),
             assigned_bead: None,
+            handoff: None,
             context_digest: None,
         };
         context.context_digest =
@@ -377,6 +397,15 @@ mod tests {
 
         let mut unexpected_context = context.clone();
         unexpected_context.requirements[0].submission_required = false;
+        unexpected_context.handoff =
+            Some(crate::finalizer::handoff::FinalizerHandoffWire {
+                kind: crate::finalizer::handoff::FinalizerHandoffKindWire::Questions,
+                staged_ref: "123e4567-e89b-12d3-a456-426614174000".to_string(),
+                successor_workspace:
+                    crate::finalizer::handoff::FinalizerHandoffSuccessorWire::Inherit,
+                carry_allowed: true,
+                prepared_intent_ref: None,
+            });
         unexpected_context.context_digest =
             Some(finalizer_context_digest(&unexpected_context).unwrap());
         let unexpected = submission(&unexpected_context);

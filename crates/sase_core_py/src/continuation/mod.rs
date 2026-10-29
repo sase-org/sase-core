@@ -444,6 +444,26 @@ fn py_continuation_invalidate_conditional_completion<'py>(
     )
 }
 
+/// Evaluate whether a sealed intent reserved or bound to a staged monitor
+/// satisfies the starter's declaration obligation.
+#[pyfunction]
+#[pyo3(name = "continuation_evaluate_prepared_starter_coverage")]
+fn py_continuation_evaluate_prepared_starter_coverage<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PreparedStarterCoverageRequestWire =
+        continuation_wire_from_pydict(
+            request,
+            "prepared starter coverage request",
+        )?;
+    continuation_result_to_py(
+        py,
+        core_evaluate_prepared_starter_coverage(request),
+        "prepared starter coverage",
+    )
+}
+
 /// Render a prepared success message with documented host-fact substitutions.
 #[pyfunction]
 #[pyo3(name = "continuation_render_conditional_completion_message")]
@@ -580,6 +600,10 @@ pub(crate) fn register_continuation(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         py_continuation_evaluate_conditional_completion,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_continuation_evaluate_prepared_starter_coverage,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

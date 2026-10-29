@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use super::handoff::FinalizerHandoffWire;
+
 pub const FINALIZER_WIRE_SCHEMA_VERSION: u64 = 2;
 
 pub const FINALIZER_INSTANCE_ID_MAX_LEN: usize = 64;
@@ -212,6 +214,8 @@ pub struct FinalizerContextWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_bead: Option<FinalizerAssignedBeadWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<FinalizerHandoffWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_digest: Option<String>,
 }
 
@@ -381,6 +385,7 @@ mod tests {
             requirements: Vec::new(),
             obligations: Vec::new(),
             assigned_bead: assigned,
+            handoff: None,
             context_digest: None,
         }
     }
@@ -407,5 +412,37 @@ mod tests {
         let parsed: FinalizerContextWire =
             serde_json::from_value(encoded).unwrap();
         assert_eq!(parsed.assigned_bead, Some(assigned));
+    }
+
+    #[test]
+    fn handoff_is_omitted_from_canonical_json_when_absent() {
+        let encoded = serde_json::to_value(sample_context(None)).unwrap();
+        assert!(encoded.get("handoff").is_none());
+        let parsed: FinalizerContextWire =
+            serde_json::from_value(encoded).unwrap();
+        assert!(parsed.handoff.is_none());
+    }
+
+    #[test]
+    fn handoff_mutation_changes_canonical_json() {
+        use super::super::handoff::{
+            FinalizerHandoffKindWire, FinalizerHandoffSuccessorWire,
+            FinalizerHandoffWire,
+        };
+        let mut with = sample_context(None);
+        with.handoff = Some(FinalizerHandoffWire {
+            kind: FinalizerHandoffKindWire::Gate,
+            staged_ref: "123e4567-e89b-12d3-a456-426614174000".to_string(),
+            successor_workspace: FinalizerHandoffSuccessorWire::Inherit,
+            carry_allowed: true,
+            prepared_intent_ref: None,
+        });
+        let without = serde_json::to_value(sample_context(None)).unwrap();
+        let encoded = serde_json::to_value(&with).unwrap();
+        assert!(encoded.get("handoff").is_some());
+        assert_ne!(without, encoded);
+        let parsed: FinalizerContextWire =
+            serde_json::from_value(encoded).unwrap();
+        assert_eq!(parsed.handoff, with.handoff);
     }
 }

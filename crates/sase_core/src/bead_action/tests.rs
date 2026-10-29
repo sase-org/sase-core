@@ -49,6 +49,7 @@ fn context(
             },
         ],
         assigned_bead: assigned,
+        handoff: None,
         context_digest: None,
     }
 }

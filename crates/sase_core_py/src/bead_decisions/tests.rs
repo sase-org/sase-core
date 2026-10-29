@@ -1151,3 +1151,65 @@ fn question_round_binding_round_trips_projection() {
         );
     });
 }
+
+#[test]
+fn handoff_and_repository_action_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        for name in [
+            "validate_finalizer_handoff",
+            "check_repository_action",
+        ] {
+            assert!(module.getattr(name).is_ok(), "missing {name}");
+        }
+        let staged = "123e4567-e89b-12d3-a456-426614174000";
+        let handoff = json!({
+            "kind": "questions",
+            "staged_ref": staged,
+            "successor_workspace": "inherit",
+            "carry_allowed": true,
+        });
+        let obj = json_value_to_py(py, &handoff).unwrap();
+        let dict = obj.bind(py).downcast::<PyDict>().unwrap();
+        py_validate_finalizer_handoff(dict).unwrap();
+
+        let bad = json!({
+            "kind": "plan",
+            "staged_ref": staged,
+            "successor_workspace": "inherit",
+            "carry_allowed": true,
+        });
+        let bad_obj = json_value_to_py(py, &bad).unwrap();
+        let bad_dict = bad_obj.bind(py).downcast::<PyDict>().unwrap();
+        assert!(py_validate_finalizer_handoff(bad_dict).is_err());
+
+        let request = json!({
+            "action": "carry",
+            "handoff": handoff,
+        });
+        let req_obj = json_value_to_py(py, &request).unwrap();
+        let req_dict = req_obj.bind(py).downcast::<PyDict>().unwrap();
+        let outcome = py_check_repository_action(py, req_dict).unwrap();
+        let value = py_to_json_value(outcome.bind(py)).unwrap();
+        assert_eq!(value["status"], json!("allowed"));
+        assert_eq!(value["action"], json!("carry"));
+
+        let missing = json!({"action": "carry"});
+        let missing_obj = json_value_to_py(py, &missing).unwrap();
+        let missing_dict = missing_obj.bind(py).downcast::<PyDict>().unwrap();
+        let rejected = py_check_repository_action(py, missing_dict).unwrap();
+        let value = py_to_json_value(rejected.bind(py)).unwrap();
+        assert_eq!(value["status"], json!("rejected"));
+        assert_eq!(value["code"], json!("carry_requires_handoff"));
+
+        let unknown = json!({"action": "defer"});
+        let unknown_obj = json_value_to_py(py, &unknown).unwrap();
+        let unknown_dict = unknown_obj.bind(py).downcast::<PyDict>().unwrap();
+        let rejected = py_check_repository_action(py, unknown_dict).unwrap();
+        let value = py_to_json_value(rejected.bind(py)).unwrap();
+        assert_eq!(value["status"], json!("rejected"));
+        assert_eq!(value["code"], json!("unknown_repository_action"));
+    });
+}

@@ -350,3 +350,23 @@ fn seal_binding_round_trips_stage_source_and_prior_refusals() {
         assert_eq!(allowed["status"], json!("prepared"));
     });
 }
+
+#[test]
+fn prepared_starter_coverage_binding_is_registered() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        assert!(module
+            .getattr("continuation_evaluate_prepared_starter_coverage")
+            .is_ok());
+        // Malformed request surfaces as ValueError, proving registration.
+        let bad = serde_json::json!({"schema_version": 9999});
+        let obj = json_value_to_py(py, &bad).unwrap();
+        let dict = obj.bind(py).downcast::<PyDict>().unwrap();
+        let error =
+            py_continuation_evaluate_prepared_starter_coverage(py, dict)
+                .unwrap_err();
+        assert!(error.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+    });
+}
