@@ -144,6 +144,7 @@ pub mod snippet_catalog;
 pub mod snippet_session;
 pub mod snippet_variables;
 pub mod source_language;
+pub mod staged_handoff;
 pub mod status;
 mod store_lock;
 pub mod stranded_work;
