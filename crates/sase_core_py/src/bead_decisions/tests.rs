@@ -1158,10 +1158,7 @@ fn handoff_and_repository_action_bindings_round_trip() {
     Python::with_gil(|py| {
         let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
         sase_core_rs(py, &module).unwrap();
-        for name in [
-            "validate_finalizer_handoff",
-            "check_repository_action",
-        ] {
+        for name in ["validate_finalizer_handoff", "check_repository_action"] {
             assert!(module.getattr(name).is_ok(), "missing {name}");
         }
         let staged = "123e4567-e89b-12d3-a456-426614174000";

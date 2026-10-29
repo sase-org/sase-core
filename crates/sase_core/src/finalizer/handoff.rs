@@ -7,9 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::selection::{
-    validate_list_len, validate_required_text,
-};
+use super::selection::{validate_list_len, validate_required_text};
 use super::FinalizerError;
 
 /// Handoff kind vocabulary. Mirrors the staged-handoff kind vocabulary.
@@ -78,7 +76,10 @@ pub const REPOSITORY_ACTION_CODE_CARRY_REQUIRES_HANDOFF: &str =
 pub const REPOSITORY_ACTION_CODE_CARRY_NOT_ALLOWED: &str =
     "carry_not_allowed_for_handoff";
 
-fn rejected(code: &'static str, message: impl Into<String>) -> RepositoryActionOutcomeWire {
+fn rejected(
+    code: &'static str,
+    message: impl Into<String>,
+) -> RepositoryActionOutcomeWire {
     RepositoryActionOutcomeWire::Rejected {
         code: code.to_string(),
         message: message.into(),
@@ -131,7 +132,8 @@ pub fn validate_finalizer_handoff(
                 ));
             }
         }
-        FinalizerHandoffKindWire::Questions | FinalizerHandoffKindWire::Pipe => {
+        FinalizerHandoffKindWire::Questions
+        | FinalizerHandoffKindWire::Pipe => {
             if handoff.successor_workspace
                 != FinalizerHandoffSuccessorWire::Inherit
             {
@@ -159,8 +161,7 @@ pub fn validate_finalizer_handoff(
         FinalizerHandoffKindWire::Gate => {}
     }
     if handoff.carry_allowed
-        && handoff.successor_workspace
-            == FinalizerHandoffSuccessorWire::None
+        && handoff.successor_workspace == FinalizerHandoffSuccessorWire::None
     {
         return Err(FinalizerError::validation(
             "handoff with successor_workspace none cannot set carry_allowed",
@@ -269,6 +270,31 @@ pub fn dirty_requirement_may_omit_submission(
             }
         }
     }
+}
+
+/// Return whether an omitted dirty-repository requirement may still include
+/// an explicit payload in the submission.
+///
+/// Ordinary inheriting carry keeps `commit` available as the default choice.
+/// Prepared monitor coverage is different: the starter must leave its sealed
+/// declaration for host completion, so naming an intent does not authorize an
+/// optional starter payload.
+pub fn dirty_requirement_may_accept_optional_submission(
+    handoff: Option<&FinalizerHandoffWire>,
+) -> bool {
+    let Some(handoff) = handoff else {
+        return false;
+    };
+    if handoff.prepared_intent_ref.is_some() {
+        return false;
+    }
+    matches!(
+        check_repository_action(&RepositoryActionCheckRequestWire {
+            action: "carry".to_string(),
+            handoff: Some(handoff.clone()),
+        }),
+        RepositoryActionOutcomeWire::Allowed { .. }
+    )
 }
 
 fn kind_name(kind: FinalizerHandoffKindWire) -> &'static str {
@@ -439,12 +465,10 @@ mod tests {
             FinalizerHandoffSuccessorWire::None,
             true,
         );
-        assert!(
-            validate_finalizer_handoff(&bad)
-                .unwrap_err()
-                .to_string()
-                .contains("none cannot set carry_allowed")
-        );
+        assert!(validate_finalizer_handoff(&bad)
+            .unwrap_err()
+            .to_string()
+            .contains("none cannot set carry_allowed"));
     }
 
     #[test]
@@ -455,30 +479,30 @@ mod tests {
             true,
         );
         bad.staged_ref = "not-a-uuid".to_string();
-        assert!(
-            validate_finalizer_handoff(&bad)
-                .unwrap_err()
-                .to_string()
-                .contains("staged_ref is not a UUID")
-        );
+        assert!(validate_finalizer_handoff(&bad)
+            .unwrap_err()
+            .to_string()
+            .contains("staged_ref is not a UUID"));
     }
 
     #[test]
     fn check_action_allows_commit_and_gates_carry() {
-        let commit = check_repository_action(&RepositoryActionCheckRequestWire {
-            action: "commit".to_string(),
-            handoff: None,
-        });
+        let commit =
+            check_repository_action(&RepositoryActionCheckRequestWire {
+                action: "commit".to_string(),
+                handoff: None,
+            });
         assert_eq!(
             commit,
             RepositoryActionOutcomeWire::Allowed {
                 action: "commit".to_string()
             }
         );
-        let missing = check_repository_action(&RepositoryActionCheckRequestWire {
-            action: "carry".to_string(),
-            handoff: None,
-        });
+        let missing =
+            check_repository_action(&RepositoryActionCheckRequestWire {
+                action: "carry".to_string(),
+                handoff: None,
+            });
         assert!(matches!(
             missing,
             RepositoryActionOutcomeWire::Rejected { .. }

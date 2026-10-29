@@ -101,7 +101,11 @@ pub fn evaluate_prepared_starter_coverage(
         "PreparedStarterCoverageRequestWire",
     )?;
     validate_uuid(&request.staged_id, "staged_id")?;
-    validate_non_empty_text(&request.staged_kind, "staged_kind", MAX_REF_BYTES)?;
+    validate_non_empty_text(
+        &request.staged_kind,
+        "staged_kind",
+        MAX_REF_BYTES,
+    )?;
     validate_non_empty_text(
         &request.starter_run_id,
         "starter_run_id",
@@ -120,10 +124,7 @@ pub fn evaluate_prepared_starter_coverage(
         )?;
     }
     validate_identifier(&request.monitor_id, "monitor_id")?;
-    validate_identifier(
-        &request.request_fingerprint,
-        "request_fingerprint",
-    )?;
+    validate_identifier(&request.request_fingerprint, "request_fingerprint")?;
     validate_command(&request.command, "command")?;
     validate_sha256(&request.current_plan_digest, "current_plan_digest")?;
     if let Some(reservation) = &request.reservation {
@@ -165,10 +166,8 @@ pub fn evaluate_prepared_starter_coverage(
         .unwrap_or_default();
     let current_ids: BTreeSet<String> =
         request.current_obligation_ids.iter().cloned().collect();
-    let mut covered: Vec<String> = sealed_ids
-        .intersection(&current_ids)
-        .cloned()
-        .collect();
+    let mut covered: Vec<String> =
+        sealed_ids.intersection(&current_ids).cloned().collect();
     covered.sort();
 
     if let Some(intent) = &intent {
@@ -224,12 +223,11 @@ pub fn evaluate_prepared_starter_coverage(
                     &intent.binding.request_fingerprint
                 {
                     if *bound_fingerprint != request.request_fingerprint {
-                        reasons.push(
-                            "bound_fingerprint_mismatch".to_string(),
-                        );
+                        reasons.push("bound_fingerprint_mismatch".to_string());
                     }
                 } else {
-                    reasons.push("bound_intent_missing_fingerprint".to_string());
+                    reasons
+                        .push("bound_intent_missing_fingerprint".to_string());
                 }
                 if let Some(bound_command) = &intent.binding.bound_command {
                     if *bound_command != request.command {
@@ -244,9 +242,8 @@ pub fn evaluate_prepared_starter_coverage(
                             .push("reservation_staged_id_mismatch".to_string());
                     }
                     if reservation.monitor_id != request.monitor_id {
-                        reasons.push(
-                            "reservation_monitor_mismatch".to_string(),
-                        );
+                        reasons
+                            .push("reservation_monitor_mismatch".to_string());
                     }
                 }
             }
@@ -287,9 +284,7 @@ pub fn evaluate_prepared_starter_coverage(
         }
         for obligation_id in &request.current_obligation_ids {
             if !sealed_ids.contains(obligation_id) {
-                reasons.push(format!(
-                    "uncovered_repository:{obligation_id}"
-                ));
+                reasons.push(format!("uncovered_repository:{obligation_id}"));
             }
         }
         if intent.repository_decisions.is_empty() {
@@ -403,10 +398,7 @@ mod tests {
             creator,
             context,
             success_message: "done {duration}".to_string(),
-            verification_command: vec![
-                "just".to_string(),
-                "check".to_string(),
-            ],
+            verification_command: vec!["just".to_string(), "check".to_string()],
             declaration,
             observations,
             executors: Vec::new(),
@@ -439,8 +431,7 @@ mod tests {
             obligation_ids: vec!["repo:primary".to_string()],
         };
         let observations = vec![observation("repo:primary")];
-        let request =
-            seal_request(creator, context, declaration, observations);
+        let request = seal_request(creator, context, declaration, observations);
         let intent =
             crate::continuation::completion::seal_conditional_completion(
                 request,
@@ -493,11 +484,9 @@ mod tests {
         request.reservation = None;
         let decision = evaluate_prepared_starter_coverage(request).unwrap();
         assert!(!decision.eligible);
-        assert!(
-            decision
-                .reasons
-                .contains(&"prepared_intent_requires_reservation".to_string())
-        );
+        assert!(decision
+            .reasons
+            .contains(&"prepared_intent_requires_reservation".to_string()));
     }
 
     #[test]
@@ -508,11 +497,9 @@ mod tests {
         let decision =
             evaluate_prepared_starter_coverage(request.clone()).unwrap();
         assert!(!decision.eligible);
-        assert!(
-            decision
-                .reasons
-                .contains(&"reservation_monitor_mismatch".to_string())
-        );
+        assert!(decision
+            .reasons
+            .contains(&"reservation_monitor_mismatch".to_string()));
 
         request = base_request(prepared_intent());
         request.command = vec!["just".to_string(), "check-full".to_string()];
@@ -520,19 +507,17 @@ mod tests {
             vec!["just".to_string(), "check-full".to_string()];
         let decision = evaluate_prepared_starter_coverage(request).unwrap();
         assert!(!decision.eligible);
-        assert!(
-            decision.reasons.contains(&"prepared_command_mismatch".to_string())
-        );
+        assert!(decision
+            .reasons
+            .contains(&"prepared_command_mismatch".to_string()));
 
         let mut request = base_request(prepared_intent());
         request.starter_run_id = "run-2".to_string();
         let decision = evaluate_prepared_starter_coverage(request).unwrap();
         assert!(!decision.eligible);
-        assert!(
-            decision
-                .reasons
-                .contains(&"prepared_creator_run_mismatch".to_string())
-        );
+        assert!(decision
+            .reasons
+            .contains(&"prepared_creator_run_mismatch".to_string()));
     }
 
     #[test]
@@ -560,21 +545,19 @@ mod tests {
         request.staged_kind = "gate".to_string();
         let decision = evaluate_prepared_starter_coverage(request).unwrap();
         assert!(!decision.eligible);
-        assert!(
-            decision
-                .reasons
-                .contains(&"prepared_requires_monitor_handoff".to_string())
-        );
+        assert!(decision
+            .reasons
+            .contains(&"prepared_requires_monitor_handoff".to_string()));
 
         let mut request = base_request(prepared_intent());
         request.current_obligation_ids =
             vec!["repo:primary".to_string(), "repo:extra".to_string()];
         let decision = evaluate_prepared_starter_coverage(request).unwrap();
         assert!(!decision.eligible);
-        assert!(
-            decision.reasons.iter().any(|reason| reason
-                == "uncovered_repository:repo:extra")
-        );
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason == "uncovered_repository:repo:extra"));
         assert_eq!(decision.covered_repository_ids, vec!["repo:primary"]);
     }
 

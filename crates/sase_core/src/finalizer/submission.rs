@@ -1,12 +1,13 @@
 use std::collections::BTreeSet;
 
 use super::digest::{canonical_json_bytes, finalizer_digest_serializable};
+use super::handoff::{
+    dirty_requirement_may_accept_optional_submission,
+    dirty_requirement_may_omit_submission, validate_finalizer_handoff,
+};
 use super::selection::{
     finalizer_plan_digest, validate_digest, validate_instance_id,
     validate_list_len, validate_required_text, validate_schema,
-};
-use super::handoff::{
-    dirty_requirement_may_omit_submission, validate_finalizer_handoff,
 };
 use super::wire::{
     FinalizerContextWire, FinalizerDeferralWire, FinalizerPlanWire,
@@ -124,9 +125,7 @@ pub fn validate_finalizer_context(
         if requirement.trigger == FinalizerTriggerKindWire::DirtyRepository
             && !requirement.submission_required
         {
-            dirty_requirement_may_omit_submission(
-                context.handoff.as_ref(),
-            )?;
+            dirty_requirement_may_omit_submission(context.handoff.as_ref())?;
         }
     }
 
@@ -177,6 +176,18 @@ pub fn validate_finalizer_submission(
         .filter(|requirement| requirement.submission_required)
         .map(|requirement| requirement.instance_id.as_str())
         .collect::<BTreeSet<_>>();
+    let optional_dirty = context
+        .requirements
+        .iter()
+        .filter(|requirement| {
+            requirement.trigger == FinalizerTriggerKindWire::DirtyRepository
+                && !requirement.submission_required
+                && dirty_requirement_may_accept_optional_submission(
+                    context.handoff.as_ref(),
+                )
+        })
+        .map(|requirement| requirement.instance_id.as_str())
+        .collect::<BTreeSet<_>>();
     let selected = plan
         .entries
         .iter()
@@ -193,7 +204,9 @@ pub fn validate_finalizer_submission(
                 payload.instance_id
             )));
         }
-        if !required.contains(payload.instance_id.as_str()) {
+        if !required.contains(payload.instance_id.as_str())
+            && !optional_dirty.contains(payload.instance_id.as_str())
+        {
             return Err(FinalizerError::validation(format!(
                 "submission payload for instance '{}' was not required by context",
                 payload.instance_id
@@ -348,6 +361,33 @@ mod tests {
     }
 
     #[test]
+    fn accepts_optional_dirty_commit_payload_for_ordinary_carry_handoff() {
+        let plan = plan();
+        let mut context = context(&plan);
+        context.requirements[0].submission_required = false;
+        context.handoff =
+            Some(crate::finalizer::handoff::FinalizerHandoffWire {
+                kind: crate::finalizer::handoff::FinalizerHandoffKindWire::Questions,
+                staged_ref: "123e4567-e89b-12d3-a456-426614174000".to_string(),
+                successor_workspace:
+                    crate::finalizer::handoff::FinalizerHandoffSuccessorWire::Inherit,
+                carry_allowed: true,
+                prepared_intent_ref: None,
+            });
+        context.context_digest =
+            Some(finalizer_context_digest(&context).unwrap());
+
+        let result = validate_finalizer_submission(
+            &plan,
+            &context,
+            &submission(&context),
+        )
+        .unwrap();
+
+        assert_eq!(result.accepted_instances, vec!["commit"]);
+    }
+
+    #[test]
     fn rejects_stale_identity_fields() {
         let plan = plan();
         let context = context(&plan);
@@ -399,12 +439,12 @@ mod tests {
         unexpected_context.requirements[0].submission_required = false;
         unexpected_context.handoff =
             Some(crate::finalizer::handoff::FinalizerHandoffWire {
-                kind: crate::finalizer::handoff::FinalizerHandoffKindWire::Questions,
+                kind: crate::finalizer::handoff::FinalizerHandoffKindWire::Monitor,
                 staged_ref: "123e4567-e89b-12d3-a456-426614174000".to_string(),
                 successor_workspace:
                     crate::finalizer::handoff::FinalizerHandoffSuccessorWire::Inherit,
-                carry_allowed: true,
-                prepared_intent_ref: None,
+                carry_allowed: false,
+                prepared_intent_ref: Some("intent-1".to_string()),
             });
         unexpected_context.context_digest =
             Some(finalizer_context_digest(&unexpected_context).unwrap());

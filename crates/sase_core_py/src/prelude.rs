@@ -599,7 +599,6 @@ pub(crate) use sase_core::continuation::{
     validate_diagnostic_manifest as core_validate_diagnostic_manifest,
     validate_launch_requester_continuation as core_validate_launch_requester_continuation,
     validate_monitor_result as core_validate_monitor_result, AgentDeltaWire,
-    PreparedStarterCoverageRequestWire,
     ConditionalCompletionBindRequestWire,
     ConditionalCompletionConsumeRequestWire,
     ConditionalCompletionEvaluateRequestWire, ConditionalCompletionIntentWire,
@@ -614,7 +613,7 @@ pub(crate) use sase_core::continuation::{
     ContinuationPolicyResolutionRequestWire, ContinuationReplayPlanRequestWire,
     ContinuationResumeAdoptionRequestWire, ContinuationRetentionRequestWire,
     DiagnosticManifestWire, LaunchRequesterContinuationWire, MonitorResultWire,
-    CONTINUATION_WIRE_SCHEMA_VERSION,
+    PreparedStarterCoverageRequestWire, CONTINUATION_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::disk_cleanup_outcome::{
     normalize_disk_cleanup_outcome as core_normalize_disk_cleanup_outcome,
@@ -671,12 +670,12 @@ pub(crate) use sase_core::finalizer::{
     validate_finalizer_provider_spec as core_validate_finalizer_provider_spec,
     validate_finalizer_submission as core_validate_finalizer_submission,
     FinalizerAssignedBeadWire, FinalizerContextWire, FinalizerError,
-    FinalizerHandoffWire, FinalizerInstanceResultWire, FinalizerInstanceSpecWire,
-    FinalizerNodeViewRequestWire, FinalizerPlanInputWire, FinalizerPlanWire,
-    FinalizerProviderSpecWire, FinalizerSubmissionEnvelopeWire,
-    RemainingCommitWorkRequestWire, RepositoryActionCheckRequestWire,
-    RepositoryLandingProofRequestWire, RunViewError,
-    FINALIZER_WIRE_SCHEMA_VERSION,
+    FinalizerHandoffWire, FinalizerInstanceResultWire,
+    FinalizerInstanceSpecWire, FinalizerNodeViewRequestWire,
+    FinalizerPlanInputWire, FinalizerPlanWire, FinalizerProviderSpecWire,
+    FinalizerSubmissionEnvelopeWire, RemainingCommitWorkRequestWire,
+    RepositoryActionCheckRequestWire, RepositoryLandingProofRequestWire,
+    RunViewError, FINALIZER_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::fleet_attention::{
     self as core_fleet_attention, FleetAttentionEntryWire,
