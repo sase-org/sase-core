@@ -18,6 +18,23 @@ fn invalid(message: impl Into<String>) -> RebaseGateError {
     RebaseGateError(message.into())
 }
 
+/// Validate the configured timeout before gate context collection or hook
+/// execution starts. Keeping this check in core makes every caller share the
+/// same finite, positive, bounded policy.
+pub fn validate_rebase_gate_timeout_seconds(
+    timeout_seconds: f64,
+) -> Result<f64, RebaseGateError> {
+    if !timeout_seconds.is_finite()
+        || timeout_seconds <= 0.0
+        || timeout_seconds > REBASE_GATE_MAX_TIMEOUT_SECONDS
+    {
+        return Err(invalid(format!(
+            "timeout_seconds must be finite, greater than 0, and at most {REBASE_GATE_MAX_TIMEOUT_SECONDS}"
+        )));
+    }
+    Ok(timeout_seconds)
+}
+
 fn validate_oid(value: &str, field: &str) -> Result<(), RebaseGateError> {
     if !matches!(value.len(), 40 | 64)
         || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -343,14 +360,14 @@ pub fn classify_rebase_gate_result(
             None,
         );
     }
-    if !request.config.timeout_seconds.is_finite()
-        || request.config.timeout_seconds <= 0.0
-        || request.config.timeout_seconds > REBASE_GATE_MAX_TIMEOUT_SECONDS
+    if let Err(error) =
+        validate_rebase_gate_timeout_seconds(request.config.timeout_seconds)
     {
         return warn(
             "invalid after-rebase timeout; gate skipped",
             Some(format!(
-                "timeout_seconds must be greater than 0 and at most {REBASE_GATE_MAX_TIMEOUT_SECONDS}; default is {REBASE_GATE_DEFAULT_TIMEOUT_SECONDS}"
+                "{}; default is {REBASE_GATE_DEFAULT_TIMEOUT_SECONDS}",
+                error.0
             )),
         );
     }

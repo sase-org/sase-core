@@ -12,6 +12,7 @@ use sase_core::rebase_gate::{
     classify_rebase_gate_result as core_classify_rebase_gate_result,
     merge_rebase_gate_contexts as core_merge_rebase_gate_contexts,
     update_rebase_gate_context as core_update_rebase_gate_context,
+    validate_rebase_gate_timeout_seconds as core_validate_rebase_gate_timeout_seconds,
     RebaseGateClassifyRequestWire, RebaseGateContextMergeRequestWire,
     RebaseGateContextUpdateRequestWire, RebaseGateFactsWire,
     REBASE_GATE_WIRE_SCHEMA_VERSION,
@@ -79,6 +80,15 @@ fn rebase_gate_error_to_pyerr(
 #[pyo3(name = "rebase_gate_wire_schema_version")]
 fn py_rebase_gate_wire_schema_version() -> u32 {
     REBASE_GATE_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "validate_rebase_gate_timeout_seconds")]
+fn py_validate_rebase_gate_timeout_seconds(
+    timeout_seconds: f64,
+) -> PyResult<f64> {
+    core_validate_rebase_gate_timeout_seconds(timeout_seconds)
+        .map_err(rebase_gate_error_to_pyerr)
 }
 
 #[pyfunction]
@@ -976,6 +986,10 @@ pub(crate) fn register_vcs(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_rebase_gate_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_validate_rebase_gate_timeout_seconds,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_build_rebase_gate_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_merge_rebase_gate_contexts, m)?)?;
     m.add_function(wrap_pyfunction!(py_update_rebase_gate_context, m)?)?;

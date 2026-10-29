@@ -286,6 +286,20 @@ fn rebase_gate_bindings_round_trip_context_updates_and_verdicts() {
                 .unwrap(),
             1
         );
+        let validate_timeout = module
+            .getattr("validate_rebase_gate_timeout_seconds")
+            .unwrap();
+        assert_eq!(
+            validate_timeout
+                .call1((30.0,))
+                .unwrap()
+                .extract::<f64>()
+                .unwrap(),
+            30.0
+        );
+        for invalid in [0.0, -1.0, 30.1, f64::INFINITY, f64::NAN] {
+            assert!(validate_timeout.call1((invalid,)).is_err());
+        }
 
         let facts = json_value_to_py(
             py,

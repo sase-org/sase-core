@@ -306,3 +306,19 @@ fn classification_fails_open_for_protocol_and_execution_errors() {
     ));
     assert_eq!(decision.verdict, RebaseGateVerdictWire::Warn);
 }
+
+#[test]
+fn timeout_preflight_uses_finite_positive_maximum_policy() {
+    assert_eq!(validate_rebase_gate_timeout_seconds(0.001).unwrap(), 0.001);
+    assert_eq!(validate_rebase_gate_timeout_seconds(30.0).unwrap(), 30.0);
+    for invalid in [
+        0.0,
+        -1.0,
+        30.001,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+    ] {
+        assert!(validate_rebase_gate_timeout_seconds(invalid).is_err());
+    }
+}

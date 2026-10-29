@@ -9,6 +9,7 @@ mod wire;
 pub use policy::{
     build_rebase_gate_context, classify_rebase_gate_result,
     merge_rebase_gate_contexts, update_rebase_gate_context,
+    validate_rebase_gate_timeout_seconds,
 };
 pub use wire::{
     RebaseGateChangeKindWire, RebaseGateChangedPathWire,
