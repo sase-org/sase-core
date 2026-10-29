@@ -343,6 +343,18 @@ pub struct CoreCutRunWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typed_failure: Option<String>,
     pub diagnostic_available: bool,
+    /// GitHub event that triggered the run (`push`, `schedule`,
+    /// `workflow_dispatch`). Only schedule and dispatch runs whose
+    /// "Merge release PR" job ran are cuts. Older readers omit this;
+    /// such a cut never counts as a steward dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    /// RFC 3339 start of the run (`run_started_at`, falling back to
+    /// `created_at`). The daily dispatch cap derives UTC days from it.
+    /// Older readers omit this; the cap cannot prove a same-day
+    /// dispatch without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,10 +364,13 @@ pub struct CoreFactsWire {
     pub master_ci: Option<WorkflowRunFactsWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_release_pr: Option<CorePrFactsWire>,
-    /// Core-cut runs, newest first: every in-flight cut plus the newest 20
-    /// completed cuts. Policy walks this order; a later success supersedes a
-    /// stale typed failure. The wire shape does not include timestamps, so
-    /// readers must already sort newest first.
+    /// Core-cut runs, newest first: every in-flight schedule or dispatch
+    /// cut plus the newest 20 completed cuts whose "Merge release PR"
+    /// job ran. Push runs and merge-skipped heal or dry-run dispatches
+    /// are never cuts. Policy walks this order; a later success
+    /// supersedes a stale typed failure. Readers must already sort
+    /// newest first; each cut carries its own start time for the daily
+    /// dispatch cap.
     pub cuts: Vec<CoreCutRunWire>,
 }
 

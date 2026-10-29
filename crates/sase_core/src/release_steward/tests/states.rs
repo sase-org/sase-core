@@ -33,7 +33,47 @@ fn core_cut(
         conclusion,
         typed_failure: typed_failure.map(str::to_string),
         diagnostic_available,
+        event: None,
+        started_at: None,
     }
+}
+
+/// A steward-dispatched cut at another pin: only the daily cap can
+/// suppress a CORE_LAG dispatch when this cut is present.
+fn dispatch_cut(
+    run_id: &str,
+    status: RunStatusWire,
+    conclusion: Option<CheckConclusionWire>,
+    started_at: &str,
+) -> CoreCutRunWire {
+    CoreCutRunWire {
+        run_id: run_id.to_string(),
+        attempt: 1,
+        source_pin: "dddddddddddddddddddddddddddddddddddddddd".to_string(),
+        status,
+        conclusion,
+        typed_failure: None,
+        diagnostic_available: true,
+        event: Some("workflow_dispatch".to_string()),
+        started_at: Some(started_at.to_string()),
+    }
+}
+
+fn lagging_request(
+    cuts: Vec<CoreCutRunWire>,
+    merge_authority: bool,
+) -> crate::release_steward::wire::ReleaseStewardRequestWire {
+    let mut request = releasable_request();
+    request.policy.merge_authority_enabled = merge_authority;
+    request.snapshot.core_ensure =
+        FactRead::ready(CoreEnsureFactsWire::CoreLag {
+            pin: PIN.to_string(),
+            newest_complete: None,
+        });
+    if let FactRead::Ready { value } = &mut request.snapshot.core {
+        value.cuts = cuts;
+    }
+    request
 }
 
 fn with_cuts(
@@ -457,6 +497,8 @@ fn in_flight_core_cut_suppresses_another() {
             conclusion: None,
             typed_failure: None,
             diagnostic_available: true,
+            event: None,
+            started_at: None,
         });
     }
     let action = release_steward_decide(&request)
@@ -464,6 +506,133 @@ fn in_flight_core_cut_suppresses_another() {
         .train_action
         .unwrap();
     assert_eq!(action.disposition, ActionDispositionWire::Suppressed);
+}
+
+#[test]
+fn core_lag_without_merge_authority_suppresses_cut() {
+    let result =
+        release_steward_decide(&lagging_request(Vec::new(), false)).unwrap();
+    assert!(matches!(result.primary, PrimaryStateWire::CoreLag { .. }));
+    let action = result.train_action.expect("cut action");
+    assert_eq!(action.disposition, ActionDispositionWire::Suppressed);
+    assert!(
+        action.reason.contains("merge authority"),
+        "{}",
+        action.reason
+    );
+    assert!(
+        action.reason.contains("cut_budget=daily"),
+        "{}",
+        action.reason
+    );
+}
+
+#[test]
+fn core_lag_without_merge_authority_suppresses_even_completed_cut() {
+    let result = release_steward_decide(&lagging_request(
+        vec![core_cut(
+            "cut-done",
+            RunStatusWire::Completed,
+            Some(CheckConclusionWire::Success),
+            None,
+            true,
+        )],
+        false,
+    ))
+    .unwrap();
+    let action = result.train_action.expect("cut action");
+    assert_eq!(action.disposition, ActionDispositionWire::Suppressed);
+    assert!(
+        action.reason.contains("merge authority"),
+        "{}",
+        action.reason
+    );
+}
+
+#[test]
+fn core_lag_daily_cap_suppresses_second_dispatch() {
+    // A completed steward dispatch earlier the same UTC day blocks another,
+    // even at a pin no cut has covered yet.
+    let result = release_steward_decide(&lagging_request(
+        vec![dispatch_cut(
+            "cut-dispatched",
+            RunStatusWire::Completed,
+            Some(CheckConclusionWire::Success),
+            "2026-10-19T08:00:00Z",
+        )],
+        true,
+    ))
+    .unwrap();
+    assert!(matches!(result.primary, PrimaryStateWire::CoreLag { .. }));
+    let action = result.train_action.expect("cut action");
+    assert_eq!(action.disposition, ActionDispositionWire::Suppressed);
+    assert!(action.reason.contains("UTC day"), "{}", action.reason);
+}
+
+#[test]
+fn core_lag_in_flight_dispatch_for_new_pin_hits_daily_cap() {
+    let result = release_steward_decide(&lagging_request(
+        vec![dispatch_cut(
+            "cut-live",
+            RunStatusWire::InProgress,
+            None,
+            "2026-10-19T08:00:00Z",
+        )],
+        true,
+    ))
+    .unwrap();
+    let action = result.train_action.expect("cut action");
+    assert_eq!(action.disposition, ActionDispositionWire::Suppressed);
+    assert!(action.reason.contains("UTC day"), "{}", action.reason);
+}
+
+#[test]
+fn core_lag_yesterday_dispatch_does_not_block() {
+    let result = release_steward_decide(&lagging_request(
+        vec![dispatch_cut(
+            "cut-yesterday",
+            RunStatusWire::Completed,
+            Some(CheckConclusionWire::Success),
+            "2026-10-18T12:00:00Z",
+        )],
+        true,
+    ))
+    .unwrap();
+    let action = result.train_action.expect("cut action");
+    assert_eq!(action.disposition, ActionDispositionWire::Proposed);
+}
+
+#[test]
+fn core_lag_schedule_cut_does_not_count_toward_daily_cap() {
+    // The daily schedule cut is not a steward dispatch.
+    let mut cut = dispatch_cut(
+        "cut-schedule",
+        RunStatusWire::Completed,
+        Some(CheckConclusionWire::Success),
+        "2026-10-19T08:00:00Z",
+    );
+    cut.event = Some("schedule".to_string());
+    let result =
+        release_steward_decide(&lagging_request(vec![cut], true)).unwrap();
+    let action = result.train_action.expect("cut action");
+    assert_eq!(action.disposition, ActionDispositionWire::Proposed);
+}
+
+#[test]
+fn core_lag_dispatch_cap_uses_utc_day() {
+    // 00:30 +02:00 is still yesterday in UTC, so no same-day dispatch.
+    let result = release_steward_decide(&lagging_request(
+        vec![dispatch_cut(
+            "cut-tz",
+            RunStatusWire::Completed,
+            Some(CheckConclusionWire::Success),
+            "2026-10-19T00:30:00+02:00",
+        )],
+        true,
+    ))
+    .unwrap();
+    let action = result.train_action.expect("cut action");
+    assert_eq!(action.disposition, ActionDispositionWire::Proposed);
 }
 
 #[test]
@@ -478,6 +647,8 @@ fn core_cut_red_does_not_rerun() {
             conclusion: Some(CheckConclusionWire::Failure),
             typed_failure: Some("CHECKS_NEVER_REGISTERED".to_string()),
             diagnostic_available: true,
+            event: None,
+            started_at: None,
         });
     }
     let result = release_steward_decide(&request).unwrap();
@@ -502,6 +673,8 @@ fn missing_cut_diagnostic_fails_closed() {
             conclusion: Some(CheckConclusionWire::Failure),
             typed_failure: Some("CORE_CUT_RED check=tests".to_string()),
             diagnostic_available: false,
+            event: None,
+            started_at: None,
         });
     }
     match decide_primary(request) {

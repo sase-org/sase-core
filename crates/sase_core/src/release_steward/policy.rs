@@ -501,6 +501,32 @@ fn handle_active_train(
     )
 }
 
+/// UTC calendar day (`YYYY-MM-DD`) of an RFC 3339 timestamp, or `None`
+/// when the timestamp does not parse. Readers validate the shape, so
+/// `None` only fires on wires from older readers.
+fn utc_day(timestamp: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|moment| {
+            moment
+                .with_timezone(&chrono::Utc)
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+}
+
+/// A steward-dispatched cut (`workflow_dispatch`) already started this
+/// UTC day counts against the daily cut budget, whatever its pin or
+/// outcome. Schedule cuts do not: the daily `41 7 * * *` cut is not a
+/// steward dispatch. Days derive from run timestamps, never from memory.
+fn steward_dispatch_started_on(cuts: &[CoreCutRunWire], day: &str) -> bool {
+    cuts.iter().any(|cut| {
+        cut.event.as_deref() == Some("workflow_dispatch")
+            && cut.started_at.as_deref().and_then(utc_day).as_deref()
+                == Some(day)
+    })
+}
+
 /// Walk `core.cuts` newest first. In-flight cuts never clear a red.
 /// Cancelled, skipped, and other non-decisive completed cuts are skipped.
 /// The first success means no `CoreCutRed`. The first typed failure is the
@@ -581,19 +607,34 @@ fn handle_no_train(
             vec!["no complete published core contains the pin".to_string()],
             "dispatch one core cut",
         );
-        let disposition = if already {
-            ActionDispositionWire::AlreadySatisfied
+        // cut_budget = daily: the steward cuts only with merge authority
+        // on, at most one dispatch per UTC day.
+        let observed_day = utc_day(&request.observed_at);
+        let dispatched_today = observed_day
+            .as_deref()
+            .is_some_and(|day| steward_dispatch_started_on(&core.cuts, day));
+        let (disposition, reason) = if !request.policy.merge_authority_enabled {
+            (
+                ActionDispositionWire::Suppressed,
+                "merge authority disabled; steward cuts only with merge authority on (cut_budget=daily)",
+            )
+        } else if dispatched_today {
+            (
+                ActionDispositionWire::Suppressed,
+                "steward core-cut dispatch already started this UTC day (cut_budget=daily: at most one dispatch per UTC day)",
+            )
+        } else if already {
+            (
+                ActionDispositionWire::AlreadySatisfied,
+                "applicable core cut already completed",
+            )
         } else if in_flight {
-            ActionDispositionWire::Suppressed
+            (
+                ActionDispositionWire::Suppressed,
+                "core cut already in flight",
+            )
         } else {
-            ActionDispositionWire::Proposed
-        };
-        let reason = if already {
-            "applicable core cut already completed"
-        } else if in_flight {
-            "core cut already in flight"
-        } else {
-            "dispatch one core cut"
+            (ActionDispositionWire::Proposed, "dispatch one core cut")
         };
         return Draft::new(
             PrimaryStateWire::CoreLag { pin: pin.clone() },
