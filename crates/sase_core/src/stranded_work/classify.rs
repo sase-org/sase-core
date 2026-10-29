@@ -120,6 +120,19 @@ fn owner_kind(member: &StrandedWorkMemberFactsWire) -> Option<String> {
     if handoff.is_some() || member.handoff_inflight {
         return Some("handoff".to_string());
     }
+    // Staged handoffs are never legacy markers, but unresolved staging owns
+    // the bead like a handoff so the later reconciler (not the healer) owns
+    // it. Malformed staged state also owns: it must never be discarded as an
+    // ordinary abandoned run. A held `handoff_not_adopted` receipt owns for
+    // the same reason; a successful `adopted` receipt does not.
+    if normalize_optional(&member.staged_handoff).is_some() {
+        return Some("handoff".to_string());
+    }
+    if let Some(outcome) = normalize_optional(&member.staged_receipt_outcome) {
+        if outcome != "adopted" {
+            return Some("handoff".to_string());
+        }
+    }
     if member.recovery_in_flight {
         return Some("recovery".to_string());
     }

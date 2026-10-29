@@ -92,6 +92,10 @@ pub struct StrandedWorkMemberFactsWire {
     #[serde(default)]
     pub pending_handoff: Option<String>,
     #[serde(default)]
+    pub staged_handoff: Option<String>,
+    #[serde(default)]
+    pub staged_receipt_outcome: Option<String>,
+    #[serde(default)]
     pub handoff_inflight: bool,
     #[serde(default)]
     pub recovery_in_flight: bool,

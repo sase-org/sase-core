@@ -299,6 +299,66 @@ fn owned_each_pending_handoff_kind() {
 }
 
 #[test]
+fn owned_staged_handoff_and_held_receipt() {
+    for staged in ["plan", "malformed"] {
+        let member = StrandedWorkMemberFactsWire {
+            staged_handoff: Some(staged.to_string()),
+            ..agent("w--1")
+        };
+        let verdict = reduce(
+            StrandedWorkBeadFactsWire {
+                members: vec![member],
+                ..bead("w", "phase")
+            },
+            Vec::new(),
+        );
+        assert_eq!(verdict.state, "owned", "staged {staged}");
+        assert_eq!(verdict.reason.as_deref(), Some("handoff"));
+    }
+    let held = StrandedWorkMemberFactsWire {
+        staged_receipt_outcome: Some("handoff_not_adopted".to_string()),
+        ..agent("w--1")
+    };
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![held],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "owned");
+    assert_eq!(verdict.reason.as_deref(), Some("handoff"));
+    let adopted = StrandedWorkMemberFactsWire {
+        staged_handoff: Some("plan".to_string()),
+        staged_receipt_outcome: Some("adopted".to_string()),
+        ..agent("w--1")
+    };
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![adopted],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    // A staged record still owns even when a success receipt is present:
+    // the stage is unresolved until the later reconciler clears it.
+    assert_eq!(verdict.state, "owned");
+    assert_eq!(verdict.reason.as_deref(), Some("handoff"));
+    let receipt_only_adopted = StrandedWorkMemberFactsWire {
+        staged_receipt_outcome: Some("adopted".to_string()),
+        ..agent("w--1")
+    };
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![receipt_only_adopted],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "stranded");
+}
+
+#[test]
 fn owned_recovery_in_flight_beats_failed_lifecycle() {
     let member = StrandedWorkMemberFactsWire {
         lifecycle: "failed".to_string(),
