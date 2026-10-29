@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.1](https://github.com/sase-org/sase-core/compare/v0.43.0...v0.43.1) - 2026-10-29
+
+### Added
+
+- *(vcs)* add rebase gate policy and bindings
+- *(core-policy)* add handoff disposition and prepared-coverage predicates with bindings
+- *(vcs)* add rebase gate policy bindings
+- *(staged_handoff)* add staged-handoff wire contract and admission guards
+- *(footprint)* add identity-free weekly export and replace-all import
+- *(stats)* add query_macro_usage and accept config via
+- *(artifact-link)* add collision partition and quarantine contracts
+- *(footprint)* add lens engine, evidence states, and review decisions
+- *(footprint)* add ledger, spool fold, catalog ingest, and status
+
+### Fixed
+
+- *(finalizer)* accept optional dirty commit payloads for carry
+- *(clippy)* isolate env mutations behind a thread-local test guard
+- *(artifact-link)* preserve earliest history across identical copies
+- *(artifact-link)* preserve earliest history when later copy descends from competitor
+- *(artifact-link)* order collision evidence deterministically
+- *(tool_run)* bound SQLite store contention at the connection boundary
+
 ## [0.43.0](https://github.com/sase-org/sase-core/compare/v0.42.7...v0.43.0) - 2026-10-27
 
 ### Added
