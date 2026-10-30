@@ -32,7 +32,8 @@ pub use monitor_lifecycle::{
     StagedSelfWaitRequestWire,
 };
 pub use validate::{
-    evaluate_stage_admission, receipt_authorizes, validate_staged_handoff,
+    evaluate_host_stage_admission, evaluate_stage_admission,
+    receipt_authorizes, validate_staged_handoff,
     validate_staged_handoff_receipt, StagedHandoffError,
 };
 pub use wire::{

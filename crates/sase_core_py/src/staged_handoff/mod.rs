@@ -7,6 +7,7 @@ use pyo3::wrap_pyfunction;
 
 use sase_core::staged_handoff::{
     build_gate_staged_payload as core_build_gate_payload,
+    evaluate_host_stage_admission as core_evaluate_host_stage_admission,
     evaluate_stage_admission as core_evaluate_stage_admission,
     evaluate_staged_monitor_membership as core_evaluate_membership,
     evaluate_staged_owner_liveness as core_evaluate_liveness,
@@ -63,6 +64,17 @@ fn py_validate_staged_handoff_receipt<'py>(
 fn py_evaluate_stage_admission(request: &Bound<'_, PyDict>) -> PyResult<()> {
     let value = py_to_json_value(request.as_any())?;
     core_evaluate_stage_admission(&value)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+/// Decide whether a host-owned workflow completion may stage a review.
+#[pyfunction]
+#[pyo3(name = "evaluate_host_stage_admission")]
+fn py_evaluate_host_stage_admission(
+    request: &Bound<'_, PyDict>,
+) -> PyResult<()> {
+    let value = py_to_json_value(request.as_any())?;
+    core_evaluate_host_stage_admission(&value)
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
@@ -198,6 +210,7 @@ pub(crate) fn register_staged_handoff(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_staged_handoff, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_staged_handoff_receipt, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_stage_admission, m)?)?;
+    m.add_function(wrap_pyfunction!(py_evaluate_host_stage_admission, m)?)?;
     m.add_function(wrap_pyfunction!(py_staged_handoff_receipt_authorizes, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_gate_staged_payload_schema_version,

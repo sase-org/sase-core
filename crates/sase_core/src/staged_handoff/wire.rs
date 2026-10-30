@@ -64,6 +64,11 @@ pub struct StagedHandoffReceiptWire {
 }
 
 /// Host observations for one staging-admission decision.
+///
+/// The ``host_*`` fields carry a host-owned workflow completion's explicit
+/// originating invocation/step identity plus completed-provider evidence.
+/// They are absent (default) on CLI staging requests and are only consulted
+/// by host-preparation admission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StageAdmissionRequestWire {
@@ -77,4 +82,12 @@ pub struct StageAdmissionRequestWire {
     #[serde(default)]
     pub occupying: Vec<String>,
     pub has_accepted_current_submission: bool,
+    #[serde(default)]
+    pub host_workflow: String,
+    #[serde(default)]
+    pub host_step: String,
+    #[serde(default)]
+    pub host_step_type: String,
+    #[serde(default)]
+    pub host_provider_evidence: Option<String>,
 }

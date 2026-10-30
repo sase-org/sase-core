@@ -29,6 +29,7 @@ fn staged_handoff_bindings_are_registered() {
             "validate_staged_handoff",
             "validate_staged_handoff_receipt",
             "evaluate_stage_admission",
+            "evaluate_host_stage_admission",
             "staged_handoff_receipt_authorizes",
             "gate_staged_payload_schema_version",
             "validate_gate_staged_payload",
@@ -147,6 +148,49 @@ fn admission_binding_refuses_occupying_and_submission() {
         let request = request.bind(py).downcast::<PyDict>().unwrap();
         let error = py_evaluate_stage_admission(request).unwrap_err();
         assert!(error.to_string().contains("/sase_final"));
+    });
+}
+
+#[test]
+fn host_admission_binding_allows_review_despite_submission() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let admitted = json!({
+            "schema_version": 1,
+            "command": "workflow review",
+            "is_agent": true,
+            "artifacts_dir_present": true,
+            "is_finalizer_owned": false,
+            "is_native_helper": false,
+            "occupying": [],
+            "has_accepted_current_submission": true,
+            "host_workflow": "review-doc",
+            "host_step": "draft",
+            "host_step_type": "agent",
+            "host_provider_evidence": "nonce:abc sha256:def"
+        });
+        let request = json_value_to_py(py, &admitted).unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        py_evaluate_host_stage_admission(request)
+            .expect("host review with evidence must stage");
+
+        let refused = json!({
+            "schema_version": 1,
+            "command": "workflow review",
+            "is_agent": true,
+            "artifacts_dir_present": true,
+            "is_finalizer_owned": false,
+            "is_native_helper": false,
+            "occupying": [],
+            "has_accepted_current_submission": false,
+            "host_workflow": "review-doc",
+            "host_step": "draft",
+            "host_step_type": "agent"
+        });
+        let request = json_value_to_py(py, &refused).unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let error = py_evaluate_host_stage_admission(request).unwrap_err();
+        assert!(error.to_string().contains("completed-provider evidence"));
     });
 }
 

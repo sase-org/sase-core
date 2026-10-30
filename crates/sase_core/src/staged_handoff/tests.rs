@@ -1,10 +1,11 @@
 use serde_json::{json, Value as JsonValue};
 
 use super::{
-    build_gate_staged_payload, evaluate_stage_admission,
-    evaluate_staged_monitor_membership, evaluate_staged_owner_liveness,
-    evaluate_staged_self_wait, gate_staged_payload_schema_version,
-    receipt_authorizes, staged_handoff_wire_schema_version,
+    build_gate_staged_payload, evaluate_host_stage_admission,
+    evaluate_stage_admission, evaluate_staged_monitor_membership,
+    evaluate_staged_owner_liveness, evaluate_staged_self_wait,
+    gate_staged_payload_schema_version, receipt_authorizes,
+    staged_handoff_wire_schema_version,
     staged_monitor_launch_payload_schema_version, validate_gate_staged_payload,
     validate_staged_handoff, validate_staged_handoff_receipt,
     validate_staged_monitor_launch_payload, StagedHandoffError,
@@ -246,6 +247,104 @@ fn admission_refuses_missing_agent_or_artifacts() {
     assert_eq!(
         evaluate_stage_admission(&request).expect_err("artifacts"),
         StagedHandoffError::MissingArtifactsDir
+    );
+}
+
+fn host_admission(
+    step_type: &str,
+    evidence: Option<&str>,
+    has_accepted_current_submission: bool,
+) -> JsonValue {
+    let mut request = admission(Vec::new(), has_accepted_current_submission);
+    request["host_workflow"] = json!("review-doc");
+    request["host_step"] = json!("draft");
+    request["host_step_type"] = json!(step_type);
+    if let Some(proof) = evidence {
+        request["host_provider_evidence"] = json!(proof);
+    }
+    request
+}
+
+#[test]
+fn host_admission_allows_agent_review_with_evidence_despite_submission() {
+    evaluate_host_stage_admission(&host_admission(
+        "agent",
+        Some("nonce:0123456789abcdef0123456789abcdef sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"),
+        true,
+    ))
+    .expect("host agent review with evidence must stage");
+}
+
+#[test]
+fn host_admission_allows_script_review_without_evidence() {
+    for step_type in ["bash", "python"] {
+        evaluate_host_stage_admission(&host_admission(step_type, None, true))
+            .expect("host script review must stage without provider evidence");
+    }
+}
+
+#[test]
+fn host_admission_refuses_agent_review_without_evidence() {
+    for request in [
+        host_admission("agent", None, false),
+        host_admission("agent", Some("   "), false),
+    ] {
+        let error =
+            evaluate_host_stage_admission(&request).expect_err("evidence");
+        assert!(
+            matches!(error, StagedHandoffError::HostPreparation(_)),
+            "unexpected: {error:?}"
+        );
+        assert!(error.to_string().contains("completed-provider evidence"));
+    }
+}
+
+#[test]
+fn host_admission_requires_explicit_step_identity() {
+    let mut request = host_admission("bash", None, false);
+    request["host_workflow"] = json!("  ");
+    let error = evaluate_host_stage_admission(&request).expect_err("workflow");
+    assert!(error.to_string().contains("originating workflow"));
+
+    let mut request = host_admission("bash", None, false);
+    request["host_step"] = json!("");
+    let error = evaluate_host_stage_admission(&request).expect_err("step");
+    assert!(error.to_string().contains("originating step"));
+
+    let mut request = host_admission("bash", None, false);
+    request["host_step_type"] = json!("shell");
+    let error = evaluate_host_stage_admission(&request).expect_err("type");
+    assert!(error
+        .to_string()
+        .contains("unknown host workflow step type"));
+
+    let request = admission(Vec::new(), false);
+    let error = evaluate_host_stage_admission(&request).expect_err("identity");
+    assert!(error.to_string().contains("originating workflow"));
+}
+
+#[test]
+fn host_admission_keeps_one_handoff_and_finalizer_owned_guards() {
+    let mut request = host_admission("bash", None, false);
+    request["occupying"] = json!([".sase_handoff_staged.json"]);
+    let error = evaluate_host_stage_admission(&request).expect_err("occupying");
+    assert!(error.to_string().contains(".sase_handoff_staged.json"));
+
+    let mut request = host_admission("bash", None, false);
+    request["is_finalizer_owned"] = json!(true);
+    let error = evaluate_host_stage_admission(&request).expect_err("finalizer");
+    assert!(error.to_string().contains("host finalizer turn"));
+
+    let mut request = host_admission("bash", None, false);
+    request["is_native_helper"] = json!(true);
+    let error = evaluate_host_stage_admission(&request).expect_err("helper");
+    assert!(error.to_string().contains("native helper"));
+
+    let mut request = host_admission("bash", None, false);
+    request["is_agent"] = json!(false);
+    assert_eq!(
+        evaluate_host_stage_admission(&request).expect_err("agent"),
+        StagedHandoffError::MissingAgent
     );
 }
 
