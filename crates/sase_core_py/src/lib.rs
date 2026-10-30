@@ -26,6 +26,7 @@ mod agent_custody;
 mod agent_holds;
 mod agent_identity;
 mod agent_launch;
+mod agent_run_state;
 mod agent_scan;
 mod agent_tab;
 mod artifact_links;
@@ -111,6 +112,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     prose_diff::register_prose_diff(m)?;
     memory_history::register_memory_history(m)?;
     agent_launch::register_agent_launch(m)?;
+    agent_run_state::register_agent_run_state(m)?;
     provider_policy::register_provider_policy(m)?;
     axe::register_axe(m)?;
     wait_epic_follow::register_wait_epic_follow(m)?;

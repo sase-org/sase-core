@@ -27,6 +27,7 @@ pub mod agent_ownership;
 pub mod agent_publication_batches;
 pub mod agent_publication_protection;
 pub mod agent_publication_recovery;
+pub mod agent_run_state;
 pub mod agent_runtime;
 pub mod agent_scan;
 pub mod agent_session;
