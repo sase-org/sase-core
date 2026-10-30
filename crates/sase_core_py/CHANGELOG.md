@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.2](https://github.com/sase-org/sase-core/compare/v0.43.1...v0.43.2) - 2026-10-30
+
+### Added
+
+- *(gate)* Rust-owned host preparation admission for workflow reviews
+- *(agent-run-state)* add shared reconciliation policy and bindings
+- *(staged-monitor)* add Rust-owned staged payload and ToolRun reservation contracts
+- *(gate)* Rust-owned staged gate payload and workspace disposition
+
 ## [0.43.1](https://github.com/sase-org/sase-core/compare/v0.43.0...v0.43.1) - 2026-10-29
 
 ### Added
