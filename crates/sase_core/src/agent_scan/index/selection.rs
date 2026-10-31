@@ -1,7 +1,8 @@
 use super::candidates::{
-    candidate_filter_uses_machine, candidate_matches_query_filter,
-    expand_machine_tree_relatives, push_machine_value, select_candidate_rows,
-    select_candidate_rows_for_dirs,
+    and_pushdown_predicate_to_where, candidate_filter_uses_machine,
+    candidate_matches_query_filter, expand_machine_tree_relatives,
+    push_machine_value, select_candidate_rows, select_candidate_rows_for_dirs,
+    session_name_pushdown_predicate,
 };
 use super::dismissal::record_is_dismissed;
 use super::index_wire::{
@@ -197,9 +198,23 @@ pub(super) fn select_pending_rows_for_candidate_filter(
     if query.candidate_filter.is_none() && !query.agents_list_projection {
         return select_pending_rows_for_query(conn, query, by_dir);
     }
+    // Push session/name equality terms into SQL so the lookup costs
+    // O(matches). The Rust `candidate_matches_query_filter` below stays
+    // as the exact backstop for every unpushed term.
+    let (pushdown_predicate, pushdown_params) =
+        session_name_pushdown_predicate(query.candidate_filter.as_ref())
+            .unzip();
+    let pushdown_params = pushdown_params.unwrap_or_default();
+    let candidate_where = match &pushdown_predicate {
+        Some(predicate) => {
+            and_pushdown_predicate_to_where(query.where_sql.clone(), predicate)
+        }
+        None => query.where_sql.clone(),
+    };
     let candidates = select_candidate_rows(
         conn,
-        query.where_sql.clone(),
+        candidate_where,
+        &pushdown_params,
         CandidateSelection::from_record_selection(query.selection),
     )?;
 

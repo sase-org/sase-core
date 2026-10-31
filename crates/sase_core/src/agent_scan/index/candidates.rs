@@ -78,9 +78,20 @@ pub(super) fn select_windowed_records(
     mut clan_keys: Option<&mut BTreeSet<ClanGenerationKey>>,
 ) -> Result<AgentArtifactIndexWindowWire, String> {
     let requested_limit = query.window_limit.unwrap_or(1).max(1);
+    let (pushdown_predicate, pushdown_params) =
+        session_name_pushdown_predicate(query.candidate_filter.as_ref())
+            .unzip();
+    let pushdown_params = pushdown_params.unwrap_or_default();
+    let pushdown_where = |where_sql: String| match &pushdown_predicate {
+        Some(predicate) => {
+            and_pushdown_predicate_to_where(where_sql, predicate)
+        }
+        None => where_sql,
+    };
     let active_rows = select_candidate_rows(
         conn,
-        active_where(query.include_hidden, project_filter),
+        pushdown_where(active_where(query.include_hidden, project_filter)),
+        &pushdown_params,
         CandidateSelection::Active,
     )?;
     let mut active_candidates = Vec::new();
@@ -102,7 +113,11 @@ pub(super) fn select_windowed_records(
 
     let completed_rows = select_candidate_rows(
         conn,
-        completed_window_where(query.include_hidden, project_filter),
+        pushdown_where(completed_window_where(
+            query.include_hidden,
+            project_filter,
+        )),
+        &pushdown_params,
         CandidateSelection::Completed,
     )?;
     let mut completed_candidates = Vec::new();
@@ -182,13 +197,16 @@ pub(super) fn select_windowed_records(
 pub(super) fn select_candidate_rows(
     conn: &Connection,
     where_sql: String,
+    params: &[String],
     selection: CandidateSelection,
 ) -> Result<Vec<IndexedCandidateRow>, String> {
     let sql = format!(
         "SELECT {CANDIDATE_ROW_COLUMNS} FROM agent_artifacts {where_sql}"
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query(params_from_iter(params.iter()))
+        .map_err(|e| e.to_string())?;
     let mut result = Vec::new();
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
         result.push(indexed_candidate_row_from_sql(row, selection)?);
@@ -473,6 +491,150 @@ pub(super) fn candidate_filter_matches(
             .scalar_values(*field)
             .into_iter()
             .any(|candidate| scalar_equals(candidate, value)),
+    }
+}
+
+/// Indexed column backing one pushable session/name `Equals` atom.
+fn pushdown_column_for_field(
+    field: AgentArtifactCandidateFieldWire,
+) -> Option<&'static str> {
+    match field {
+        AgentArtifactCandidateFieldWire::AgentSession => Some("agent_session"),
+        AgentArtifactCandidateFieldWire::AgentName => Some("agent_name"),
+        _ => None,
+    }
+}
+
+/// Translate one `Equals` on `agent_session`/`agent_name` into a SQL
+/// comparison, or return `None` when it must stay in Rust.
+///
+/// Rust equality lowercases both sides with full Unicode `to_lowercase`
+/// (see `scalar_equals`), while SQLite `NOCASE` folds ASCII only. Agent
+/// names and sessions are validated ASCII slugs at creation
+/// (`validate_simple_segment` in `agent_identity::identity` accepts only
+/// ASCII alphanumerics plus `-` and `_` per dot segment), so for an ASCII
+/// filter value the two comparisons agree. Non-ASCII values skip pushdown
+/// and fall through to the Rust post-filter.
+///
+/// The `run`/`running` alias in `scalar_equals` (a stored `agent` value
+/// matches those filter values) has no SQL equivalent, so those values
+/// skip pushdown as well.
+fn pushdown_equals_term(
+    field: AgentArtifactCandidateFieldWire,
+    value: &str,
+) -> Option<(String, String)> {
+    let column = pushdown_column_for_field(field)?;
+    if !value.is_ascii() {
+        return None;
+    }
+    if value.eq_ignore_ascii_case("run")
+        || value.eq_ignore_ascii_case("running")
+    {
+        return None;
+    }
+    Some((format!("{column} COLLATE NOCASE = ?"), value.to_string()))
+}
+
+/// Exact translation: `Some` iff the SQL predicate accepts exactly the
+/// rows the Rust matcher accepts. Every other field, `Not`, `Contains`,
+/// non-ASCII values, and the `run`/`running` alias are untranslatable.
+fn pushdown_exact_term(
+    filter: &AgentArtifactCandidateFilterWire,
+) -> Option<(String, Vec<String>)> {
+    match filter {
+        AgentArtifactCandidateFilterWire::Equals { field, value } => {
+            let (predicate, param) = pushdown_equals_term(*field, value)?;
+            Some((format!("({predicate})"), vec![param]))
+        }
+        AgentArtifactCandidateFilterWire::Any { filters } => {
+            if filters.is_empty() {
+                return None;
+            }
+            let mut parts = Vec::new();
+            let mut params = Vec::new();
+            for member in filters {
+                let (sql, mut member_params) = pushdown_exact_term(member)?;
+                parts.push(sql);
+                params.append(&mut member_params);
+            }
+            Some((format!("({})", parts.join(" OR ")), params))
+        }
+        AgentArtifactCandidateFilterWire::All { filters } => {
+            if filters.is_empty() {
+                return None;
+            }
+            let mut parts = Vec::new();
+            let mut params = Vec::new();
+            for member in filters {
+                let (sql, mut member_params) = pushdown_exact_term(member)?;
+                parts.push(sql);
+                params.append(&mut member_params);
+            }
+            Some((format!("({})", parts.join(" AND ")), params))
+        }
+        AgentArtifactCandidateFilterWire::Not { .. }
+        | AgentArtifactCandidateFilterWire::Contains { .. } => None,
+    }
+}
+
+/// Translate a top-level candidate filter into a SQL predicate that
+/// selects a superset of what the Rust post-filter accepts.
+///
+/// An `Equals` on `agent_session`/`agent_name`, an `any` of such terms,
+/// and such terms inside a top-level `all` are pushed down. Unpushable
+/// conjuncts of a top-level `all` stay in the Rust post-filter, which
+/// remains the exact backstop; a partially translatable `any` pushes
+/// nothing, since dropping one arm would select a subset. Every other
+/// field is never pushed.
+pub(super) fn session_name_pushdown_predicate(
+    filter: Option<&AgentArtifactCandidateFilterWire>,
+) -> Option<(String, Vec<String>)> {
+    let filter = filter?;
+    if let Some(exact) = pushdown_exact_term(filter) {
+        return Some(exact);
+    }
+    if let AgentArtifactCandidateFilterWire::All { filters } = filter {
+        let mut parts = Vec::new();
+        let mut params = Vec::new();
+        for member in filters {
+            if let Some((sql, mut member_params)) = pushdown_exact_term(member)
+            {
+                parts.push(sql);
+                params.append(&mut member_params);
+            }
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        return Some((format!("({})", parts.join(" AND ")), params));
+    }
+    None
+}
+
+/// Conjoin a session/name pushdown predicate onto a
+/// `WHERE ... [ORDER BY ...]` fragment, mirroring
+/// `add_project_filter_to_where`. A fragment without a `WHERE` (the
+/// unfiltered full-history scan) gains one.
+pub(super) fn and_pushdown_predicate_to_where(
+    where_sql: String,
+    predicate: &str,
+) -> String {
+    let upper = where_sql.to_ascii_uppercase();
+    let order_index = upper.find("ORDER BY");
+    let (prefix, order_by) = match order_index {
+        Some(index) => (&where_sql[..index], &where_sql[index..]),
+        None => (where_sql.as_str(), ""),
+    };
+    let trimmed_prefix = prefix.trim_end();
+    if trimmed_prefix.is_empty() {
+        return format!("WHERE ({predicate}) {order_by}");
+    }
+    let leading_trimmed = trimmed_prefix.trim_start();
+    if leading_trimmed.starts_with("WHERE") {
+        let existing = leading_trimmed.trim_start_matches("WHERE").trim();
+        format!("WHERE ({existing}) AND ({predicate}) {order_by}")
+    } else {
+        format!("{trimmed_prefix} WHERE ({predicate}) {order_by}")
     }
 }
 

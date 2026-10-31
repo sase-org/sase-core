@@ -927,3 +927,61 @@ fn unchanged_full_history_revalidate_commits_nothing() {
         "unchanged second pass must commit nothing"
     );
 }
+
+#[test]
+fn scoped_reconcile_keeps_rows_outside_the_walked_workflow_scope() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let ace_run = artifact(&projects, "20260912090000");
+    write_completed_artifact(&ace_run, "ace-run-agent");
+    // `run` is a supported workflow dir outside the stranded query's
+    // `("ace-run",)` scope. All 22,268 production rows are `ace-run`
+    // today, so without the scope guard this row would be deleted by
+    // every stranded report and rediscovered by the next TUI reconcile.
+    let other_workflow = projects
+        .join("proj")
+        .join("artifacts")
+        .join("run")
+        .join("20260912090100");
+    write_completed_artifact(&other_workflow, "run-agent");
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    let scoped_options = AgentArtifactScanOptionsWire {
+        only_workflow_dirs: vec!["ace-run".to_string()],
+        ..AgentArtifactScanOptionsWire::default()
+    };
+    let fresh = query_agent_artifact_index(
+        &index,
+        &projects,
+        full_history_revalidate_query(),
+        scoped_options,
+    )
+    .unwrap();
+    let names: BTreeSet<&str> = fresh
+        .records
+        .iter()
+        .map(|record| record.timestamp.as_str())
+        .collect();
+    assert_eq!(names, BTreeSet::from(["20260912090000", "20260912090100"]));
+    assert_eq!(fresh.stats.rows_removed, 0);
+    // The scoped walk did not cover the scope the watermark claims, so
+    // it stamps nothing and reports its history as incomplete.
+    let completeness = fresh.index_completeness.unwrap();
+    assert!(!completeness.source_reconciled);
+    assert!(!completeness.complete_history);
+
+    let cached = query_agent_artifact_index(
+        &index,
+        &projects,
+        full_history_cached_query(),
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    assert!(!cached.index_completeness.unwrap().complete_history);
+}

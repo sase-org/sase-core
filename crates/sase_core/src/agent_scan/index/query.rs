@@ -277,8 +277,15 @@ pub fn query_agent_artifact_index(
                 &options,
                 &mut stats,
             )?;
-            stamp_source_reconcile_watermark(&conn, projects_root)?;
-            source_reconciled = true;
+            // The watermark claims a full-root source reconcile, so only
+            // a walk that covered that scope may stamp it. A scoped walk
+            // (the stranded query's `only_workflow_dirs`, for example)
+            // reconciles only its workflow scope and must report its
+            // history as incomplete.
+            if options.only_workflow_dirs.is_empty() {
+                stamp_source_reconcile_watermark(&conn, projects_root)?;
+                source_reconciled = true;
+            }
         }
         repair_stale_rows_for_query(
             &conn,

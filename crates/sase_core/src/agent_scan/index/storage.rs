@@ -313,6 +313,14 @@ pub(super) fn open_index_with_busy_timeout(
     conn.execute_batch(&format!(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_session \
          ON agent_artifacts(agent_session, timestamp); \
+         -- NOCASE session/name lookups for the stranded-query pushdown
+         -- (the BINARY session index above cannot serve a NOCASE
+         -- comparison, and agent_name had no index). Read-only opens
+         -- skip this block, so queries stay correct without them.
+         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_session_nocase \
+         ON agent_artifacts(agent_session COLLATE NOCASE); \
+         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_name_nocase \
+         ON agent_artifacts(agent_name COLLATE NOCASE); \
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp); \
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_done_outcome \

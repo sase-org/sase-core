@@ -15,8 +15,9 @@ use crate::agent_scan::scanner::{
     list_agent_artifact_dirs, scan_agent_artifact_dir,
 };
 use crate::agent_scan::wire::{
-    decode_agent_artifact_record_json, AgentArtifactRecordWire,
-    AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire, DoneMarkerWire,
+    decode_agent_artifact_record_json, is_supported_workflow_dir,
+    AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
+    AgentArtifactScanStatsWire, DoneMarkerWire,
 };
 use chrono::{TimeZone, Utc};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -140,11 +141,11 @@ pub(super) fn artifact_dir_is_dirty(
 pub(super) fn indexed_artifact_rows(
     conn: &Connection,
     projects_root: &Path,
-) -> Result<Vec<(String, String)>, String> {
+) -> Result<Vec<(String, String, String)>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT artifact_dir, indexed_at FROM agent_artifacts \
-             WHERE projects_root = ?1",
+            "SELECT artifact_dir, indexed_at, workflow_dir_name \
+             FROM agent_artifacts WHERE projects_root = ?1",
         )
         .map_err(|e| e.to_string())?;
     let mut rows = stmt
@@ -155,9 +156,33 @@ pub(super) fn indexed_artifact_rows(
         result.push((
             row.get(0).map_err(|e| e.to_string())?,
             row.get(1).map_err(|e| e.to_string())?,
+            row.get(2).map_err(|e| e.to_string())?,
         ));
     }
     Ok(result)
+}
+
+/// Whether an indexed row's workflow directory was covered by a
+/// discovery walk built from `discovery_options`.
+///
+/// `discovery_scan_options` keeps `only_workflow_dirs` while clearing
+/// every other scope knob. A scoped walk (the stranded query's
+/// `("ace-run",)`, for example) visits only that workflow scope, so rows
+/// outside it must stay out of the missing diff: without this guard every
+/// stranded report deleted every non-`ace-run` row and the TUI reconcile
+/// rediscovered it on the next pass.
+fn workflow_in_reconcile_scope(
+    workflow_dir_name: &str,
+    discovery_options: &AgentArtifactScanOptionsWire,
+) -> bool {
+    if discovery_options.only_workflow_dirs.is_empty() {
+        is_supported_workflow_dir(workflow_dir_name)
+    } else {
+        discovery_options
+            .only_workflow_dirs
+            .iter()
+            .any(|name| name == workflow_dir_name)
+    }
 }
 
 pub(super) fn reconcile_source_directories(
@@ -174,10 +199,22 @@ pub(super) fn reconcile_source_directories(
             .collect();
     let indexed_rows = indexed_artifact_rows(conn, projects_root)?;
     let indexed_dirs: BTreeSet<String> =
-        indexed_rows.iter().map(|(dir, _)| dir.clone()).collect();
+        indexed_rows.iter().map(|(dir, _, _)| dir.clone()).collect();
 
-    let missing: Vec<String> =
-        indexed_dirs.difference(&source_dirs).cloned().collect();
+    // Diff only rows inside the walked workflow scope. The discovery walk
+    // keeps `only_workflow_dirs` (see `discovery_scan_options`), so a
+    // scoped query must not delete rows it never visited.
+    let scoped_indexed_dirs: BTreeSet<String> = indexed_rows
+        .iter()
+        .filter(|(_, _, workflow_dir_name)| {
+            workflow_in_reconcile_scope(workflow_dir_name, &discovery_options)
+        })
+        .map(|(dir, _, _)| dir.clone())
+        .collect();
+    let missing: BTreeSet<String> = scoped_indexed_dirs
+        .difference(&source_dirs)
+        .cloned()
+        .collect();
     if !missing.is_empty() {
         stats.rows_removed += missing.len() as u64;
     }
@@ -187,8 +224,8 @@ pub(super) fn reconcile_source_directories(
     // and discoveries inside one transaction per pass.
     let mut repairs: Vec<(PathBuf, AgentArtifactRecordWire)> = Vec::new();
     let mut dirty_dirs = Vec::new();
-    for (artifact_dir, indexed_at) in &indexed_rows {
-        if missing.iter().any(|dir| dir == artifact_dir) {
+    for (artifact_dir, indexed_at, _) in &indexed_rows {
+        if missing.contains(artifact_dir) {
             continue;
         }
         if artifact_dir_is_dirty(artifact_dir, indexed_at) {
@@ -250,7 +287,8 @@ pub(super) fn reconcile_source_directories(
     }
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     if !missing.is_empty() {
-        delete_agent_artifact_projection_rows(&tx, &missing)?;
+        let missing_dirs: Vec<String> = missing.iter().cloned().collect();
+        delete_agent_artifact_projection_rows(&tx, &missing_dirs)?;
     }
     for (row_projects_root, refreshed) in &repairs {
         let _ = upsert_record(&tx, row_projects_root, refreshed);
