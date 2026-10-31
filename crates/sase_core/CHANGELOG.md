@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.4](https://github.com/sase-org/sase-core/compare/v0.43.3...v0.43.4) - 2026-10-31
+
+### Added
+
+- *(workspace_retention)* classify stranded handoff claim settlement
+- *(staged-recovery)* add Rust-owned recovery contracts and replay decisions
+
+### Fixed
+
+- *(commit-footer)* project bare label for undefined bracket links
+
 ## [0.43.3](https://github.com/sase-org/sase-core/compare/v0.43.2...v0.43.3) - 2026-10-31
 
 ### Added
