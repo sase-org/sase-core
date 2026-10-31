@@ -121,7 +121,6 @@ pub fn update_commit_footer(
 
     for tag in retained {
         let key = tag.key;
-        let label = tag.label;
         let linked = match (tag.destination, tag.reference_id) {
             (Some(destination), Some(preferred_id)) => {
                 Some(assign_reference_id(
@@ -135,6 +134,15 @@ pub fn update_commit_footer(
                 ))
             }
             _ => None,
+        };
+        // Unlinked tags re-render from `raw_value`, not `label`: plain
+        // values are identical either way, while bracketed values with no
+        // link definition (`SASE_BEAD=[id]`) keep their brackets, so an
+        // update that changes nothing else round-trips byte-identically.
+        let label = if linked.is_some() {
+            tag.label
+        } else {
+            tag.raw_value
         };
         rendered_tags.push(RenderedTag {
             key,
@@ -310,7 +318,13 @@ fn build_footer(
                     Some(id.to_string()),
                     Some(destination.to_string()),
                 ),
-                None => (raw_value.to_string(), None, None),
+                None => (
+                    unwrap_undefined_bracket_value(raw_value)
+                        .unwrap_or(raw_value)
+                        .to_string(),
+                    None,
+                    None,
+                ),
             };
             CommitFooterTagWire {
                 raw_key: raw_key.to_string(),
@@ -375,6 +389,27 @@ fn parse_linked_value(value: &str) -> Option<(&str, &str)> {
     .then_some((label, id))
 }
 
+/// Unwrap a bracketed tag value that resolves to no link definition.
+///
+/// Call only after the `[label][id]` definition lookup has failed: a value
+/// of the exact form `[label]` is a Markdown shortcut reference with no
+/// definition, and `[label][id]` whose `id` has no definition links nowhere
+/// either. Both project as the bare `label` so historical trailers like
+/// `SASE_BEAD=[sase-1g4.2.1.5]` name the bead they meant. `raw_value` still
+/// keeps the brackets, so `update_commit_footer` round-trips stay
+/// byte-identical.
+fn unwrap_undefined_bracket_value(value: &str) -> Option<&str> {
+    if let Some((label, _)) = parse_linked_value(value) {
+        return Some(label);
+    }
+    if !value.starts_with('[') || !value.ends_with(']') {
+        return None;
+    }
+    let label = &value[1..value.len() - 1];
+    (!label.is_empty() && !label.contains('[') && !label.contains(']'))
+        .then_some(label)
+}
+
 fn canonicalize_key(key: &str) -> String {
     key.strip_prefix(COMMIT_TAG_PREFIX)
         .unwrap_or(key)
@@ -431,6 +466,45 @@ mod tests {
             parsed.tags[0].destination.as_deref(),
             Some("https://github.com/o/r/blob/main/202607/p.md")
         );
+    }
+
+    #[test]
+    fn bracketed_shortcut_value_without_a_definition_unwraps_to_its_label() {
+        let parsed =
+            parse_commit_footer("Subject\n\nSASE_BEAD=[sase-1g4.2.1.5]\n");
+        assert_eq!(parsed.body, "Subject");
+        assert_eq!(parsed.tags.len(), 1);
+        assert_eq!(parsed.tags[0].key, "BEAD");
+        assert_eq!(parsed.tags[0].raw_value, "[sase-1g4.2.1.5]");
+        assert_eq!(parsed.tags[0].label, "sase-1g4.2.1.5");
+        assert_eq!(parsed.tags[0].destination, None);
+        assert_eq!(parsed.tags[0].reference_id, None);
+    }
+
+    #[test]
+    fn linked_value_with_an_undefined_id_unwraps_while_defined_links_hold() {
+        let message = "Subject\n\nSASE_BEAD=[sase-1qh][99]\nSASE_PLAN=[p.md][1]\n\n[1]: https://x/p";
+        let parsed = parse_commit_footer(message);
+        assert_eq!(parsed.body, "Subject");
+        assert_eq!(parsed.tags.len(), 2);
+        assert_eq!(parsed.tags[0].raw_value, "[sase-1qh][99]");
+        assert_eq!(parsed.tags[0].label, "sase-1qh");
+        assert_eq!(parsed.tags[0].destination, None);
+        assert_eq!(parsed.tags[0].reference_id, None);
+        assert_eq!(parsed.tags[1].label, "p.md");
+        assert_eq!(parsed.tags[1].destination.as_deref(), Some("https://x/p"));
+        assert_eq!(parsed.tags[1].reference_id.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn unwrapped_bracket_values_round_trip_byte_identically() {
+        let shortcut = "Subject\n\nSASE_BEAD=[sase-1g4.2.1.5]";
+        assert_eq!(update_commit_footer(shortcut, &[], &[]), shortcut);
+
+        let mixed = "Subject\n\nSASE_BEAD=[sase-1qh][99]\nSASE_PLAN=[p.md][1]\n\n[1]: https://x/p";
+        let updated = update_commit_footer(mixed, &[], &[]);
+        assert_eq!(updated, mixed);
+        assert_eq!(update_commit_footer(&updated, &[], &[]), updated);
     }
 
     #[test]
