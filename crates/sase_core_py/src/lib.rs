@@ -71,6 +71,7 @@ mod telemetry;
 mod vcs;
 mod wait_epic_follow;
 mod wait_target;
+mod workspace_retention;
 
 #[cfg(test)]
 mod test_support;
@@ -118,6 +119,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     axe::register_axe(m)?;
     wait_epic_follow::register_wait_epic_follow(m)?;
     wait_target::register_wait_target(m)?;
+    workspace_retention::register_workspace_retention(m)?;
     staged_handoff::register_staged_handoff(m)?;
     stranded_work::register_stranded_work(m)?;
     agent_holds::register_agent_holds(m)?;

@@ -83,14 +83,15 @@ pub use wires::{
     LaunchPlanWire, LaunchUnitPayloadWire, LaunchUnitResultWire,
     LaunchUnitWire, OccupancyCallerWire, OccupancyConflictDecisionWire,
     OccupantRecordWire, ProcUnitWire, TimestampBatchAllocationError,
-    WaitTargetWire, WorkspaceClaimOutcomeWire, WorkspaceClaimPlanWire,
-    WorkspaceClaimRequestWire, WorkspaceClaimWire,
+    WaitTargetWire, WorkspaceClaimOutcomeWire, WorkspaceClaimOwnerWire,
+    WorkspaceClaimPlanWire, WorkspaceClaimRequestWire, WorkspaceClaimWire,
     AGENT_LAUNCH_WIRE_SCHEMA_VERSION, BATCH_PREDECESSOR_CONTEXT_SCHEMA_VERSION,
     LAUNCH_PLAN_WIRE_SCHEMA_VERSION,
 };
 pub use workspace_claims::{
     allocate_and_claim_workspace_from_content,
     decide_workspace_occupant_conflict, list_workspace_claims_from_content,
-    plan_claim_workspace_from_content,
+    plan_checked_release_workspace_claim_from_content,
+    plan_claim_workspace_from_content, plan_pin_workspace_claim_from_content,
     plan_transfer_workspace_claim_from_content,
 };

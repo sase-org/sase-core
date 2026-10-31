@@ -161,6 +161,7 @@ pub mod wait_epic_follow;
 pub mod wait_target;
 pub mod wire;
 pub mod workspace_lease;
+pub mod workspace_retention;
 
 /// Return launch-inert literal zones as UTF-8 byte ranges.
 ///

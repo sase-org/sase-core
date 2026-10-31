@@ -7,6 +7,10 @@ use crate::agent_holds::agent_hold_error_to_pyerr;
 use crate::json_bridge::{json_value_to_py, py_to_json_value};
 
 use pyo3::wrap_pyfunction;
+use sase_core::agent_launch::{
+    plan_checked_release_workspace_claim_from_content,
+    plan_pin_workspace_claim_from_content, WorkspaceClaimOwnerWire,
+};
 
 /// Return the launch wire schema version pinned by the Rust skeleton structs.
 #[pyfunction]
@@ -947,6 +951,39 @@ fn py_plan_transfer_workspace_claim_from_content<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Pin one RUNNING workspace claim in place when the owner still matches.
+#[pyfunction]
+#[pyo3(name = "plan_pin_workspace_claim_from_content")]
+fn py_plan_pin_workspace_claim_from_content<'py>(
+    py: Python<'py>,
+    content: &str,
+    owner: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let owner = workspace_claim_owner_from_pydict(owner)?;
+    let plan = plan_pin_workspace_claim_from_content(content, &owner);
+    let value = serde_json::to_value(&plan).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Release one RUNNING workspace claim only when the owner still matches.
+#[pyfunction]
+#[pyo3(name = "plan_checked_release_workspace_claim_from_content")]
+fn py_plan_checked_release_workspace_claim_from_content<'py>(
+    py: Python<'py>,
+    content: &str,
+    owner: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let owner = workspace_claim_owner_from_pydict(owner)?;
+    let plan =
+        plan_checked_release_workspace_claim_from_content(content, &owner);
+    let value = serde_json::to_value(&plan).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Plan first-free workspace allocation and RUNNING claim insertion together.
 #[pyfunction]
 #[pyo3(name = "allocate_and_claim_workspace_from_content")]
@@ -1143,6 +1180,17 @@ fn workspace_claim_request_from_pydict(
     })
 }
 
+fn workspace_claim_owner_from_pydict(
+    owner: &Bound<'_, PyDict>,
+) -> PyResult<WorkspaceClaimOwnerWire> {
+    let value = py_to_json_value(owner.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "owner is not a valid WorkspaceClaimOwnerWire dict: {e}"
+        ))
+    })
+}
+
 fn agent_launch_request_from_pydict(
     request: &Bound<'_, PyDict>,
 ) -> PyResult<AgentLaunchRequestWire> {
@@ -1250,6 +1298,14 @@ pub(crate) fn register_agent_launch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_plan_claim_workspace_from_content, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_plan_transfer_workspace_claim_from_content,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_plan_pin_workspace_claim_from_content,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_plan_checked_release_workspace_claim_from_content,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

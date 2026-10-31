@@ -167,3 +167,45 @@ fn prompt_proc_origin_returns_canonical_and_legacy_is_absent() {
         assert_eq!(new, "prompt-proc");
     });
 }
+
+#[test]
+fn pin_and_checked_release_claim_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        crate::sase_core_rs(py, &module).unwrap();
+        let content =
+            "RUNNING:\n  #17 | 111 | run | demo | 20260501120000\n\n\nNAME: demo\n";
+        let owner = json_value_to_py(
+            py,
+            &json!({
+                "workspace_num": 17,
+                "workflow": "run",
+                "cl_name": "demo",
+                "artifacts_timestamp": "20260501120000",
+                "pid": 111
+            }),
+        )
+        .unwrap();
+        let pin = module
+            .getattr("plan_pin_workspace_claim_from_content")
+            .unwrap()
+            .call1((content, owner.bind(py)))
+            .unwrap();
+        let pin_value = py_to_json_value(&pin).unwrap();
+        assert_eq!(pin_value["outcome"]["success"], json!(true));
+        assert!(pin_value["content"].as_str().unwrap().contains("PINNED"));
+
+        let release = module
+            .getattr("plan_checked_release_workspace_claim_from_content")
+            .unwrap()
+            .call1((content, owner.bind(py)))
+            .unwrap();
+        let release_value = py_to_json_value(&release).unwrap();
+        assert_eq!(release_value["outcome"]["success"], json!(true));
+        assert!(!release_value["content"]
+            .as_str()
+            .unwrap()
+            .contains("RUNNING:"));
+    });
+}

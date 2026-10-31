@@ -64,6 +64,23 @@ pub struct WorkspaceClaimPlanWire {
     pub changed: bool,
 }
 
+/// Exact RUNNING-field owner used by pin and checked-release planners.
+///
+/// Empty `cl_name` / `artifacts_timestamp` match a missing field. `pid`
+/// is optional so legacy hold callers can pin without an expected PID;
+/// checked settlement always supplies it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceClaimOwnerWire {
+    pub workspace_num: u32,
+    pub workflow: String,
+    #[serde(default)]
+    pub cl_name: String,
+    #[serde(default)]
+    pub artifacts_timestamp: String,
+    #[serde(default)]
+    pub pid: Option<u32>,
+}
+
 /// The per-checkout occupant marker written to
 /// `<checkout>/.sase/occupant.json` when an agent takes a workspace.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

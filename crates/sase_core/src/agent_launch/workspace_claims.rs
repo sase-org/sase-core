@@ -2,7 +2,7 @@
 //! occupant-conflict decisions for numbered launch workspaces.
 use super::wires::{
     OccupancyCallerWire, OccupancyConflictDecisionWire, OccupantRecordWire,
-    WorkspaceClaimOutcomeWire, WorkspaceClaimPlanWire,
+    WorkspaceClaimOutcomeWire, WorkspaceClaimOwnerWire, WorkspaceClaimPlanWire,
     WorkspaceClaimRequestWire, WorkspaceClaimWire,
 };
 use std::collections::BTreeSet;
@@ -138,6 +138,123 @@ pub fn plan_transfer_workspace_claim_from_content(
     )
 }
 
+/// Pin the matching RUNNING row in place without releasing it on disk.
+///
+/// Identity is workspace, workflow, Patch (`cl_name`), artifacts timestamp,
+/// and optional expected PID. A mismatched or replaced claim is a no-op.
+#[must_use]
+pub fn plan_pin_workspace_claim_from_content(
+    content: &str,
+    owner: &WorkspaceClaimOwnerWire,
+) -> WorkspaceClaimPlanWire {
+    let mut lines: Vec<String> =
+        content.split('\n').map(ToString::to_string).collect();
+    let mut in_running_field = false;
+
+    for line in &mut lines {
+        if line.starts_with("RUNNING:") {
+            in_running_field = true;
+            continue;
+        }
+        if in_running_field && is_running_continuation_line(line) {
+            if let Some(claim) = WorkspaceClaimLine::parse(line) {
+                if claim.matches_owner(owner) {
+                    if claim.pinned {
+                        return owner_plan(
+                            content.to_string(),
+                            true,
+                            owner,
+                            None,
+                            false,
+                        );
+                    }
+                    *line = claim.pin().to_line();
+                    return owner_plan(
+                        lines.join("\n"),
+                        true,
+                        owner,
+                        None,
+                        true,
+                    );
+                }
+            }
+        } else {
+            in_running_field = false;
+        }
+    }
+
+    owner_plan(
+        content.to_string(),
+        false,
+        owner,
+        Some(ownership_mismatch_error(content, owner)),
+        false,
+    )
+}
+
+/// Remove the matching RUNNING row only when every owner field still matches.
+///
+/// A mismatched or replaced claim is a no-op and does not clear occupants.
+#[must_use]
+pub fn plan_checked_release_workspace_claim_from_content(
+    content: &str,
+    owner: &WorkspaceClaimOwnerWire,
+) -> WorkspaceClaimPlanWire {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let mut new_lines: Vec<String> = Vec::with_capacity(lines.len());
+    let mut in_running_field = false;
+    let mut running_field_idx: Option<usize> = None;
+    let mut has_remaining_claims = false;
+    let mut removed = false;
+
+    for line in lines {
+        if line.starts_with("RUNNING:") {
+            in_running_field = true;
+            running_field_idx = Some(new_lines.len());
+            new_lines.push(line.to_string());
+            continue;
+        }
+
+        if in_running_field && line.starts_with("  ") {
+            if let Some(claim) = WorkspaceClaimLine::parse(line) {
+                if claim.matches_owner(owner) {
+                    removed = true;
+                    continue;
+                }
+                has_remaining_claims = true;
+            }
+        } else {
+            in_running_field = false;
+        }
+
+        new_lines.push(line.to_string());
+    }
+
+    if !removed {
+        return owner_plan(
+            content.to_string(),
+            false,
+            owner,
+            Some(ownership_mismatch_error(content, owner)),
+            false,
+        );
+    }
+
+    if let Some(idx) = running_field_idx {
+        if !has_remaining_claims {
+            new_lines.remove(idx);
+        }
+    }
+
+    let joined = new_lines.join("\n");
+    let next = if has_remaining_claims {
+        normalize_running_field_spacing(&joined)
+    } else {
+        clean_orphaned_blank_lines(&joined)
+    };
+    owner_plan(next, true, owner, None, true)
+}
+
 pub fn allocate_and_claim_workspace_from_content(
     content: &str,
     min_workspace: u32,
@@ -187,6 +304,72 @@ fn claim_plan(
         },
         changed,
     }
+}
+
+fn owner_plan(
+    content: String,
+    success: bool,
+    owner: &WorkspaceClaimOwnerWire,
+    error: Option<String>,
+    changed: bool,
+) -> WorkspaceClaimPlanWire {
+    WorkspaceClaimPlanWire {
+        content,
+        outcome: WorkspaceClaimOutcomeWire {
+            success,
+            workspace_num: owner.workspace_num,
+            project_file: String::new(),
+            pid: owner.pid,
+            error,
+        },
+        changed,
+    }
+}
+
+fn ownership_mismatch_error(
+    content: &str,
+    owner: &WorkspaceClaimOwnerWire,
+) -> String {
+    let occupant = list_workspace_claims_from_content(content)
+        .into_iter()
+        .find(|claim| claim.workspace_num == owner.workspace_num);
+    if occupant.is_some_and(|claim| claim_identity_diverged(&claim, owner)) {
+        return format!(
+            "ownership_moved: workspace #{} claim no longer matches \
+             workflow {} / {} at {} pid {:?}",
+            owner.workspace_num,
+            owner.workflow,
+            owner.cl_name,
+            owner.artifacts_timestamp,
+            owner.pid
+        );
+    }
+    format!(
+        "workspace #{} claim for {}/{} at {} was not found",
+        owner.workspace_num,
+        owner.workflow,
+        owner.cl_name,
+        owner.artifacts_timestamp
+    )
+}
+
+fn claim_identity_diverged(
+    claim: &WorkspaceClaimWire,
+    owner: &WorkspaceClaimOwnerWire,
+) -> bool {
+    if claim.workflow != owner.workflow {
+        return true;
+    }
+    if claim.cl_name.as_deref().unwrap_or("") != owner.cl_name {
+        return true;
+    }
+    if !owner.artifacts_timestamp.is_empty()
+        && claim.artifacts_timestamp.as_deref()
+            != Some(owner.artifacts_timestamp.as_str())
+    {
+        return true;
+    }
+    owner.pid.is_some_and(|pid| claim.pid != pid)
 }
 
 /// Decide whether a destructive workspace-preparation step (clean, reset,
@@ -430,6 +613,40 @@ impl WorkspaceClaimLine {
         }
     }
 
+    fn matches_owner(&self, owner: &WorkspaceClaimOwnerWire) -> bool {
+        if self.workspace_num != owner.workspace_num {
+            return false;
+        }
+        if self.workflow != owner.workflow {
+            return false;
+        }
+        if self.cl_name.as_deref().unwrap_or("") != owner.cl_name {
+            return false;
+        }
+        if !owner.artifacts_timestamp.is_empty()
+            && self.artifacts_timestamp.as_deref()
+                != Some(owner.artifacts_timestamp.as_str())
+        {
+            return false;
+        }
+        if let Some(pid) = owner.pid {
+            if self.pid != pid {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn pin(&self) -> Self {
+        if self.pinned {
+            return self.clone();
+        }
+        let mut pinned = self.clone();
+        pinned.pinned = true;
+        pinned.suffix_parts.push(WorkspaceClaimSuffixPart::Pinned);
+        pinned
+    }
+
     fn transfer_to(&self, request: &WorkspaceClaimRequestWire) -> Self {
         let mut replacement = self.clone();
         replacement.pid = request.pid;
@@ -538,6 +755,25 @@ fn normalize_running_field_spacing(content: &str) -> String {
             result_lines.push(line.to_string());
             i += 1;
         }
+    }
+
+    result_lines.join("\n")
+}
+
+fn clean_orphaned_blank_lines(content: &str) -> String {
+    let mut result_lines = Vec::new();
+    let mut consecutive_blank_count = 0;
+
+    for line in content.split('\n') {
+        if line.trim().is_empty() {
+            consecutive_blank_count += 1;
+            if consecutive_blank_count > 2 {
+                continue;
+            }
+        } else {
+            consecutive_blank_count = 0;
+        }
+        result_lines.push(line.to_string());
     }
 
     result_lines.join("\n")

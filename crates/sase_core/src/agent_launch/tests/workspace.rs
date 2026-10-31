@@ -5,10 +5,11 @@ use std::collections::BTreeMap;
 use crate::agent_launch::{
     allocate_and_claim_workspace_from_content,
     decide_workspace_occupant_conflict, list_workspace_claims_from_content,
-    plan_claim_workspace_from_content,
+    plan_checked_release_workspace_claim_from_content,
+    plan_claim_workspace_from_content, plan_pin_workspace_claim_from_content,
     plan_transfer_workspace_claim_from_content, prepare_agent_launch,
     AgentLaunchRequestWire, OccupancyCallerWire, OccupantRecordWire,
-    WorkspaceClaimRequestWire, WorkspaceClaimWire,
+    WorkspaceClaimOwnerWire, WorkspaceClaimRequestWire, WorkspaceClaimWire,
     AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
 };
 
@@ -463,4 +464,108 @@ fn occupancy_refuses_and_flags_disagreement_when_running_pid_differs() {
     assert!(!decision.may_proceed);
     assert!(decision.conflict);
     assert!(decision.reason.contains("disagree"));
+}
+
+fn owner(
+    workspace_num: u32,
+    pid: Option<u32>,
+    timestamp: &str,
+) -> WorkspaceClaimOwnerWire {
+    WorkspaceClaimOwnerWire {
+        workspace_num,
+        workflow: "run".to_string(),
+        cl_name: "demo".to_string(),
+        artifacts_timestamp: timestamp.to_string(),
+        pid,
+    }
+}
+
+#[test]
+fn pin_workspace_claim_rewrites_in_place_without_dropping_the_row() {
+    let content =
+        "RUNNING:\n  #17 | 111 | run | demo | 20260501120000\n\n\nNAME: demo\n";
+    let plan = plan_pin_workspace_claim_from_content(
+        content,
+        &owner(17, Some(111), "20260501120000"),
+    );
+    assert!(plan.outcome.success);
+    assert!(plan.changed);
+    assert!(plan
+        .content
+        .contains("#17 | 111 | run | demo | 20260501120000 | PINNED"));
+    assert_eq!(list_workspace_claims_from_content(&plan.content).len(), 1);
+}
+
+#[test]
+fn pin_workspace_claim_is_idempotent_when_already_pinned() {
+    let content = "RUNNING:\n  #17 | 111 | run | demo | 20260501120000 | PINNED\n\n\nNAME: demo\n";
+    let plan = plan_pin_workspace_claim_from_content(
+        content,
+        &owner(17, Some(111), "20260501120000"),
+    );
+    assert!(plan.outcome.success);
+    assert!(!plan.changed);
+    assert_eq!(plan.content, content);
+}
+
+#[test]
+fn pin_workspace_claim_refuses_pid_mismatch_without_rewriting() {
+    let content =
+        "RUNNING:\n  #17 | 999 | run | demo | 20260501120000\n\n\nNAME: demo\n";
+    let plan = plan_pin_workspace_claim_from_content(
+        content,
+        &owner(17, Some(111), "20260501120000"),
+    );
+    assert!(!plan.outcome.success);
+    assert!(!plan.changed);
+    assert_eq!(plan.content, content);
+    assert!(plan
+        .outcome
+        .error
+        .as_deref()
+        .is_some_and(|error| error.starts_with("ownership_moved:")));
+}
+
+#[test]
+fn checked_release_removes_only_the_matching_owner() {
+    let content = "RUNNING:\n  #17 | 111 | run | demo | 20260501120000\n  #18 | 222 | run | other | 20260501120001\n\n\nNAME: demo\n";
+    let plan = plan_checked_release_workspace_claim_from_content(
+        content,
+        &owner(17, Some(111), "20260501120000"),
+    );
+    assert!(plan.outcome.success);
+    assert!(plan.changed);
+    assert!(!plan.content.contains("#17 | 111 |"));
+    assert!(plan.content.contains("#18 | 222 | run | other"));
+}
+
+#[test]
+fn checked_release_refuses_when_timestamp_belongs_to_another_gate() {
+    let content =
+        "RUNNING:\n  #17 | 111 | run | demo | 20260501999999\n\n\nNAME: demo\n";
+    let plan = plan_checked_release_workspace_claim_from_content(
+        content,
+        &owner(17, Some(111), "20260501120000"),
+    );
+    assert!(!plan.outcome.success);
+    assert!(!plan.changed);
+    assert_eq!(plan.content, content);
+    assert!(plan
+        .outcome
+        .error
+        .as_deref()
+        .is_some_and(|error| error.starts_with("ownership_moved:")));
+}
+
+#[test]
+fn checked_release_of_last_claim_drops_the_running_field() {
+    let content =
+        "RUNNING:\n  #17 | 111 | run | demo | 20260501120000\n\n\nNAME: demo\n";
+    let plan = plan_checked_release_workspace_claim_from_content(
+        content,
+        &owner(17, Some(111), "20260501120000"),
+    );
+    assert!(plan.outcome.success);
+    assert!(!plan.content.contains("RUNNING:"));
+    assert!(plan.content.contains("NAME: demo"));
 }
