@@ -1345,6 +1345,13 @@ fn typed_wait_target_err(prompt: &str) -> Vec<String> {
     }
 }
 
+fn agent_unit(plan: &LaunchPlanWire, index: usize) -> &AgentUnitWire {
+    match &plan.units[index].payload {
+        LaunchUnitPayloadWire::Agent(agent) => agent,
+        other => panic!("expected agent payload, got {other:?}"),
+    }
+}
+
 #[test]
 fn typed_launch_wait_target_turn_skips_epic_follow() {
     let plan = plan_typed_launch_units(
@@ -1353,12 +1360,119 @@ fn typed_launch_wait_target_turn_skips_epic_follow() {
         Some("sase"),
     )
     .unwrap();
+    assert!(plan.units[0].waits.is_empty());
     assert!(plan.units[0].wait_for_epics_of.is_empty());
+    let prompt = &agent_unit(&plan, 0).prompt;
+    assert!(prompt.contains("%wait(planner, target=turn)"), "{prompt:?}");
+    let rebuilt = agent_unit_dispatch_prompt(agent_unit(&plan, 0));
+    assert!(rebuilt.contains("%wait(planner, target=turn)"), "{rebuilt}");
+}
+
+#[test]
+fn typed_launch_forwards_explicit_session_target_on_external_member() {
+    let plan = plan_typed_launch_units(
+        "%wait(16h--plan, target=session)\nDo work",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap();
+    assert!(plan.units[0].waits.is_empty());
+    assert!(plan.units[0].wait_for_epics_of.is_empty());
+    let prompt = &agent_unit(&plan, 0).prompt;
+    assert!(
+        prompt.contains("%wait(16h--plan, target=session)"),
+        "{prompt:?}"
+    );
+}
+
+#[test]
+fn typed_launch_forwards_wait_with_bead_and_turn_target() {
+    let plan = plan_typed_launch_units(
+        "%wait(a, bead=sase-1, target=turn)\nDo work",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap();
+    assert!(plan.units[0].waits.is_empty());
+    assert!(plan.units[0].wait_for_epics_of.is_empty());
+    let prompt = &agent_unit(&plan, 0).prompt;
+    assert!(
+        prompt.contains("%wait(a, bead=sase-1, target=turn)"),
+        "{prompt:?}"
+    );
+}
+
+#[test]
+fn typed_launch_rejects_wait_target_mixed_with_unit_key() {
+    let codes =
+        typed_wait_target_err("%wait(unit=unit-1, a, target=turn)\nDo work");
+    assert!(
+        codes
+            .iter()
+            .any(|code| code == "wait-target-typed-mixed-keys"),
+        "{codes:?}"
+    );
+}
+
+#[test]
+fn typed_launch_rejects_turn_target_on_planned_sibling_unit() {
+    let err = plan_typed_launch_units(
+        "%id:alpha\nDo work A\n---\n%wait(alpha, target=turn)\nDo work B",
+        Some("multi_prompt"),
+        Some("sase"),
+    )
+    .unwrap_err();
+    match err {
+        AgentLaunchFanoutPlanError::TypedLaunchPlan { diagnostics } => {
+            let codes: Vec<_> = diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code.as_str())
+                .collect();
+            assert!(
+                codes.contains(&"wait-target-turn-planned-unit"),
+                "{codes:?}"
+            );
+        }
+        other => panic!("expected typed launch diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_launch_session_target_on_planned_sibling_keeps_logical_wait() {
+    let plan = plan_typed_launch_units(
+        "%id:alpha\nDo work A\n---\n%wait(alpha, target=session)\nDo work B",
+        Some("multi_prompt"),
+        Some("sase"),
+    )
+    .unwrap();
+    assert_eq!(
+        plan.units[1].waits,
+        vec![WaitTargetWire::Logical {
+            logical_id: "unit-1".to_string(),
+            source: Some("%wait(alpha, target=session)".to_string())
+        }]
+    );
+    assert_eq!(agent_unit(&plan, 1).prompt, "Do work B");
+}
+
+#[test]
+fn typed_launch_omitted_wait_target_keeps_stable_content_digest() {
+    let plan = plan_typed_launch_units(
+        "%wait(planner)\nDo work",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap();
+    assert_eq!(agent_unit(&plan, 0).prompt, "Do work");
     assert_eq!(
         plan.units[0].waits,
         vec![WaitTargetWire::Agent {
             name: "planner".to_string()
         }]
+    );
+    assert_eq!(
+        plan.content_digest,
+        "c9206f0a040b1be6be528f952f323e56397adecca8bab709b398bf444e83f677"
     );
 }
 

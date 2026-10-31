@@ -119,6 +119,39 @@ pub fn plan_typed_launch_units_with_flags(
 pub(crate) struct RawLaunchUnit {
     pub(crate) unit: LaunchUnitWire,
     pub(crate) raw_waits: Vec<RawWaitTarget>,
+    original_prompt: Option<String>,
+    deferred_strip: Vec<(usize, usize)>,
+    pub(crate) forwarded_candidates: Vec<ForwardedWaitCandidate>,
+}
+
+impl RawLaunchUnit {
+    pub(crate) fn restrip_wait_spans(&mut self, extra: &[[usize; 2]]) {
+        let Some(original) = self.original_prompt.as_deref() else {
+            return;
+        };
+        if extra.is_empty() {
+            return;
+        }
+        let mut regions = self.deferred_strip.clone();
+        regions.extend(extra.iter().map(|span| (span[0], span[1])));
+        if let LaunchUnitPayloadWire::Agent(agent) = &mut self.unit.payload {
+            agent.prompt =
+                strip_prompt_regions(original, &regions).trim().to_string();
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ForwardedWaitCandidate {
+    pub(crate) span: [usize; 2],
+    pub(crate) agent_names: Vec<String>,
+    pub(crate) target: WaitTarget,
+}
+
+struct ParsedWaitOccurrence {
+    has_typed_keys: bool,
+    has_wait_target: bool,
+    candidate: Option<ForwardedWaitCandidate>,
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +204,8 @@ fn classify_typed_launch_unit(
     let mut proc_code: Option<CodeValueWire> = None;
     let mut proc_options: BTreeMap<String, String> = BTreeMap::new();
     let mut raw_waits = Vec::new();
+    let mut forwarded_candidates = Vec::new();
+    let mut mixed_wait_target_spans = Vec::new();
     let mut agent_identity = slot.repeat_name.clone();
     let mut agent_identity_explicit = agent_identity.is_some();
     let mut agent_identity_force_reuse = false;
@@ -338,14 +373,21 @@ fn classify_typed_launch_unit(
                 ));
             }
             "wait" => {
-                regions_to_remove.push((directive.start, directive.end));
-                parse_wait_directive(
+                let parsed = parse_wait_directive(
                     prompt,
                     &directive,
                     &logical_id,
                     &mut raw_waits,
                     diagnostics,
                 );
+                if parsed.has_typed_keys && parsed.has_wait_target {
+                    mixed_wait_target_spans.push(span);
+                }
+                if let Some(candidate) = parsed.candidate {
+                    forwarded_candidates.push(candidate);
+                } else {
+                    regions_to_remove.push((directive.start, directive.end));
+                }
             }
             "queue" => {
                 regions_to_remove.push((directive.start, directive.end));
@@ -604,6 +646,32 @@ fn classify_typed_launch_unit(
         ));
     }
 
+    let forwarding_unit = proc_code.is_none() && condition.is_none();
+    if forwarding_unit {
+        for span in mixed_wait_target_spans {
+            diagnostics.push(typed_unit_diagnostic(
+                "wait-target-typed-mixed-keys",
+                "`target=` cannot share a `%wait` with `unit=` or `proc=`. Move the `unit=`/`proc=` waits into their own `%wait`.",
+                &logical_id,
+                Some(span),
+            ));
+        }
+    } else {
+        for candidate in forwarded_candidates.drain(..) {
+            regions_to_remove.push((candidate.span[0], candidate.span[1]));
+        }
+    }
+    let original_prompt = if forwarding_unit && !forwarded_candidates.is_empty()
+    {
+        Some(prompt.to_string())
+    } else {
+        None
+    };
+    let deferred_strip = if original_prompt.is_some() {
+        regions_to_remove.clone()
+    } else {
+        Vec::new()
+    };
     let cleaned_prompt = strip_prompt_regions(prompt, &regions_to_remove)
         .trim()
         .to_string();
@@ -762,6 +830,9 @@ fn classify_typed_launch_unit(
             wait_for_epics_of: Vec::new(),
         },
         raw_waits,
+        original_prompt,
+        deferred_strip,
+        forwarded_candidates,
     }
 }
 
@@ -1100,7 +1171,7 @@ fn parse_wait_directive(
     logical_id: &str,
     raw_waits: &mut Vec<RawWaitTarget>,
     diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
-) {
+) -> ParsedWaitOccurrence {
     let span = [directive.start, directive.end];
     let source = Some(prompt[directive.start..directive.end].to_string());
     let mut args = Vec::new();
@@ -1124,7 +1195,11 @@ fn parse_wait_directive(
             for_epic: None,
             wait_target: None,
         });
-        return;
+        return ParsedWaitOccurrence {
+            has_typed_keys: false,
+            has_wait_target: false,
+            candidate: None,
+        };
     }
     // Per-occurrence `for_epic=` / `target=` apply to every agent target
     // in their own `%wait(...)`. Collect agent targets first so
@@ -1134,6 +1209,7 @@ fn parse_wait_directive(
     let mut has_for_epic = false;
     let mut raw_wait_target: Option<String> = None;
     let mut has_wait_target = false;
+    let mut has_typed_keys = false;
     for arg in &args {
         let (name, value_raw) = split_named_directive_arg(arg);
         match name.as_deref() {
@@ -1152,6 +1228,9 @@ fn parse_wait_directive(
                 has_wait_target = true;
                 raw_wait_target =
                     Some(unquote_directive_arg_value(value_raw.trim()));
+            }
+            Some("unit") | Some("proc") => {
+                has_typed_keys = true;
             }
             None => {
                 let value = unquote_directive_arg_value(value_raw.trim());
@@ -1372,6 +1451,7 @@ fn parse_wait_directive(
                 None,
             )),
             Some("for_epic") | Some("target") => {}
+            Some("hood") if parsed_wait_target.is_some() => {}
             Some("runners") => diagnostics.push(typed_unit_diagnostic(
                 "wait-queue-runners-moved",
                 "%wait(runners=...) has moved to %queue. Use %queue(capacity=N) or %q:N, and keep dependencies on %wait.",
@@ -1424,6 +1504,21 @@ fn parse_wait_directive(
                 wait_target: parsed_wait_target,
             }),
         }
+    }
+    let candidate = match parsed_wait_target {
+        Some(target) if !occurrence_agents.is_empty() && !has_typed_keys => {
+            Some(ForwardedWaitCandidate {
+                span,
+                agent_names: occurrence_agents,
+                target,
+            })
+        }
+        _ => None,
+    };
+    ParsedWaitOccurrence {
+        has_typed_keys,
+        has_wait_target,
+        candidate,
     }
 }
 

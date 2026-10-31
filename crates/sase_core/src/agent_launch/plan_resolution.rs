@@ -51,9 +51,23 @@ pub(crate) fn resolve_typed_waits(
 
     for index in 0..raw_units.len() {
         let logical_id = raw_units[index].unit.logical_id.clone();
+        let (forwarded_spans, sibling_spans) = classify_forwarded_wait_spans(
+            &raw_units[index],
+            &agent_names,
+            diagnostics,
+        );
+        if !sibling_spans.is_empty() {
+            raw_units[index].restrip_wait_spans(&sibling_spans);
+        }
         let mut waits = Vec::new();
         let mut armed: Vec<String> = Vec::new();
         for wait in raw_units[index].raw_waits.clone() {
+            if wait
+                .source_span
+                .is_some_and(|span| forwarded_spans.contains(&span))
+            {
+                continue;
+            }
             let for_epic = wait.for_epic;
             match wait.target {
                 RawWaitTargetKind::Previous => {
@@ -134,6 +148,36 @@ pub(crate) fn resolve_typed_waits(
         raw_units[index].unit.waits = waits;
         raw_units[index].unit.wait_for_epics_of = armed;
     }
+}
+
+fn classify_forwarded_wait_spans(
+    raw: &RawLaunchUnit,
+    agent_names: &BTreeMap<String, String>,
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) -> (BTreeSet<[usize; 2]>, Vec<[usize; 2]>) {
+    let logical_id = &raw.unit.logical_id;
+    let mut forwarded = BTreeSet::new();
+    let mut sibling = Vec::new();
+    for candidate in &raw.forwarded_candidates {
+        let names_sibling = candidate
+            .agent_names
+            .iter()
+            .any(|name| agent_names.contains_key(name));
+        if names_sibling {
+            if candidate.target == WaitTarget::Turn {
+                diagnostics.push(typed_unit_diagnostic(
+                    "wait-target-turn-planned-unit",
+                    "`target=turn` cannot name another unit of the same plan: that unit has not launched yet and has no current turn.",
+                    logical_id,
+                    Some(candidate.span),
+                ));
+            }
+            sibling.push(candidate.span);
+        } else {
+            forwarded.insert(candidate.span);
+        }
+    }
+    (forwarded, sibling)
 }
 
 pub(crate) fn validate_typed_wait_cycles(
