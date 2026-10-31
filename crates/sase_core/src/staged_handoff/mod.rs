@@ -7,6 +7,7 @@
 pub mod gate;
 mod monitor_launch;
 mod monitor_lifecycle;
+pub mod recovery;
 mod validate;
 mod wire;
 
@@ -35,6 +36,15 @@ pub use validate::{
     evaluate_host_stage_admission, evaluate_stage_admission,
     receipt_authorizes, validate_staged_handoff,
     validate_staged_handoff_receipt, StagedHandoffError,
+};
+pub use recovery::{
+    evaluate_recovery_decision, receipt_transition_allowed,
+    recovery_adoption_lock_filename, recovery_context_wire_schema_version,
+    validate_recovery_context, RecoveryActionWire, RecoveryContextWire,
+    RecoveryDecisionRequestWire, RecoveryDecisionWire,
+    RecoveryDestinationWire, RecoveryModeWire, RecoveryReceiptStateWire,
+    RecoveryRunnerStateWire, RecoverySettlementWire,
+    RECOVERY_ADOPTION_LOCK_FILENAME, RECOVERY_CONTEXT_WIRE_SCHEMA_VERSION,
 };
 pub use wire::{
     staged_handoff_wire_schema_version, StageAdmissionRequestWire,

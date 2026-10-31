@@ -39,6 +39,11 @@ fn staged_handoff_bindings_are_registered() {
             "evaluate_staged_monitor_membership",
             "evaluate_staged_owner_liveness",
             "evaluate_staged_self_wait",
+            "recovery_context_wire_schema_version",
+            "recovery_adoption_lock_filename",
+            "validate_recovery_context",
+            "evaluate_recovery_decision",
+            "staged_handoff_receipt_transition_allowed",
         ] {
             assert!(module.getattr(name).is_ok(), "{name}");
         }

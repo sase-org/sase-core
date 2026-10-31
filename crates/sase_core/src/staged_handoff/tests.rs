@@ -2,15 +2,18 @@ use serde_json::{json, Value as JsonValue};
 
 use super::{
     build_gate_staged_payload, evaluate_host_stage_admission,
-    evaluate_stage_admission, evaluate_staged_monitor_membership,
-    evaluate_staged_owner_liveness, evaluate_staged_self_wait,
-    gate_staged_payload_schema_version, receipt_authorizes,
+    evaluate_recovery_decision, evaluate_stage_admission,
+    evaluate_staged_monitor_membership, evaluate_staged_owner_liveness,
+    evaluate_staged_self_wait, gate_staged_payload_schema_version,
+    receipt_authorizes, receipt_transition_allowed,
+    recovery_adoption_lock_filename, recovery_context_wire_schema_version,
     staged_handoff_wire_schema_version,
     staged_monitor_launch_payload_schema_version, validate_gate_staged_payload,
-    validate_staged_handoff, validate_staged_handoff_receipt,
-    validate_staged_monitor_launch_payload, StagedHandoffError,
-    StagedMonitorMembershipRequestWire, StagedOwnerLivenessRequestWire,
-    StagedSelfWaitRequestWire, GATE_STAGED_PAYLOAD_SCHEMA_VERSION,
+    validate_recovery_context, validate_staged_handoff,
+    validate_staged_handoff_receipt, validate_staged_monitor_launch_payload,
+    StagedHandoffError, StagedMonitorMembershipRequestWire,
+    StagedOwnerLivenessRequestWire, StagedSelfWaitRequestWire,
+    GATE_STAGED_PAYLOAD_SCHEMA_VERSION, RECOVERY_CONTEXT_WIRE_SCHEMA_VERSION,
     STAGED_HANDOFF_WIRE_SCHEMA_VERSION,
 };
 
@@ -976,4 +979,198 @@ fn self_wait_requires_durable_stage_ownership() {
         assert!(!decision.is_self_wait, "{reason}");
         assert_eq!(decision.reason.as_deref(), Some(reason));
     }
+}
+
+fn recovery_context() -> JsonValue {
+    json!({
+        "schema_version": 1,
+        "staged_id": STAGED_ID,
+        "kind": "pipe",
+        "origin_agent": "agent-1",
+        "origin_artifacts_dir": "/tmp/artifacts/20261029T000000Z",
+        "workspace_dir": "/tmp/work",
+        "project": "sase",
+        "model": "muse-spark",
+        "provider": "meta",
+        "prompt_ref": "prompt:abc",
+        "created_at": "2026-10-28T12:00:00Z"
+    })
+}
+
+fn recovery_request(
+    receipt: &str,
+    runner: &str,
+    killed: bool,
+    mode: &str,
+    settlement: &str,
+    destination: &str,
+) -> JsonValue {
+    json!({
+        "schema_version": 1,
+        "staged_id": STAGED_ID,
+        "receipt": receipt,
+        "runner": runner,
+        "killed_or_discarded": killed,
+        "mode": mode,
+        "settlement": settlement,
+        "destination": destination
+    })
+}
+
+fn recovery_action(request: JsonValue) -> (String, bool) {
+    let decision =
+        evaluate_recovery_decision(&request).expect("recovery decides");
+    let action = decision
+        .get("action")
+        .and_then(JsonValue::as_str)
+        .expect("action")
+        .to_string();
+    let already = decision
+        .get("already_adopted")
+        .and_then(JsonValue::as_bool)
+        .expect("already_adopted");
+    (action, already)
+}
+
+#[test]
+fn recovery_context_schema_version_is_one() {
+    assert_eq!(RECOVERY_CONTEXT_WIRE_SCHEMA_VERSION, 1);
+    assert_eq!(recovery_context_wire_schema_version(), 1);
+    assert_eq!(recovery_adoption_lock_filename(), ".sase_handoff.lock");
+}
+
+#[test]
+fn recovery_context_round_trips() {
+    let context = recovery_context();
+    assert_eq!(validate_recovery_context(&context).expect("context"), context);
+}
+
+#[test]
+fn recovery_context_rejects_missing_origin() {
+    let mut context = recovery_context();
+    context["origin_agent"] = json!("  ");
+    let error =
+        validate_recovery_context(&context).expect_err("origin_agent");
+    assert!(error.to_string().contains("origin_agent"));
+
+    let mut context = recovery_context();
+    context
+        .as_object_mut()
+        .expect("object")
+        .remove("origin_artifacts_dir");
+    validate_recovery_context(&context).expect_err("origin dir");
+}
+
+#[test]
+fn recovery_decision_table() {
+    assert_eq!(
+        recovery_action(recovery_request(
+            "adopted", "dead", false, "automatic", "settled", "absent"
+        )),
+        ("adopt".to_string(), true)
+    );
+    assert_eq!(
+        recovery_action(recovery_request(
+            "absent", "dead", false, "automatic", "settled", "absent"
+        )),
+        ("adopt".to_string(), false)
+    );
+    assert_eq!(
+        recovery_action(recovery_request(
+            "absent", "dead", false, "explicit", "settled", "terminal"
+        )),
+        ("adopt".to_string(), false)
+    );
+    assert_eq!(
+        recovery_action(recovery_request(
+            "absent", "dead", false, "explicit", "settled", "pending"
+        )),
+        ("deliver_only".to_string(), false)
+    );
+    for receipt in ["malformed", "mismatched"] {
+        assert_eq!(
+            recovery_action(recovery_request(
+                receipt, "dead", false, "explicit", "settled", "absent"
+            )),
+            ("refuse".to_string(), false)
+        );
+    }
+    assert_eq!(
+        recovery_action(recovery_request(
+            "absent", "dead", true, "explicit", "settled", "absent"
+        )),
+        ("refuse".to_string(), false)
+    );
+    assert_eq!(
+        recovery_action(recovery_request(
+            "held", "dead", true, "explicit", "settled", "absent"
+        )),
+        ("refuse".to_string(), false)
+    );
+    for (runner, mode) in [("alive", "automatic"), ("unknown", "automatic")] {
+        assert_eq!(
+            recovery_action(recovery_request(
+                "absent", runner, false, mode, "settled", "absent"
+            )),
+            ("hold".to_string(), false)
+        );
+    }
+    assert_eq!(
+        recovery_action(recovery_request(
+            "absent", "unknown", false, "explicit", "settled", "absent"
+        )),
+        ("hold".to_string(), false)
+    );
+    for settlement in ["held", "missing"] {
+        assert_eq!(
+            recovery_action(recovery_request(
+                "absent", "dead", false, "explicit", settlement, "absent"
+            )),
+            ("hold".to_string(), false)
+        );
+    }
+}
+
+#[test]
+fn receipt_transition_is_monotonic() {
+    let adopted = json!({
+        "staged_id": STAGED_ID,
+        "adopted_at": "2026-10-28T12:01:00Z",
+        "outcome": "adopted",
+        "refs": {}
+    });
+    let held = json!({
+        "staged_id": STAGED_ID,
+        "adopted_at": "2026-10-28T12:01:00Z",
+        "outcome": "handoff_not_adopted",
+        "reason": "commit failed"
+    });
+    assert!(
+        receipt_transition_allowed(&JsonValue::Null, &adopted, STAGED_ID)
+            .expect("absent to adopted")
+    );
+    assert!(
+        receipt_transition_allowed(&JsonValue::Null, &held, STAGED_ID)
+            .expect("absent to held")
+    );
+    assert!(
+        receipt_transition_allowed(&held, &adopted, STAGED_ID)
+            .expect("held to adopted")
+    );
+    assert!(
+        receipt_transition_allowed(&held, &held, STAGED_ID)
+            .expect("held to held")
+    );
+    assert!(
+        receipt_transition_allowed(&adopted, &adopted, STAGED_ID)
+            .expect("adopted replay")
+    );
+    assert!(
+        !receipt_transition_allowed(&adopted, &held, STAGED_ID)
+            .expect("adopted blocks hold")
+    );
+    let mut other = adopted.clone();
+    other["staged_id"] = json!("bbbbbbbb-cccc-4ddd-8eee-ffffffffffff");
+    receipt_transition_allowed(&JsonValue::Null, &other, STAGED_ID)
+        .expect_err("staged mismatch");
 }

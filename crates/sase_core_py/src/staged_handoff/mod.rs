@@ -8,15 +8,20 @@ use pyo3::wrap_pyfunction;
 use sase_core::staged_handoff::{
     build_gate_staged_payload as core_build_gate_payload,
     evaluate_host_stage_admission as core_evaluate_host_stage_admission,
+    evaluate_recovery_decision as core_evaluate_recovery,
     evaluate_stage_admission as core_evaluate_stage_admission,
     evaluate_staged_monitor_membership as core_evaluate_membership,
     evaluate_staged_owner_liveness as core_evaluate_liveness,
     evaluate_staged_self_wait as core_evaluate_self_wait,
     gate_staged_payload_schema_version as core_gate_payload_version,
     receipt_authorizes as core_receipt_authorizes,
+    receipt_transition_allowed as core_receipt_transition,
+    recovery_adoption_lock_filename as core_adoption_lock_filename,
+    recovery_context_wire_schema_version as core_recovery_version,
     staged_handoff_wire_schema_version as core_wire_version,
     staged_monitor_launch_payload_schema_version as core_launch_version,
     validate_gate_staged_payload as core_validate_gate_payload,
+    validate_recovery_context as core_validate_recovery_context,
     validate_staged_handoff as core_validate_staged_handoff,
     validate_staged_handoff_receipt as core_validate_receipt,
     validate_staged_monitor_launch_payload as core_validate_launch_payload,
@@ -202,6 +207,63 @@ fn py_evaluate_staged_self_wait<'py>(
     serialize_to_py(py, &decision)
 }
 
+/// Return the recovery-context wire schema version.
+#[pyfunction]
+#[pyo3(name = "recovery_context_wire_schema_version")]
+fn py_recovery_context_wire_schema_version() -> u32 {
+    core_recovery_version()
+}
+
+/// Return the shared adoption-lock filename.
+#[pyfunction]
+#[pyo3(name = "recovery_adoption_lock_filename")]
+fn py_recovery_adoption_lock_filename() -> &'static str {
+    core_adoption_lock_filename()
+}
+
+/// Validate a recovery-context companion dict.
+#[pyfunction]
+#[pyo3(name = "validate_recovery_context")]
+fn py_validate_recovery_context<'py>(
+    py: Python<'py>,
+    context: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(context.as_any())?;
+    let normalized = core_validate_recovery_context(&value)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &normalized)
+}
+
+/// Decide the replay action for observed recovery evidence.
+#[pyfunction]
+#[pyo3(name = "evaluate_recovery_decision")]
+fn py_evaluate_recovery_decision<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let decision = core_evaluate_recovery(&value)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &decision)
+}
+
+/// Return whether a receipt replacement is allowed for ``staged_id``.
+///
+/// ``current`` may be ``None`` for an absent receipt. Malformed input
+/// raises; a racing hold over an adopted receipt returns ``False``.
+#[pyfunction]
+#[pyo3(name = "staged_handoff_receipt_transition_allowed")]
+fn py_staged_handoff_receipt_transition_allowed(
+    current: &Bound<'_, PyAny>,
+    next: &Bound<'_, PyDict>,
+    staged_id: &str,
+) -> PyResult<bool> {
+    let current = py_to_json_value(current)?;
+    let next = py_to_json_value(next.as_any())?;
+    core_receipt_transition(&current, &next, staged_id)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 pub(crate) fn register_staged_handoff(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(
         py_staged_handoff_wire_schema_version,
@@ -232,6 +294,20 @@ pub(crate) fn register_staged_handoff(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_staged_owner_liveness, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_staged_self_wait, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_recovery_context_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_recovery_adoption_lock_filename,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_validate_recovery_context, m)?)?;
+    m.add_function(wrap_pyfunction!(py_evaluate_recovery_decision, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_staged_handoff_receipt_transition_allowed,
+        m
+    )?)?;
     Ok(())
 }
 
