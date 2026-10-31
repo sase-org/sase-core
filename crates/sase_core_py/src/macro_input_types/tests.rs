@@ -46,8 +46,20 @@ fn catalog_binding_round_trips_contract_rows() {
         assert_eq!(
             names,
             [
-                "word", "line", "text", "path", "int", "float", "bool", "code",
-                "string", "enum", "agent", "effort", "model",
+                "word",
+                "line",
+                "text",
+                "path",
+                "int",
+                "float",
+                "bool",
+                "code",
+                "string",
+                "enum",
+                "agent",
+                "effort",
+                "wait_target",
+                "model",
             ]
         );
         let string = value

@@ -1250,13 +1250,17 @@ fn validate_input_choices(
         .map(|scalar| scalar.range)
         .or_else(|| source.map(|field| field.value_range))
         .unwrap_or(fallback_range);
-    if named_type.is_some_and(|name| name == "effort") {
+    if !catalog_choices.is_empty() {
         if choices.is_some() {
+            let name = named_type.unwrap_or("enum");
             builder.push(
                 range,
                 DiagnosticSeverity::Error,
                 "invalid_macro_frontmatter_input_choices",
-                "Macro input `effort` already defines its values; remove `choices`",
+                format!(
+                    "Macro input `{name}` already defines its values; \
+                     remove `choices`"
+                ),
             );
         }
         return catalog_choices.to_vec();
@@ -3557,6 +3561,41 @@ mod tests {
             skipped.iter().all(|diagnostic| diagnostic.code
                 != "invalid_macro_frontmatter_input_default"),
             "{skipped:?}"
+        );
+    }
+
+    #[test]
+    fn wait_target_named_enum_defaults_and_rejects_authored_choices() {
+        let ok = validate(
+            "---\ninput:\n  target:\n    type: wait_target\n    default: session\n---\n",
+        );
+        assert!(!has_error(&ok), "{ok:?}");
+
+        let bad = validate(
+            "---\ninput:\n  target:\n    type: wait_target\n    default: Session\n---\n",
+        );
+        let found = bad
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == "invalid_macro_frontmatter_input_default"
+            })
+            .expect("wait_target default error");
+        assert_eq!(found.severity, DiagnosticSeverity::Error);
+        assert!(
+            found.message.contains("session"),
+            "unexpected message: {}",
+            found.message
+        );
+
+        let authored = validate(
+            "---\ninput:\n  target:\n    type: wait_target\n    choices: [session]\n---\n",
+        );
+        assert!(
+            authored.iter().any(|diagnostic| {
+                diagnostic.code == "invalid_macro_frontmatter_input_choices"
+                    && diagnostic.message.contains("`wait_target`")
+            }),
+            "{authored:?}"
         );
     }
 

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::InputChoice;
 use crate::effort::EFFORT_LEVELS_WITH_DESCRIPTIONS;
+use crate::wait_target::WAIT_TARGETS_WITH_DESCRIPTIONS;
 
 /// Kind of a catalog entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +42,7 @@ pub struct CatalogEntry {
 }
 
 /// Builtin catalog rows for this epic: scalars, `string`, `enum`, `agent`,
-/// `effort`, and `model`.
+/// `effort`, `wait_target`, and `model`.
 pub fn builtin_catalog() -> Vec<CatalogEntry> {
     vec![
         scalar("word", &[], "A single word with no whitespace."),
@@ -121,6 +122,20 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             advertised: true,
         },
         CatalogEntry {
+            name: "wait_target".to_string(),
+            aliases: Vec::new(),
+            kind: InputTypeKind::NamedEnum,
+            base: "enum".to_string(),
+            value_role: None,
+            choices: named_enum_choices(WAIT_TARGETS_WITH_DESCRIPTIONS),
+            description: "One of `session` or `turn`, matched exactly."
+                .to_string(),
+            rule: "One of `session` or `turn`, matched exactly.".to_string(),
+            source: CatalogSource::Builtin,
+            deprecated_alias_of: None,
+            advertised: true,
+        },
+        CatalogEntry {
             name: "model".to_string(),
             aliases: Vec::new(),
             kind: InputTypeKind::Domain,
@@ -142,8 +157,11 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
 }
 
 fn effort_choices() -> Vec<InputChoice> {
-    EFFORT_LEVELS_WITH_DESCRIPTIONS
-        .iter()
+    named_enum_choices(EFFORT_LEVELS_WITH_DESCRIPTIONS)
+}
+
+fn named_enum_choices(rows: &[(&str, &str)]) -> Vec<InputChoice> {
+    rows.iter()
         .map(|(value, description)| InputChoice {
             value: (*value).to_string(),
             label: None,

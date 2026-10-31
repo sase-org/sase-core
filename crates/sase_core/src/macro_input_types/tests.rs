@@ -44,8 +44,20 @@ fn catalog_contains_only_the_contract_rows() {
     assert_eq!(
         names,
         [
-            "word", "line", "text", "path", "int", "float", "bool", "code",
-            "string", "enum", "agent", "effort", "model",
+            "word",
+            "line",
+            "text",
+            "path",
+            "int",
+            "float",
+            "bool",
+            "code",
+            "string",
+            "enum",
+            "agent",
+            "effort",
+            "wait_target",
+            "model",
         ]
     );
     let string = catalog.iter().find(|entry| entry.name == "string").unwrap();
@@ -74,6 +86,26 @@ fn catalog_contains_only_the_contract_rows() {
         ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
     );
     for choice in &effort.choices {
+        assert!(choice.label.is_none());
+        assert!(choice
+            .description
+            .as_deref()
+            .is_some_and(|text| !text.is_empty()));
+    }
+    let wait_target = catalog
+        .iter()
+        .find(|entry| entry.name == "wait_target")
+        .unwrap();
+    assert_eq!(wait_target.kind, InputTypeKind::NamedEnum);
+    assert_eq!(wait_target.base, "enum");
+    assert_eq!(wait_target.value_role, None);
+    let wait_target_values: Vec<&str> = wait_target
+        .choices
+        .iter()
+        .map(|choice| choice.value.as_str())
+        .collect();
+    assert_eq!(wait_target_values, ["session", "turn"]);
+    for choice in &wait_target.choices {
         assert!(choice.label.is_none());
         assert!(choice
             .description

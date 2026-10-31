@@ -158,6 +158,7 @@ pub mod text_tail;
 pub mod tool_run;
 pub mod vcs_log;
 pub mod wait_epic_follow;
+pub mod wait_target;
 pub mod wire;
 pub mod workspace_lease;
 
