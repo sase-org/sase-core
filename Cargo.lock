@@ -1854,7 +1854,7 @@ dependencies = [
 
 [[package]]
 name = "sase_core"
-version = "0.43.2"
+version = "0.43.3"
 dependencies = [
  "aho-corasick",
  "chrono",
@@ -1882,7 +1882,7 @@ dependencies = [
 
 [[package]]
 name = "sase_core_py"
-version = "0.43.2"
+version = "0.43.3"
 dependencies = [
  "libc",
  "pyo3",
@@ -1897,7 +1897,7 @@ dependencies = [
 
 [[package]]
 name = "sase_gateway"
-version = "0.43.2"
+version = "0.43.3"
 dependencies = [
  "async-stream",
  "axum",
@@ -1928,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "sase_macro_lsp"
-version = "0.43.2"
+version = "0.43.3"
 dependencies = [
  "lsp-types",
  "sase_core",

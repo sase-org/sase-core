@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.3](https://github.com/sase-org/sase-core/compare/v0.43.2...v0.43.3) - 2026-10-31
+
+### Added
+
+- *(editor)* parse and diagnose %wait target=session|turn
+- *(wait_target)* add parse, effective-target, and NamedEnum vocabulary
+
 ## [0.43.2](https://github.com/sase-org/sase-core/compare/v0.43.1...v0.43.2) - 2026-10-30
 
 ### Added
