@@ -772,6 +772,13 @@ pub struct AgentMetaWire {
     /// provenance block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_restart: Option<Map<String, Value>>,
+    /// Compact projection of bound turn waits (`wait_tui` phase). Filled
+    /// from `wait_for_artifacts` and non-`history_only`
+    /// `wait_for_fork_sources` records with `target: "turn"`. Additive
+    /// serde-default and omitted when empty, so existing scan payloads
+    /// stay byte-stable and no schema bump is needed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_turn_bindings: Vec<WaitTurnBindingWire>,
 }
 
 /// One entry of `agent_meta.json`'s `created_epics` record.
@@ -821,6 +828,18 @@ pub struct WaitEpicFollowEntryWire {
     pub resume_command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_epic_ids: Vec<String>,
+}
+
+/// One bound turn wait, projected for TUI display (`wait_tui` phase).
+///
+/// `name` is the authored wait name (`requested`, else `name`).
+/// `turn_name` is the pinned member captured at bind time.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WaitTurnBindingWire {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub turn_name: String,
 }
 
 /// Runner that executed the finalizer phase (plan §3.3 C5).
@@ -1121,6 +1140,11 @@ pub struct WaitingMarkerWire {
     /// empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wait_epic_follows: Vec<WaitEpicFollowEntryWire>,
+    /// Compact projection of bound turn waits (`wait_tui` phase). Trailing
+    /// for the same key-order stability; additive serde-default and
+    /// omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_turn_bindings: Vec<WaitTurnBindingWire>,
 }
 
 impl WaitingMarkerWire {
@@ -2006,5 +2030,30 @@ mod tests {
     fn agent_meta_wire_omits_absent_auto_restart() {
         let encoded = serde_json::to_value(AgentMetaWire::default()).unwrap();
         assert!(encoded.get("auto_restart").is_none());
+    }
+
+    #[test]
+    fn agent_meta_wire_omits_empty_wait_turn_bindings() {
+        let encoded = serde_json::to_value(AgentMetaWire::default()).unwrap();
+        assert!(encoded.get("wait_turn_bindings").is_none());
+        let waiting =
+            serde_json::to_value(WaitingMarkerWire::default()).unwrap();
+        assert!(waiting.get("wait_turn_bindings").is_none());
+    }
+
+    #[test]
+    fn agent_meta_wire_round_trips_wait_turn_bindings() {
+        let meta = AgentMetaWire {
+            wait_turn_bindings: vec![WaitTurnBindingWire {
+                name: "16h".to_string(),
+                turn_name: "16h--gate".to_string(),
+            }],
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&meta).unwrap();
+        assert_eq!(encoded["wait_turn_bindings"][0]["name"], "16h");
+        assert_eq!(encoded["wait_turn_bindings"][0]["turn_name"], "16h--gate");
+        let decoded: AgentMetaWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, meta);
     }
 }

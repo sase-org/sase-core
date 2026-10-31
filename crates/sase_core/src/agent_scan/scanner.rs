@@ -36,8 +36,8 @@ use super::wire::{
     FinalizerStatusSummaryWire, ImportedSourceOwnerWire, OutputVariableValue,
     PendingQuestionMarkerWire, PlanPathMarkerWire, PromptStepMarkerWire,
     RunningMarkerWire, UsedMacroWire, WaitEpicFollowEntryWire,
-    WaitingMarkerWire, WorkflowStateWire, WorkflowStepStateWire,
-    AGENT_SCAN_WIRE_SCHEMA_VERSION,
+    WaitTurnBindingWire, WaitingMarkerWire, WorkflowStateWire,
+    WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 use crate::project_spec::{
     list_project_records, preferred_project_spec_path,
@@ -1576,6 +1576,108 @@ fn coerce_wait_epic_follows(
     }
 }
 
+/// Maximum `wait_turn_bindings` entries kept on the scan wire.
+const WAIT_TURN_BINDINGS_MAX_ENTRIES: usize = 64;
+
+fn trimmed_nonempty(value: Option<&Value>) -> Option<String> {
+    coerce_str(value)
+        .map(|raw| raw.trim().to_string())
+        .filter(|trimmed| !trimmed.is_empty())
+}
+
+/// Coerce one compact `{name, turn_name}` binding. Missing fields drop
+/// the entry; unknown keys are ignored.
+fn wait_turn_binding_from_compact(
+    value: &Value,
+) -> Option<WaitTurnBindingWire> {
+    let obj = value.as_object()?;
+    Some(WaitTurnBindingWire {
+        name: trimmed_nonempty(obj.get("name"))?,
+        turn_name: trimmed_nonempty(obj.get("turn_name"))?,
+    })
+}
+
+/// Derive one binding from a wait identity record. Requires `target:
+/// "turn"` and a non-empty `turn_name`. `history_only` fork sources are
+/// skipped. `name` prefers `requested`, then `name`.
+fn wait_turn_binding_from_record(value: &Value) -> Option<WaitTurnBindingWire> {
+    let obj = value.as_object()?;
+    if trimmed_nonempty(obj.get("target"))?.as_str() != "turn" {
+        return None;
+    }
+    if coerce_bool_truthy(obj.get("history_only")) {
+        return None;
+    }
+    Some(WaitTurnBindingWire {
+        name: trimmed_nonempty(obj.get("requested"))
+            .or_else(|| trimmed_nonempty(obj.get("name")))?,
+        turn_name: trimmed_nonempty(obj.get("turn_name"))?,
+    })
+}
+
+fn push_unique_wait_turn_binding(
+    bindings: &mut Vec<WaitTurnBindingWire>,
+    seen: &mut BTreeSet<String>,
+    binding: WaitTurnBindingWire,
+) -> bool {
+    if !seen.insert(binding.name.clone()) {
+        return bindings.len() >= WAIT_TURN_BINDINGS_MAX_ENTRIES;
+    }
+    bindings.push(binding);
+    bindings.len() >= WAIT_TURN_BINDINGS_MAX_ENTRIES
+}
+
+/// Coerce `wait_turn_bindings` leniently. An explicit compact field wins
+/// when present; otherwise the scanner derives from `wait_for_artifacts`
+/// then non-history-only `wait_for_fork_sources`. A malformed entry never
+/// fails the whole scan. First name wins; cap 64.
+fn coerce_wait_turn_bindings(
+    data: &Map<String, Value>,
+) -> Vec<WaitTurnBindingWire> {
+    if let Some(value) = data.get("wait_turn_bindings") {
+        return match value {
+            Value::Array(items) => {
+                let mut bindings = Vec::new();
+                let mut seen = BTreeSet::new();
+                for item in items {
+                    if let Value::Object(_) = item {
+                        if let Some(binding) =
+                            wait_turn_binding_from_compact(item)
+                        {
+                            if push_unique_wait_turn_binding(
+                                &mut bindings,
+                                &mut seen,
+                                binding,
+                            ) {
+                                break;
+                            }
+                        }
+                    }
+                }
+                bindings
+            }
+            _ => Vec::new(),
+        };
+    }
+    let mut bindings = Vec::new();
+    let mut seen = BTreeSet::new();
+    for key in ["wait_for_artifacts", "wait_for_fork_sources"] {
+        let Some(Value::Array(items)) = data.get(key) else {
+            continue;
+        };
+        for item in items {
+            let Some(binding) = wait_turn_binding_from_record(item) else {
+                continue;
+            };
+            if push_unique_wait_turn_binding(&mut bindings, &mut seen, binding)
+            {
+                return bindings;
+            }
+        }
+    }
+    bindings
+}
+
 /// Read and validate the stored `%tab` placement for one meta object.
 ///
 /// The raw value is canonicalized (trimmed, lowercased) through
@@ -1775,6 +1877,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         auto_approve_argument: coerce_str(data.get("auto_approve_argument")),
         autonomy,
         auto_restart: coerce_object(data.get("auto_restart")),
+        wait_turn_bindings: coerce_wait_turn_bindings(data),
     }
 }
 
@@ -2116,6 +2219,7 @@ fn waiting_marker_from_object(data: &Map<String, Value>) -> WaitingMarkerWire {
         wait_epic_follows: coerce_wait_epic_follows(
             data.get("wait_epic_follows"),
         ),
+        wait_turn_bindings: coerce_wait_turn_bindings(data),
     }
 }
 
@@ -3934,6 +4038,15 @@ mod tests {
         agent_meta_from_object(&data)
     }
 
+    fn meta_from_pairs(pairs: &[(&str, Value)]) -> AgentMetaWire {
+        let mut data = Map::new();
+        data.insert("name".to_string(), json!("probe"));
+        for (key, value) in pairs {
+            data.insert((*key).to_string(), value.clone());
+        }
+        agent_meta_from_object(&data)
+    }
+
     fn meta_with_auto_argument(value: Value) -> AgentMetaWire {
         let mut data = Map::new();
         data.insert("name".to_string(), json!("probe"));
@@ -4174,6 +4287,142 @@ mod tests {
                 .wait_epic_follows
                 .is_empty());
         }
+    }
+
+    #[test]
+    fn scanner_derives_wait_turn_bindings_from_identity_records() {
+        let meta = meta_from_pairs(&[(
+            "wait_for_artifacts",
+            json!([
+                {
+                    "requested": "16h",
+                    "name": "16h--gate",
+                    "target": "turn",
+                    "turn_name": "16h--gate",
+                    "future_field": true,
+                },
+                {
+                    "name": "planner",
+                    "target": "session",
+                    "turn_name": "planner--plan",
+                },
+                {
+                    "requested": "missing-turn",
+                    "target": "turn",
+                },
+                42,
+            ]),
+        )]);
+        assert_eq!(meta.name.as_deref(), Some("probe"));
+        assert_eq!(
+            meta.wait_turn_bindings,
+            vec![WaitTurnBindingWire {
+                name: "16h".to_string(),
+                turn_name: "16h--gate".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn scanner_skips_history_only_fork_turn_bindings() {
+        let meta = meta_from_pairs(&[
+            (
+                "wait_for_artifacts",
+                json!([{
+                    "requested": "16h",
+                    "target": "turn",
+                    "turn_name": "16h--gate",
+                }]),
+            ),
+            (
+                "wait_for_fork_sources",
+                json!([
+                    {
+                        "requested": "fork-live",
+                        "target": "turn",
+                        "turn_name": "fork-live--gate",
+                    },
+                    {
+                        "requested": "fork-hist",
+                        "target": "turn",
+                        "turn_name": "fork-hist--gate",
+                        "history_only": true,
+                    },
+                    {
+                        "requested": "16h",
+                        "target": "turn",
+                        "turn_name": "should-not-win",
+                    },
+                ]),
+            ),
+        ]);
+        assert_eq!(
+            meta.wait_turn_bindings,
+            vec![
+                WaitTurnBindingWire {
+                    name: "16h".to_string(),
+                    turn_name: "16h--gate".to_string(),
+                },
+                WaitTurnBindingWire {
+                    name: "fork-live".to_string(),
+                    turn_name: "fork-live--gate".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn scanner_prefers_explicit_wait_turn_bindings() {
+        let meta = meta_from_pairs(&[
+            (
+                "wait_turn_bindings",
+                json!([{
+                    "name": "16h",
+                    "turn_name": "16h--gate",
+                }]),
+            ),
+            (
+                "wait_for_artifacts",
+                json!([{
+                    "requested": "other",
+                    "target": "turn",
+                    "turn_name": "other--gate",
+                }]),
+            ),
+        ]);
+        assert_eq!(
+            meta.wait_turn_bindings,
+            vec![WaitTurnBindingWire {
+                name: "16h".to_string(),
+                turn_name: "16h--gate".to_string(),
+            }]
+        );
+        for value in [json!("16h"), json!(42), json!(null), json!({})] {
+            assert!(meta_from_pairs(&[("wait_turn_bindings", value)])
+                .wait_turn_bindings
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn scanner_projects_wait_turn_bindings_on_waiting_marker() {
+        let mut data = Map::new();
+        data.insert(
+            "wait_for_artifacts".to_string(),
+            json!([{
+                "requested": "16h",
+                "target": "turn",
+                "turn_name": "16h--gate",
+            }]),
+        );
+        let waiting = waiting_marker_from_object(&data);
+        assert_eq!(
+            waiting.wait_turn_bindings,
+            vec![WaitTurnBindingWire {
+                name: "16h".to_string(),
+                turn_name: "16h--gate".to_string(),
+            }]
+        );
     }
 
     #[test]
