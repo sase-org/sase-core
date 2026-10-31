@@ -3,6 +3,7 @@ use super::super::wire::{
     DirectiveSyntaxForm, DirectiveValueRole,
 };
 use crate::effort::EFFORT_LEVELS_WITH_DESCRIPTIONS;
+use crate::wait_target::WAIT_TARGETS_WITH_DESCRIPTIONS;
 
 /// Closed `%auto`/`%a` vocabulary: the only colon values the launch
 /// extractor accepts. `manual` and `off` disable automatic approval.
@@ -278,6 +279,17 @@ const BOOL_TRUE_FALSE: &[DirectiveSuggestedValue] = &[
     },
 ];
 
+const WAIT_TARGET_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
+    DirectiveSuggestedValue {
+        value: WAIT_TARGETS_WITH_DESCRIPTIONS[0].0,
+        documentation: WAIT_TARGETS_WITH_DESCRIPTIONS[0].1,
+    },
+    DirectiveSuggestedValue {
+        value: WAIT_TARGETS_WITH_DESCRIPTIONS[1].0,
+        documentation: WAIT_TARGETS_WITH_DESCRIPTIONS[1].1,
+    },
+];
+
 const FOR_EPIC_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
     DirectiveSuggestedValue {
         value: "true",
@@ -531,6 +543,14 @@ const WAIT_KEYWORDS: &[DirectiveKeywordSpec] = &[
         suggested_values: &[],
     },
     DirectiveKeywordSpec {
+        name: "target",
+        description: "Wait for a whole session or the session's current turn",
+        value_role: DirectiveValueRole::FreeText,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: WAIT_TARGET_SUGGESTIONS,
+    },
+    DirectiveKeywordSpec {
         name: "time",
         description: "Start after a duration or absolute wall-clock time",
         value_role: DirectiveValueRole::WaitTime,
@@ -633,7 +653,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         name: "wait",
         alias: Some("w"),
         description: "Wait for another agent/workflow and/or a time floor",
-        argument_hint: ":agent or (agent, bead=, hood=, time=, for_epic=)",
+        argument_hint: ":agent or (agent, bead=, hood=, time=, for_epic=, target=)",
         takes_argument: true,
         allows_multiple: true,
         syntax_forms: COLON_PAREN_BARE,

@@ -101,7 +101,10 @@ fn contract_covers_the_audited_directive_matrix() {
             .iter()
             .map(|keyword| keyword.name.as_str())
             .collect::<Vec<_>>(),
-        ["agent", "bead", "for_epic", "hood", "proc", "time", "unit"]
+        [
+            "agent", "bead", "for_epic", "hood", "proc", "target", "time",
+            "unit"
+        ]
     );
     assert!(wait
         .syntax_forms
@@ -773,6 +776,7 @@ fn wait_argument_candidates_use_runtime_keywords() {
             "for_epic=",
             "hood=",
             "proc=",
+            "target=",
             "time=",
             "unit="
         ]
@@ -1157,6 +1161,7 @@ fn clause_candidates_cover_roles_conflicts_and_self_references() {
             "for_epic=",
             "hood=",
             "proc=",
+            "target=",
             "time=",
             "unit=",
             "builders",
@@ -1219,6 +1224,7 @@ fn clause_candidates_cover_roles_conflicts_and_self_references() {
             "for_epic=",
             "hood=",
             "proc=",
+            "target=",
             "time=",
             "unit=",
             "builders",

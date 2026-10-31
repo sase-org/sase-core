@@ -355,6 +355,8 @@ fn wait_directive_diagnostics(
 
     let mut out = Vec::new();
     let mut explicit: HashMap<String, bool> = HashMap::new();
+    let mut explicit_targets: HashMap<String, crate::wait_target::WaitTarget> =
+        HashMap::new();
     let bytes = text.as_bytes();
     let mut index = 0usize;
     while index < bytes.len() {
@@ -411,76 +413,91 @@ fn wait_directive_diagnostics(
                 continue;
             }
             let inner = &text[cursor + 1..paren_end];
-            let (targets, raw_for_epic, has_for_epic) =
-                parse_wait_paren_args(inner);
-            if !has_for_epic {
-                for target in &targets {
-                    if target.is_empty() {
-                        continue;
-                    }
-                }
-                // Track nothing for conflict when no explicit value.
-                index = paren_end + 1;
-                continue;
-            }
-            if targets.is_empty() {
-                push_diagnostic(
-                    document,
-                    &mut out,
-                    percent,
-                    paren_end + 1,
-                    "wait-for-epic-without-agent",
-                    "%wait(for_epic=...) needs an agent target in the same %wait, e.g. %wait(planner, for_epic=false). bead=, hood=, proc=, unit=, and time= waits never launch epics.".to_string(),
-                );
-                index = paren_end + 1;
-                continue;
-            }
-            let raw_text = raw_for_epic.unwrap_or_default();
-            let lowered = raw_text.trim().to_ascii_lowercase();
-            if lowered != "true" && lowered != "false" {
-                push_diagnostic(
-                    document,
-                    &mut out,
-                    percent,
-                    paren_end + 1,
-                    "wait-for-epic-invalid-value",
-                    format!(
-                        "Invalid %wait for_epic= value '{raw_text}': use true or false."
-                    ),
-                );
-                index = paren_end + 1;
-                continue;
-            }
-            let value = lowered == "true";
-            for target in &targets {
-                if target.ends_with("--plan") && value {
+            let args = parse_wait_paren_args(inner);
+            if args.has_for_epic {
+                if args.targets.is_empty() {
                     push_diagnostic(
                         document,
                         &mut out,
                         percent,
                         paren_end + 1,
-                        "wait-for-epic-plan-row",
-                        format!(
-                            "%wait target '{target}' cannot use for_epic=true: --plan rows release when the plan is submitted. Use %wait:planner to wait through approval and into its epic."
-                        ),
+                        "wait-for-epic-without-agent",
+                        "%wait(for_epic=...) needs an agent target in the same %wait, e.g. %wait(planner, for_epic=false). bead=, hood=, proc=, unit=, and time= waits never launch epics.".to_string(),
                     );
-                }
-                if let Some(previous) = explicit.get(target) {
-                    if *previous != value {
+                } else {
+                    let raw_text = args.raw_for_epic.as_deref().unwrap_or("");
+                    let lowered = raw_text.trim().to_ascii_lowercase();
+                    if lowered != "true" && lowered != "false" {
                         push_diagnostic(
                             document,
                             &mut out,
                             percent,
                             paren_end + 1,
-                            "wait-for-epic-conflict",
+                            "wait-for-epic-invalid-value",
                             format!(
-                                "Conflicting for_epic= values for %wait target '{target}'."
+                                "Invalid %wait for_epic= value '{raw_text}': use true or false."
                             ),
                         );
+                    } else {
+                        let value = lowered == "true";
+                        for target in &args.targets {
+                            if target.ends_with("--plan") && value {
+                                push_diagnostic(
+                                    document,
+                                    &mut out,
+                                    percent,
+                                    paren_end + 1,
+                                    "wait-for-epic-plan-row",
+                                    format!(
+                                        "%wait target '{target}' cannot use for_epic=true: --plan rows release when the plan is submitted. Use %wait:planner to wait through approval and into its epic."
+                                    ),
+                                );
+                            }
+                            if let Some(previous) = explicit.get(target) {
+                                if *previous != value {
+                                    push_diagnostic(
+                                        document,
+                                        &mut out,
+                                        percent,
+                                        paren_end + 1,
+                                        "wait-for-epic-conflict",
+                                        format!(
+                                            "Conflicting for_epic= values for %wait target '{target}'."
+                                        ),
+                                    );
+                                }
+                            } else {
+                                explicit.insert(target.clone(), value);
+                            }
+                            if value
+                                && explicit_targets.get(target)
+                                    == Some(
+                                        &crate::wait_target::WaitTarget::Turn,
+                                    )
+                            {
+                                push_diagnostic(
+                                    document,
+                                    &mut out,
+                                    percent,
+                                    paren_end + 1,
+                                    "wait-target-turn-for-epic",
+                                    "`target=turn` cannot combine with for_epic=true. A turn wait is never armed for epic-follow.".to_string(),
+                                );
+                            }
+                        }
                     }
-                } else {
-                    explicit.insert(target.clone(), value);
                 }
+            }
+            if args.has_target {
+                emit_wait_target_diagnostics(
+                    document,
+                    &mut out,
+                    percent,
+                    paren_end + 1,
+                    &args,
+                    &mut explicit_targets,
+                    &explicit,
+                );
             }
             index = paren_end + 1;
             continue;
@@ -652,10 +669,114 @@ fn find_matching_paren(text: &str, open: usize) -> Option<usize> {
     None
 }
 
-fn parse_wait_paren_args(inner: &str) -> (Vec<String>, Option<String>, bool) {
+struct WaitParenArgs {
+    targets: Vec<String>,
+    raw_for_epic: Option<String>,
+    has_for_epic: bool,
+    raw_target: Option<String>,
+    has_target: bool,
+}
+
+fn emit_wait_target_diagnostics(
+    document: &DocumentSnapshot,
+    out: &mut Vec<EditorDiagnostic>,
+    start: usize,
+    end: usize,
+    args: &WaitParenArgs,
+    explicit_targets: &mut std::collections::HashMap<
+        String,
+        crate::wait_target::WaitTarget,
+    >,
+    explicit_for_epic: &std::collections::HashMap<String, bool>,
+) {
+    use crate::wait_target::{
+        effective_wait_target, parse_wait_target, WaitReferenceKind, WaitTarget,
+    };
+
+    if args.targets.is_empty() {
+        push_diagnostic(
+            document,
+            out,
+            start,
+            end,
+            "wait-target-without-agent",
+            "%wait(target=...) needs an agent target in the same %wait, e.g. %wait(planner, target=turn). bead=, hood=, proc=, unit=, and time= waits have no session/turn.".to_string(),
+        );
+        return;
+    }
+    let raw_text = args.raw_target.clone().unwrap_or_default();
+    let parsed = match parse_wait_target(raw_text.trim()) {
+        Ok(target) => target,
+        Err(error) => {
+            push_diagnostic(
+                document,
+                out,
+                start,
+                end,
+                error.code,
+                error.message,
+            );
+            return;
+        }
+    };
+    for target in &args.targets {
+        if parsed == WaitTarget::Turn
+            && explicit_for_epic.get(target) == Some(&true)
+        {
+            push_diagnostic(
+                document,
+                out,
+                start,
+                end,
+                "wait-target-turn-for-epic",
+                "`target=turn` cannot combine with for_epic=true. A turn wait is never armed for epic-follow.".to_string(),
+            );
+        }
+        if parsed == WaitTarget::Turn {
+            if let Ok(Some(_)) =
+                crate::agent_tribe::parse_tribe_reference(target)
+            {
+                if let Err(error) = effective_wait_target(
+                    Some(WaitTarget::Turn),
+                    WaitReferenceKind::Tribe,
+                    target,
+                ) {
+                    push_diagnostic(
+                        document,
+                        out,
+                        start,
+                        end,
+                        error.code,
+                        error.message,
+                    );
+                }
+            }
+        }
+        if let Some(previous) = explicit_targets.get(target) {
+            if *previous != parsed {
+                push_diagnostic(
+                    document,
+                    out,
+                    start,
+                    end,
+                    "wait-target-conflict",
+                    format!(
+                        "Conflicting target= values for %wait target '{target}'."
+                    ),
+                );
+            }
+        } else {
+            explicit_targets.insert(target.clone(), parsed);
+        }
+    }
+}
+
+fn parse_wait_paren_args(inner: &str) -> WaitParenArgs {
     let mut targets: Vec<String> = Vec::new();
     let mut raw_for_epic: Option<String> = None;
     let mut has_for_epic = false;
+    let mut raw_target: Option<String> = None;
+    let mut has_target = false;
     for part in split_wait_args(inner) {
         let trimmed = part.trim();
         if trimmed.is_empty() {
@@ -671,6 +792,9 @@ fn parse_wait_paren_args(inner: &str) -> (Vec<String>, Option<String>, bool) {
             } else if key_trimmed == "for_epic" {
                 has_for_epic = true;
                 raw_for_epic = Some(unquote_wait_value(value.trim()));
+            } else if key_trimmed == "target" {
+                has_target = true;
+                raw_target = Some(unquote_wait_value(value.trim()));
             } else {
                 // bead=, hood=, proc=, unit=, time= are not agent targets.
             }
@@ -678,7 +802,13 @@ fn parse_wait_paren_args(inner: &str) -> (Vec<String>, Option<String>, bool) {
             targets.push(unquote_wait_value(trimmed));
         }
     }
-    (targets, raw_for_epic, has_for_epic)
+    WaitParenArgs {
+        targets,
+        raw_for_epic,
+        has_for_epic,
+        raw_target,
+        has_target,
+    }
 }
 
 fn split_wait_args(inner: &str) -> Vec<String> {
@@ -2965,5 +3095,41 @@ mod tests {
         // an argument; the retired spelling would accept it.
         let diagnostic = diagnostic(&diagnostics, "missing_required_arg");
         assert!(diagnostic.message.contains("_helper"));
+    }
+
+    #[test]
+    fn wait_target_diagnostics_cover_syntactic_rejections() {
+        let missing = diagnostics_for("%wait(target=turn)");
+        assert_eq!(
+            diagnostic(&missing, "wait-target-without-agent").code,
+            "wait-target-without-agent"
+        );
+
+        let invalid = diagnostics_for("%wait(planner, target=Session)");
+        let invalid_diag = diagnostic(&invalid, "wait-target-invalid-value");
+        assert!(invalid_diag.message.contains("session | turn"));
+        assert!(invalid_diag.message.contains("Session"));
+
+        let conflict = diagnostics_for(
+            "%wait(planner, target=turn) %wait(planner, target=session)",
+        );
+        assert_eq!(
+            diagnostic(&conflict, "wait-target-conflict").code,
+            "wait-target-conflict"
+        );
+
+        let combo =
+            diagnostics_for("%wait(planner, target=turn, for_epic=true)");
+        assert_eq!(
+            diagnostic(&combo, "wait-target-turn-for-epic").code,
+            "wait-target-turn-for-epic"
+        );
+
+        let tribe = diagnostics_for("%wait(@review, target=turn)");
+        let tribe_diag = diagnostic(&tribe, "wait-target-turn-tribe");
+        assert!(tribe_diag.message.contains("@review"));
+
+        let ok = diagnostics_for("%wait(planner, target=turn)");
+        assert!(ok.iter().all(|item| !item.code.starts_with("wait-target")));
     }
 }

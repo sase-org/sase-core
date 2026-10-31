@@ -345,6 +345,7 @@ async fn wait_completion_uses_kind_aware_agent_catalog() {
             "for_epic=",
             "hood=",
             "proc=",
+            "target=",
             "time=",
             "unit=",
             "@ops",
@@ -353,12 +354,12 @@ async fn wait_completion_uses_kind_aware_agent_catalog() {
         ]
     );
     assert_eq!(items[0].kind, Some(CompletionItemKind::KEYWORD));
-    assert_eq!(items[7].kind, Some(CompletionItemKind::ENUM_MEMBER));
-    assert_eq!(items[8].kind, Some(CompletionItemKind::MODULE));
-    assert_eq!(items[9].kind, Some(CompletionItemKind::CLASS));
-    assert_eq!(items[7].sort_text.as_deref(), Some("2:0007"));
+    assert_eq!(items[8].kind, Some(CompletionItemKind::ENUM_MEMBER));
+    assert_eq!(items[9].kind, Some(CompletionItemKind::MODULE));
+    assert_eq!(items[10].kind, Some(CompletionItemKind::CLASS));
+    assert_eq!(items[8].sort_text.as_deref(), Some("2:0008"));
     assert_eq!(
-        items[8]
+        items[9]
             .label_details
             .as_ref()
             .and_then(|details| details.description.as_deref()),
@@ -366,7 +367,7 @@ async fn wait_completion_uses_kind_aware_agent_catalog() {
     );
     assert!(items[8].documentation.is_none());
     let Some(Documentation::MarkupContent(review_doc)) =
-        items[9].documentation.as_ref()
+        items[10].documentation.as_ref()
     else {
         panic!("expected markdown documentation for review family entry");
     };
@@ -688,6 +689,7 @@ async fn wait_keywords_survive_helper_failure_and_mixed_version_payloads() {
             "for_epic=",
             "hood=",
             "proc=",
+            "target=",
             "time=",
             "unit="
         ]
@@ -871,6 +873,7 @@ async fn queue_completion_avoids_agent_targets() {
             "for_epic=",
             "hood=",
             "proc=",
+            "target=",
             "time=",
             "unit=",
             "planner"

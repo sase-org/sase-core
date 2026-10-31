@@ -550,6 +550,7 @@ fn is_time_or_epic_follow(target: &str) -> bool {
         || target.starts_with("wait_until=")
         || target.starts_with("for_epic=")
         || target.starts_with("epic=")
+        || target.starts_with("target=")
 }
 
 fn add_dependency(
@@ -810,6 +811,7 @@ mod tests {
             "other-clan.member".to_string(),
             "time=5m".to_string(),
             "for_epic=e2".to_string(),
+            "target=turn".to_string(),
         ];
         external.wait_for_beads = vec!["foreign-bead".to_string()];
         external.wait_for_hoods = vec!["another-hood".to_string()];

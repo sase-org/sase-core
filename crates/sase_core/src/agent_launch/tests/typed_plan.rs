@@ -1332,3 +1332,93 @@ fn typed_launch_tab_changes_content_digest() {
     assert_ne!(plain.content_digest, tabbed.content_digest);
     assert_eq!(tabbed.content_digest, retabbed.content_digest);
 }
+
+fn typed_wait_target_err(prompt: &str) -> Vec<String> {
+    match plan_typed_launch_units(prompt, Some("auto"), Some("sase")) {
+        Err(AgentLaunchFanoutPlanError::TypedLaunchPlan { diagnostics }) => {
+            diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic.code)
+                .collect()
+        }
+        other => panic!("expected typed launch diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_launch_wait_target_turn_skips_epic_follow() {
+    let plan = plan_typed_launch_units(
+        "%wait(planner, target=turn)\nDo work",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap();
+    assert!(plan.units[0].wait_for_epics_of.is_empty());
+    assert_eq!(
+        plan.units[0].waits,
+        vec![WaitTargetWire::Agent {
+            name: "planner".to_string()
+        }]
+    );
+}
+
+#[test]
+fn typed_launch_wait_target_session_on_proc_is_noop() {
+    let plan = plan_typed_launch_units(
+        "%proc(\"echo hi\")\n%wait(planner, target=session)",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap();
+    match &plan.units[0].payload {
+        LaunchUnitPayloadWire::Proc(_) => {}
+        other => panic!("expected proc payload, got {other:?}"),
+    }
+    assert!(plan.diagnostics.iter().all(|diagnostic| {
+        diagnostic.code != "wait-target-turn-typed-unsupported"
+    }));
+}
+
+#[test]
+fn typed_launch_rejects_turn_target_on_proc() {
+    let codes = typed_wait_target_err(
+        "%proc(\"echo hi\")\n%wait(planner, target=turn)",
+    );
+    assert!(
+        codes
+            .iter()
+            .any(|code| code == "wait-target-turn-typed-unsupported"),
+        "{codes:?}"
+    );
+}
+
+#[test]
+fn typed_launch_rejects_turn_target_on_if() {
+    let codes = typed_wait_target_err(
+        "%if::\n\n```bash\ntrue\n```\n%wait(planner, target=turn)\nDo work",
+    );
+    assert!(
+        codes
+            .iter()
+            .any(|code| code == "wait-target-turn-typed-unsupported"),
+        "{codes:?}"
+    );
+}
+
+#[test]
+fn typed_launch_rejects_wait_target_without_agent() {
+    let codes = typed_wait_target_err("%wait(target=turn)\nDo work");
+    assert!(
+        codes.iter().any(|code| code == "wait-target-without-agent"),
+        "{codes:?}"
+    );
+}
+
+#[test]
+fn typed_launch_rejects_wait_target_on_tribe() {
+    let codes = typed_wait_target_err("%wait(@review, target=turn)\nDo work");
+    assert!(
+        codes.iter().any(|code| code == "wait-target-turn-tribe"),
+        "{codes:?}"
+    );
+}

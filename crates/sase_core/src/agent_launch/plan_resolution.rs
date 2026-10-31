@@ -17,6 +17,7 @@ use crate::hold_directive::{format_hold_directive, HoldFieldsWire};
 use crate::queue_directive::{
     format_queue_capacity_multiplier, format_queue_weight,
 };
+use crate::wait_target::WaitTarget;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -91,7 +92,8 @@ pub(crate) fn resolve_typed_waits(
                     }
                 }
                 RawWaitTargetKind::Agent(target) => {
-                    if for_epic != Some(false)
+                    if wait.wait_target != Some(WaitTarget::Turn)
+                        && for_epic != Some(false)
                         && !target.ends_with("--plan")
                         && !armed.contains(&target)
                     {
