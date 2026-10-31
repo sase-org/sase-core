@@ -866,6 +866,8 @@ pub struct MobileMacroInputWire {
     #[serde(default)]
     pub repeatable: bool,
     #[serde(default)]
+    pub keyword_only: bool,
+    #[serde(default)]
     pub choices: Vec<MobileInputChoiceWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub named_type: Option<String>,
@@ -1099,6 +1101,7 @@ mod tests {
                         default_display: None,
                         position: 0,
                         repeatable: false,
+                        keyword_only: false,
                         choices: Vec::new(),
                         named_type: None,
                         value_role: None,
@@ -1257,6 +1260,7 @@ mod tests {
                         "default_display": null,
                         "position": 0,
                         "repeatable": false,
+                        "keyword_only": false,
                         "choices": []
                     }],
                     "is_skill": false,
@@ -1628,6 +1632,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","message":"","entries":[{"value
         assert_eq!(old_entry.definition_range, None);
         assert_eq!(old_entry.inputs[0].description, None);
         assert!(!old_entry.inputs[0].repeatable);
+        assert!(!old_entry.inputs[0].keyword_only);
         assert_eq!(
             serde_json::to_value(&old_entry).unwrap(),
             json!({
@@ -1649,6 +1654,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","message":"","entries":[{"value
                     "default_display": null,
                     "position": 0,
                     "repeatable": false,
+                    "keyword_only": false,
                     "choices": []
                 }],
                 "is_skill": false,

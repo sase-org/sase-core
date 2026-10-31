@@ -398,6 +398,8 @@ pub struct MacroInputHint {
     #[serde(default)]
     pub repeatable: bool,
     #[serde(default)]
+    pub keyword_only: bool,
+    #[serde(default)]
     pub choices: Vec<MobileInputChoiceWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub named_type: Option<String>,

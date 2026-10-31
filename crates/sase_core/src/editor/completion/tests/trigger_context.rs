@@ -112,6 +112,7 @@ fn detects_narrow_argument_contexts() {
             default_display: None,
             position: 0,
             repeatable: false,
+            keyword_only: false,
             choices: Vec::new(),
             named_type: None,
             value_role: None,
@@ -141,6 +142,7 @@ fn repeatable_positionals_keep_the_tail_input_and_active_element_range() {
         default_display: None,
         position: 0,
         repeatable: true,
+        keyword_only: false,
         choices: Vec::new(),
         named_type: None,
         value_role: None,
@@ -173,6 +175,7 @@ fn repeatable_agent_context_replaces_earlier_element_and_filters_selected() {
         default_display: None,
         position: 0,
         repeatable: true,
+        keyword_only: false,
         choices: Vec::new(),
         named_type: None,
         value_role: None,
@@ -240,4 +243,102 @@ fn repeatable_agent_context_replaces_earlier_element_and_filters_selected() {
         list.candidates[0].detail.as_deref(),
         Some("DONE · sase-core")
     );
+}
+
+#[test]
+fn keyword_only_inputs_are_named_and_skipped_by_positional_forms() {
+    let mut fork = entries()[0].clone();
+    fork.name = "fork".to_string();
+    fork.inputs = vec![
+        MacroInputHint {
+            name: "name".to_string(),
+            r#type: "word".to_string(),
+            description: None,
+            required: true,
+            default_display: None,
+            position: 0,
+            repeatable: false,
+            keyword_only: false,
+            choices: Vec::new(),
+            named_type: None,
+            value_role: None,
+        },
+        MacroInputHint {
+            name: "target".to_string(),
+            r#type: "enum".to_string(),
+            description: None,
+            required: false,
+            default_display: None,
+            position: 1,
+            repeatable: false,
+            keyword_only: true,
+            choices: Vec::new(),
+            named_type: None,
+            value_role: None,
+        },
+        MacroInputHint {
+            name: "mode".to_string(),
+            r#type: "word".to_string(),
+            description: None,
+            required: true,
+            default_display: None,
+            position: 2,
+            repeatable: false,
+            keyword_only: false,
+            choices: Vec::new(),
+            named_type: None,
+            value_role: None,
+        },
+    ];
+
+    for (text, needle, expected) in [
+        ("#fork(alice, fast)", "fast", None),
+        ("#fork(alice, target=se)", "se", Some("target")),
+        ("#fork:alice,fast", "fast", Some("mode")),
+    ] {
+        let doc = DocumentSnapshot::new(text);
+        let cursor = doc
+            .byte_offset_to_position(text.find(needle).unwrap() + needle.len())
+            .unwrap();
+        let context =
+            classify_completion_context(&doc, cursor, &[fork.clone()]).unwrap();
+        assert_eq!(context.active_input.as_deref(), expected, "{text}");
+    }
+
+    let mut repeatable_fork = fork;
+    repeatable_fork.inputs = vec![
+        MacroInputHint {
+            name: "names".to_string(),
+            r#type: "agent".to_string(),
+            description: None,
+            required: false,
+            default_display: None,
+            position: 0,
+            repeatable: true,
+            keyword_only: false,
+            choices: Vec::new(),
+            named_type: None,
+            value_role: None,
+        },
+        MacroInputHint {
+            name: "target".to_string(),
+            r#type: "enum".to_string(),
+            description: None,
+            required: false,
+            default_display: None,
+            position: 1,
+            repeatable: false,
+            keyword_only: true,
+            choices: Vec::new(),
+            named_type: None,
+            value_role: None,
+        },
+    ];
+    let text = "#fork(alice, co";
+    let doc = DocumentSnapshot::new(text);
+    let cursor = doc.byte_offset_to_position(text.len()).unwrap();
+    let context =
+        classify_completion_context(&doc, cursor, &[repeatable_fork]).unwrap();
+    assert_eq!(context.active_input.as_deref(), Some("names"));
+    assert_eq!(context.selected_values, vec!["alice"]);
 }

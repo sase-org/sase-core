@@ -794,6 +794,7 @@ pub(crate) fn state_for_helper_bridge(tmp: &TempDir) -> GatewayState {
                         default_display: None,
                         position: 0,
                         repeatable: false,
+                        keyword_only: false,
                         choices: Vec::new(),
                         named_type: None,
                         value_role: None,

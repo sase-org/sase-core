@@ -471,6 +471,7 @@
       "choices": "MobileInputChoiceWire[]; default [] when absent",
       "default_display": "string|null",
       "description": "string|null; default null when absent",
+      "keyword_only": "bool; default false when absent",
       "name": "string",
       "named_type": "string|null; default null when absent",
       "position": "u32",

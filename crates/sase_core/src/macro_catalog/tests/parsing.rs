@@ -46,6 +46,54 @@ fn projects_repeatable_agent_input_metadata() {
 }
 
 #[test]
+fn projects_keyword_only_input_metadata_and_signature() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let xprompts = root.join("sase/xprompts");
+    fs::create_dir_all(&xprompts).unwrap();
+    fs::write(
+        xprompts.join("fork.yml"),
+        "input:\n  name: agent\n  target:\n    type: enum\n    choices: [session, turn]\n    default: session\n    keyword_only: true\nsteps:\n  - name: main\n    prompt_part: '{{ name }}'\n",
+    )
+    .unwrap();
+
+    let response = load_editor_macro_catalog(
+        &request(),
+        &MacroCatalogLoadOptions::new(Some(root.to_path_buf())),
+    )
+    .unwrap();
+    let entry = response
+        .entries
+        .iter()
+        .find(|entry| entry.name == "fork")
+        .unwrap();
+
+    assert_eq!(
+        entry.input_signature.as_deref(),
+        Some("(name: agent, target=?: session | turn)")
+    );
+    assert!(!entry.inputs[0].keyword_only);
+    assert!(entry.inputs[1].keyword_only);
+
+    fs::write(
+        xprompts.join("fork_long.yml"),
+        "input:\n  - name: name\n    type: agent\n  - name: target\n    type: enum\n    choices: [session, turn]\n    default: session\n    keyword_only: true\nsteps:\n  - name: main\n    prompt_part: '{{ name }}'\n",
+    )
+    .unwrap();
+    let response = load_editor_macro_catalog(
+        &request(),
+        &MacroCatalogLoadOptions::new(Some(root.to_path_buf())),
+    )
+    .unwrap();
+    let entry = response
+        .entries
+        .iter()
+        .find(|entry| entry.name == "fork_long")
+        .unwrap();
+    assert!(entry.inputs[1].keyword_only);
+}
+
+#[test]
 fn catalog_input_choices_keep_descriptions() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

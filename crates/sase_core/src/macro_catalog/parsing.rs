@@ -458,6 +458,7 @@ fn workflow_from_mapping(
                 default_snippet_value: None,
                 is_step_input: true,
                 repeatable: false,
+                keyword_only: false,
                 choices: Vec::new(),
                 named_type: None,
                 value_role: None,
@@ -598,6 +599,7 @@ fn parse_inputs(
                     named_type,
                     value_role,
                     resolved_choices,
+                    keyword_only,
                 } = parse_short_input_value(raw, registry);
                 let declared = short_input_choices(raw);
                 let choices = if declared.is_empty() {
@@ -614,6 +616,7 @@ fn parse_inputs(
                     default_snippet_value,
                     is_step_input: false,
                     repeatable: repeatable_input_value(raw),
+                    keyword_only,
                     choices,
                     named_type,
                     value_role,
@@ -659,6 +662,9 @@ fn parse_inputs(
                     repeatable: mapping_get(mapping, "repeatable")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
+                    keyword_only: mapping_get(mapping, "keyword_only")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                     choices,
                     named_type,
                     value_role,
@@ -678,6 +684,7 @@ struct ShortInputValue {
     named_type: Option<String>,
     value_role: Option<String>,
     resolved_choices: Vec<MobileInputChoiceWire>,
+    keyword_only: bool,
 }
 
 fn parse_short_input_value(
@@ -704,6 +711,9 @@ fn parse_short_input_value(
             named_type,
             value_role,
             resolved_choices,
+            keyword_only: mapping_get(mapping, "keyword_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }
     } else {
         let (type_name, named_type, value_role, resolved_choices) =
@@ -720,6 +730,7 @@ fn parse_short_input_value(
             named_type,
             value_role,
             resolved_choices,
+            keyword_only: false,
         }
     }
 }

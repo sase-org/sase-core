@@ -67,6 +67,7 @@ impl HelperHostBridge for ChoiceDiagBridge {
                     default_display: Some("brief".to_string()),
                     position: 0,
                     repeatable: false,
+                    keyword_only: false,
                     choices: vec![
                         MobileInputChoiceWire {
                             value: "brief".to_string(),

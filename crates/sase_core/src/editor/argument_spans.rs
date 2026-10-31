@@ -838,6 +838,7 @@ mod tests {
             default_display: None,
             position,
             repeatable,
+            keyword_only: false,
             choices: Vec::new(),
             named_type: None,
             value_role: None,
@@ -1139,6 +1140,25 @@ mod tests {
             unresolvable.validity,
             MacroArgumentSpanValidity::Unresolvable
         );
+    }
+
+    #[test]
+    fn catalog_span_validation_skips_keyword_only_inputs_positionally() {
+        let mut target = input("target", "int", false, 1, false);
+        target.keyword_only = true;
+        let entry = entry(
+            "fork",
+            vec![
+                input("name", "word", true, 0, false),
+                target,
+                input("mode", "word", true, 2, false),
+            ],
+        );
+        let text = "#fork(alice, fast)";
+        let call = parse_macro_calls(text).pop().unwrap();
+        let semantics = macro_semantics(&entry, &call);
+
+        assert!(!semantics.value_validity.contains_key(&1));
     }
 
     #[test]

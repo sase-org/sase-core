@@ -1145,8 +1145,16 @@ fn input_for_position(
 ) -> Option<&MacroInputHint> {
     entry
         .inputs
-        .get(position)
-        .or_else(|| entry.inputs.last().filter(|input| input.repeatable))
+        .iter()
+        .filter(|input| !input.keyword_only)
+        .nth(position)
+        .or_else(|| {
+            entry
+                .inputs
+                .iter()
+                .rfind(|input| !input.keyword_only)
+                .filter(|input| input.repeatable)
+        })
 }
 
 fn local_macro_entries(document: &DocumentSnapshot) -> Vec<MacroAssistEntry> {
@@ -1245,6 +1253,7 @@ pub(crate) fn parse_local_inputs(value: &Value) -> Vec<MacroInputHint> {
                     default_display: parsed.default_display,
                     position: position as u32,
                     repeatable: parsed.repeatable,
+                    keyword_only: parsed.keyword_only,
                     choices,
                     named_type: parsed.named_type,
                     value_role: parsed.value_role,
@@ -1287,6 +1296,9 @@ pub(crate) fn parse_local_inputs(value: &Value) -> Vec<MacroInputHint> {
                     repeatable: mapping_get(mapping, "repeatable")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
+                    keyword_only: mapping_get(mapping, "keyword_only")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                     choices,
                     named_type,
                     value_role,
@@ -1302,6 +1314,7 @@ struct ParsedShortInputHint {
     required: bool,
     default_display: Option<String>,
     repeatable: bool,
+    keyword_only: bool,
     named_type: Option<String>,
     value_role: Option<String>,
     resolved_choices: Vec<MobileInputChoiceWire>,
@@ -1324,6 +1337,9 @@ fn parse_short_input_hint(value: &Value) -> ParsedShortInputHint {
             repeatable: mapping_get(mapping, "repeatable")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            keyword_only: mapping_get(mapping, "keyword_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             named_type,
             value_role,
             resolved_choices,
@@ -1338,6 +1354,7 @@ fn parse_short_input_hint(value: &Value) -> ParsedShortInputHint {
             required: true,
             default_display: None,
             repeatable: false,
+            keyword_only: false,
             named_type,
             value_role,
             resolved_choices,
@@ -1837,6 +1854,7 @@ mod tests {
             default_display: None,
             position,
             repeatable: false,
+            keyword_only: false,
             choices: Vec::new(),
             named_type: None,
             value_role: None,
@@ -1851,6 +1869,7 @@ mod tests {
     ) -> MacroInputHint {
         MacroInputHint {
             repeatable: true,
+            keyword_only: false,
             ..input(name, r#type, required, position)
         }
     }
@@ -2394,6 +2413,43 @@ mod tests {
     }
 
     #[test]
+    fn positional_arguments_skip_keyword_only_inputs() {
+        let mut entry = catalog()
+            .into_iter()
+            .find(|entry| entry.name == "typed")
+            .unwrap();
+        entry.name = "fork".to_string();
+        entry.inputs = vec![
+            input("name", "word", true, 0),
+            {
+                let mut target = input("target", "int", false, 1);
+                target.keyword_only = true;
+                target
+            },
+            input("mode", "word", true, 2),
+        ];
+        let diagnostics = analyze_document(
+            &DocumentSnapshot::new("#fork(alice, fast)"),
+            &[entry],
+        );
+        assert_eq!(
+            diagnostic_count(&diagnostics, "invalid_macro_arg_type"),
+            0,
+            "{diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostic_count(&diagnostics, "too_many_args"),
+            0,
+            "{diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostic_count(&diagnostics, "missing_required_arg"),
+            0,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn reports_shortform_frontmatter_input_type_diagnostic() {
         let text = "---\ninput:\n  name: wordd\n---\nBody";
         let doc = DocumentSnapshot::new(text);
@@ -2573,6 +2629,18 @@ mod tests {
         assert!(data.suggestions[0].preferred);
         assert_eq!(data.suggestions[0].edit.new_text, "brief");
         assert_eq!(diagnostic_text(text, mismatch), "breif");
+    }
+
+    #[test]
+    fn local_macro_inputs_keep_keyword_only_metadata() {
+        let inputs: Value = serde_yaml::from_str(
+            "name: agent\ntarget:\n  type: enum\n  choices: [session, turn]\n  keyword_only: true\n",
+        )
+        .unwrap();
+        let parsed = parse_local_inputs(&inputs);
+        assert_eq!(parsed.len(), 2);
+        assert!(!parsed[0].keyword_only);
+        assert!(parsed[1].keyword_only);
     }
 
     #[test]

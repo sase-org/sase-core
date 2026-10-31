@@ -178,6 +178,7 @@ pub(super) struct CatalogInput {
     pub(super) default_snippet_value: Option<String>,
     pub(super) is_step_input: bool,
     pub(super) repeatable: bool,
+    pub(super) keyword_only: bool,
     pub(super) choices: Vec<MobileInputChoiceWire>,
     pub(super) named_type: Option<String>,
     pub(super) value_role: Option<String>,

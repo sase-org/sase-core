@@ -49,6 +49,7 @@ pub fn assist_entries_from_catalog(
                         default_display: input.default_display.clone(),
                         position: input.position,
                         repeatable: input.repeatable,
+                        keyword_only: input.keyword_only,
                         choices: input.choices.clone(),
                         named_type: input.named_type.clone(),
                         value_role: input.value_role.clone(),
@@ -636,8 +637,12 @@ pub fn build_snippet_completion_candidates(
 fn input_label(input: &MacroInputHint) -> String {
     let suffix = if input.required { "" } else { "?" };
     let repeatable = if input.repeatable { "…" } else { "" };
+    let keyword_only = if input.keyword_only { "=" } else { "" };
     let label = crate::editor::macro_arg_choices::macro_input_type_label(input);
-    format!("{}{repeatable}{suffix}: {}", input.name, label)
+    format!(
+        "{}{repeatable}{keyword_only}{suffix}: {}",
+        input.name, label
+    )
 }
 fn input_documentation(input: &MacroInputHint) -> Option<String> {
     let mut parts = Vec::new();

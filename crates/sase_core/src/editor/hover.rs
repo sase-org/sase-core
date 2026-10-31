@@ -483,19 +483,37 @@ mod tests {
             source_bucket: "builtin".to_string(),
             project: None,
             tags: Vec::new(),
-            input_signature: Some("(path: path)".to_string()),
-            inputs: vec![MacroInputHint {
-                name: "path".to_string(),
-                r#type: "path".to_string(),
-                description: Some("Path to review".to_string()),
-                required: true,
-                default_display: None,
-                position: 0,
-                repeatable: false,
-                choices: Vec::new(),
-                named_type: None,
-                value_role: None,
-            }],
+            input_signature: Some(
+                "(path: path, target=?: session | turn)".to_string(),
+            ),
+            inputs: vec![
+                MacroInputHint {
+                    name: "path".to_string(),
+                    r#type: "path".to_string(),
+                    description: Some("Path to review".to_string()),
+                    required: true,
+                    default_display: None,
+                    position: 0,
+                    repeatable: false,
+                    keyword_only: false,
+                    choices: Vec::new(),
+                    named_type: None,
+                    value_role: None,
+                },
+                MacroInputHint {
+                    name: "target".to_string(),
+                    r#type: "enum".to_string(),
+                    description: None,
+                    required: false,
+                    default_display: None,
+                    position: 1,
+                    repeatable: false,
+                    keyword_only: true,
+                    choices: Vec::new(),
+                    named_type: None,
+                    value_role: None,
+                },
+            ],
             content_preview: Some("Body preview".to_string()),
             description: Some("Review code".to_string()),
             source_path_display: Some("sase/macros/review.md".to_string()),
@@ -516,6 +534,7 @@ mod tests {
         )
         .unwrap();
         assert!(hover.markdown.contains("Review code"));
+        assert!(hover.markdown.contains("target=?: session | turn"));
 
         let arg_hover = hover_at_position(
             &doc,
@@ -547,6 +566,7 @@ mod tests {
             default_display: default.map(str::to_string),
             position: 0,
             repeatable: false,
+            keyword_only: false,
             choices: choices
                 .iter()
                 .map(|(value, label, description)| {

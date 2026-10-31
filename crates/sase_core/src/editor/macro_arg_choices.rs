@@ -324,6 +324,7 @@ mod tests {
             default_display: input.default_display.clone(),
             position: input.position,
             repeatable: input.repeatable,
+            keyword_only: false,
             choices: input
                 .choices
                 .iter()
@@ -640,6 +641,7 @@ mod tests {
                 default_display: None,
                 position: 0,
                 repeatable: false,
+                keyword_only: false,
                 choices: choices
                     .into_iter()
                     .map(|v| MobileInputChoiceWire {
@@ -711,6 +713,7 @@ mod tests {
             default_display: None,
             position: 0,
             repeatable: false,
+            keyword_only: false,
             choices: vec![MobileInputChoiceWire {
                 value: "staging".to_string(),
                 label: Some("Staging".to_string()),
@@ -725,6 +728,7 @@ mod tests {
         // Repeatable exclusion keeps active eligible.
         let _rep = MacroInputHint {
             repeatable: true,
+            keyword_only: false,
             ..labeled.clone()
         };
         let _ = BTreeSet::<String>::new();
@@ -753,6 +757,7 @@ mod tests {
                 default_display: None,
                 position: 0,
                 repeatable: false,
+                keyword_only: false,
                 choices: vec![MobileInputChoiceWire {
                     value: "staging".to_string(),
                     label: Some("Staging".to_string()),

@@ -253,11 +253,7 @@ fn colon_arg_context(
         .unwrap_or(body.len());
     // Active input is the clause containing the cursor; fall back to the
     // final repeatable input when the position runs past declared inputs.
-    let active_input = entry
-        .inputs
-        .get(active_clause)
-        .or_else(|| entry.inputs.last().filter(|input| input.repeatable))?
-        .clone();
+    let active_input = positional_input_for(entry, active_clause)?.clone();
     let token_start = body_start + clause_start;
     let token_end = body_start + clause_end;
     // Cursor must be inside the active clause's span (or at its empty edge).
@@ -352,12 +348,10 @@ fn paren_arg_context(
             }
             prev = end + 1;
         }
-        if let Some(active_input) = entry
-            .inputs
-            .get(positional_index)
-            .or_else(|| entry.inputs.last().filter(|input| input.repeatable))
-            .filter(|input| input.repeatable)
-            .cloned()
+        if let Some(active_input) =
+            positional_input_for(entry, positional_index)
+                .filter(|input| input.repeatable)
+                .cloned()
         {
             // For repeatable inputs, selected includes named values for the
             // same input (`labels=red`) plus other positional values, so
@@ -387,6 +381,7 @@ fn paren_arg_context(
             default_display: None,
             position: 0,
             repeatable: false,
+            keyword_only: false,
             choices: Vec::new(),
             named_type: None,
             value_role: None,
@@ -498,18 +493,9 @@ fn selected_for_repeatable(
                 if !raw.is_empty() {
                     // Positional clauses map by order; include those that
                     // belong to the same repeatable tail input.
-                    let belongs = entry
-                        .inputs
-                        .get(positional_index)
+                    let belongs = positional_input_for(entry, positional_index)
                         .map(|inp| inp.name == active_input.name)
-                        .unwrap_or_else(|| {
-                            entry
-                                .inputs
-                                .last()
-                                .filter(|inp| inp.repeatable)
-                                .map(|inp| inp.name == active_input.name)
-                                .unwrap_or(false)
-                        });
+                        .unwrap_or(false);
                     if belongs {
                         values.push(decode_selected_value(raw));
                     }
@@ -538,6 +524,24 @@ fn selected_for_repeatable(
         .into_iter()
         .filter(|v| seen.insert(v.clone()))
         .collect()
+}
+
+fn positional_input_for(
+    entry: &MacroAssistEntry,
+    position: usize,
+) -> Option<&MacroInputHint> {
+    entry
+        .inputs
+        .iter()
+        .filter(|input| !input.keyword_only)
+        .nth(position)
+        .or_else(|| {
+            entry
+                .inputs
+                .iter()
+                .rfind(|input| !input.keyword_only)
+                .filter(|input| input.repeatable)
+        })
 }
 
 fn selected_positional_values(

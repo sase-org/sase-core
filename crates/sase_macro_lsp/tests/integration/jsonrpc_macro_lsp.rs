@@ -55,6 +55,7 @@ impl HelperHostBridge for FixtureBridge {
                     default_display: None,
                     position: 0,
                     repeatable: false,
+                    keyword_only: false,
                     choices: Vec::new(),
                     named_type: None,
                     value_role: None,

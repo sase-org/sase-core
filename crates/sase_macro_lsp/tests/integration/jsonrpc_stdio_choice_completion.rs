@@ -58,30 +58,63 @@ impl HelperHostBridge for ChoiceBridge {
                 source_bucket: "builtin".to_string(),
                 project: None,
                 tags: Vec::new(),
-                input_signature: Some("(env: staging|prod)".to_string()),
-                inputs: vec![MobileMacroInputWire {
-                    name: "env".to_string(),
-                    r#type: "enum".to_string(),
-                    description: None,
-                    required: true,
-                    default_display: None,
-                    position: 0,
-                    repeatable: false,
-                    choices: vec![
-                        MobileInputChoiceWire {
-                            value: "staging".to_string(),
-                            label: Some("Staging".to_string()),
-                            description: Some("Pre-prod cluster".to_string()),
-                        },
-                        MobileInputChoiceWire {
-                            value: "prod".to_string(),
-                            label: Some("Production".to_string()),
-                            description: Some("Customer traffic".to_string()),
-                        },
-                    ],
-                    named_type: None,
-                    value_role: None,
-                }],
+                input_signature: Some(
+                    "(env: staging|prod, target=?: session|turn)".to_string(),
+                ),
+                inputs: vec![
+                    MobileMacroInputWire {
+                        name: "env".to_string(),
+                        r#type: "enum".to_string(),
+                        description: None,
+                        required: true,
+                        default_display: None,
+                        position: 0,
+                        repeatable: false,
+                        keyword_only: false,
+                        choices: vec![
+                            MobileInputChoiceWire {
+                                value: "staging".to_string(),
+                                label: Some("Staging".to_string()),
+                                description: Some(
+                                    "Pre-prod cluster".to_string(),
+                                ),
+                            },
+                            MobileInputChoiceWire {
+                                value: "prod".to_string(),
+                                label: Some("Production".to_string()),
+                                description: Some(
+                                    "Customer traffic".to_string(),
+                                ),
+                            },
+                        ],
+                        named_type: None,
+                        value_role: None,
+                    },
+                    MobileMacroInputWire {
+                        name: "target".to_string(),
+                        r#type: "enum".to_string(),
+                        description: None,
+                        required: false,
+                        default_display: Some("session".to_string()),
+                        position: 1,
+                        repeatable: false,
+                        keyword_only: true,
+                        choices: vec![
+                            MobileInputChoiceWire {
+                                value: "session".to_string(),
+                                label: None,
+                                description: None,
+                            },
+                            MobileInputChoiceWire {
+                                value: "turn".to_string(),
+                                label: None,
+                                description: None,
+                            },
+                        ],
+                        named_type: None,
+                        value_role: None,
+                    },
+                ],
                 is_skill: false,
                 skill_name: None,
                 memory_type: None,
@@ -279,6 +312,7 @@ async fn stdio_jsonrpc_choice_and_frontmatter_type_completion() {
         .unwrap()
         .contains("Pre-prod cluster"));
 
+    let targeted = "#deploy(env=staging, target=";
     write_message(
         &mut client_writer,
         json!({
@@ -288,6 +322,50 @@ async fn stdio_jsonrpc_choice_and_frontmatter_type_completion() {
                 "textDocument": {
                     "uri": "file:///tmp/sase_prompt_choice.md",
                     "version": 2
+                },
+                "contentChanges": [{"text": targeted}]
+            }
+        }),
+    )
+    .await;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            break;
+        }
+    }
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/sase_prompt_choice.md"},
+                "position": {"line": 0, "character": targeted.len()}
+            }
+        }),
+    )
+    .await;
+    let target_result = read_response_result(&mut client_reader, 5).await;
+    let target_items = completion_items(&target_result);
+    let target_labels: Vec<&str> = target_items
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    assert_eq!(target_labels, vec!["session", "turn"]);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///tmp/sase_prompt_choice.md",
+                    "version": 3
                 },
                 "contentChanges": [{"text": "#deploy(env=staging"}]
             }
@@ -337,7 +415,7 @@ async fn stdio_jsonrpc_choice_and_frontmatter_type_completion() {
             "params": {
                 "textDocument": {
                     "uri": "file:///tmp/sase_prompt_choice.md",
-                    "version": 3
+                    "version": 4
                 },
                 "contentChanges": [{"text": frontmatter}]
             }

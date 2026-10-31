@@ -203,6 +203,7 @@ fn structured_inputs(inputs: &[CatalogInput]) -> Vec<MobileMacroInputWire> {
             default_display: input.default_display.clone(),
             position: position as u32,
             repeatable: input.repeatable,
+            keyword_only: input.keyword_only,
             choices: input.choices.clone(),
             named_type: input.named_type.clone(),
             value_role: input.value_role.clone(),
@@ -225,13 +226,18 @@ fn format_inputs(inputs: &[CatalogInput]) -> Option<String> {
                 default_display: input.default_display.clone(),
                 position: 0,
                 repeatable: input.repeatable,
+                keyword_only: input.keyword_only,
                 choices: input.choices.clone(),
                 named_type: input.named_type.clone(),
                 value_role: input.value_role.clone(),
             };
             let label =
                 crate::editor::macro_arg_choices::macro_input_type_label(&hint);
-            format!("{}{repeatable}{optional}: {}", input.name, label)
+            let keyword_only = if input.keyword_only { "=" } else { "" };
+            format!(
+                "{}{repeatable}{keyword_only}{optional}: {}",
+                input.name, label
+            )
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {
