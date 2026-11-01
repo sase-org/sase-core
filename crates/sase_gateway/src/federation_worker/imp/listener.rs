@@ -84,10 +84,20 @@ pub async fn run(
     Ok(())
 }
 
+struct FederationLock {
+    file: File,
+}
+
+impl Drop for FederationLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
 pub(super) struct PreparedListener {
     listener: UnixListener,
     socket_path: PathBuf,
-    _lock_file: File,
+    _lock: FederationLock,
 }
 
 impl Drop for PreparedListener {
@@ -127,6 +137,7 @@ pub(super) async fn prepare_listener(
             }
         }
     })?;
+    let lock = FederationLock { file: lock_file };
 
     recover_socket_target(&config.socket_path).await?;
     let listener =
@@ -144,7 +155,7 @@ pub(super) async fn prepare_listener(
     Ok(PreparedListener {
         listener,
         socket_path: config.socket_path.clone(),
-        _lock_file: lock_file,
+        _lock: lock,
     })
 }
 
@@ -283,4 +294,135 @@ pub(super) fn peer_is_same_user(stream: &UnixStream) -> io::Result<bool> {
 )))]
 pub(super) fn peer_is_same_user(_stream: &UnixStream) -> io::Result<bool> {
     Ok(true)
+}
+
+#[cfg(test)]
+mod listener_lock_tests {
+    use super::*;
+
+    fn test_config(tmp: &tempfile::TempDir) -> FederationWorkerConfig {
+        let mut config = FederationWorkerConfig::new(tmp.path());
+        config.run_root = tmp.path().join("run");
+        config.socket_path = config.run_root.join("worker.sock");
+        config
+    }
+
+    #[tokio::test]
+    async fn duplicate_descriptor_does_not_block_symlink_rejection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(&tmp);
+        let prepared = prepare_listener(&config).await.unwrap();
+        let _duplicate = prepared._lock.file.try_clone().unwrap();
+        drop(prepared);
+        std::os::unix::fs::symlink("/tmp/target", &config.socket_path).unwrap();
+        match prepare_listener(&config).await {
+            Err(FederationWorkerError::UnsafeSocket { .. }) => {}
+            Err(error) => {
+                panic!("expected UnsafeSocket, got: {error}")
+            }
+            Ok(_) => {
+                panic!("symlink socket path should be rejected")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_succeeds_while_duplicate_descriptor_survives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(&tmp);
+        let prepared = prepare_listener(&config).await.unwrap();
+        let _duplicate = prepared._lock.file.try_clone().unwrap();
+        drop(prepared);
+        let restarted = prepare_listener(&config).await.unwrap();
+        let dir_mode =
+            fs::metadata(&config.run_root).unwrap().permissions().mode()
+                & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        drop(restarted);
+    }
+
+    #[tokio::test]
+    async fn concurrent_prepare_is_rejected_while_listener_alive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(&tmp);
+        let _owner = prepare_listener(&config).await.unwrap();
+        match prepare_listener(&config).await {
+            Err(FederationWorkerError::AlreadyRunning { .. }) => {}
+            Err(error) => {
+                panic!("expected AlreadyRunning, got: {error}")
+            }
+            Ok(_) => panic!("second listener should be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_contender_does_not_release_owner_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(&tmp);
+        let owner = prepare_listener(&config).await.unwrap();
+        match prepare_listener(&config).await {
+            Err(FederationWorkerError::AlreadyRunning { .. }) => {}
+            Err(error) => {
+                panic!("expected AlreadyRunning, got: {error}")
+            }
+            Ok(_) => panic!("contender should be rejected"),
+        }
+        // Owner must still be protected after the failed contender drops.
+        match prepare_listener(&config).await {
+            Err(FederationWorkerError::AlreadyRunning { .. }) => {}
+            Err(error) => {
+                panic!("owner lock released by contender: {error}")
+            }
+            Ok(_) => panic!("owner lock released by contender"),
+        }
+        drop(owner);
+        // After the owner disposes, a fresh listener starts immediately.
+        let _restarted = prepare_listener(&config).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_prepare_releases_lock_for_next_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(&tmp);
+        let prepared = prepare_listener(&config).await.unwrap();
+        let _duplicate = prepared._lock.file.try_clone().unwrap();
+        drop(prepared);
+        std::os::unix::fs::symlink("/tmp/target", &config.socket_path).unwrap();
+        match prepare_listener(&config).await {
+            Err(FederationWorkerError::UnsafeSocket { .. }) => {}
+            Err(error) => {
+                panic!("expected UnsafeSocket, got: {error}")
+            }
+            Ok(_) => panic!("symlink should be rejected"),
+        }
+        fs::remove_file(&config.socket_path).unwrap();
+        // The failed symlink attempt must not leave the lock held, even
+        // with the first generation's duplicate descriptor still open.
+        let _restarted = prepare_listener(&config).await.unwrap();
+    }
+
+    #[test]
+    fn lock_guard_releases_on_drop_while_duplicate_survives() {
+        use fs2::FileExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("test.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        file.try_lock_exclusive().unwrap();
+        let guard = FederationLock { file };
+        let _duplicate = guard.file.try_clone().unwrap();
+        drop(guard);
+        let fresh = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        fresh.try_lock_exclusive().unwrap();
+        let _ = fs2::FileExt::unlock(&fresh);
+    }
 }
