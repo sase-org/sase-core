@@ -361,3 +361,26 @@ fn membership_liveness_self_wait_bindings_decide() {
         assert_eq!(value["is_self_wait"], serde_json::json!(true));
     });
 }
+#[test]
+fn reconciliation_binding_is_registered_and_cursor_round_trips() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "staged_test").unwrap();
+        register_staged_handoff(&module).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let index = temp.path().join("absent.sqlite");
+        let root = temp.path().join("projects");
+        let cursor = PyDict::new_bound(py);
+        let result = module
+            .getattr("staged_reconcile_page")
+            .unwrap()
+            .call1((index.to_str().unwrap(), root.to_str().unwrap(), cursor, 2))
+            .unwrap();
+        let value = py_to_json_value(&result).unwrap();
+        assert_eq!(value["candidates"], serde_json::json!([]));
+        assert_eq!(
+            value["cursor"],
+            serde_json::json!({"index_after": "", "backfill": []})
+        );
+    });
+}

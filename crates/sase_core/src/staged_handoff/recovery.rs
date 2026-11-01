@@ -282,6 +282,24 @@ fn decide(request: &RecoveryDecisionRequestWire) -> RecoveryDecisionWire {
             );
         }
         RecoveryReceiptStateWire::Adopted => {
+            // Receipt replay may still activate an inline child. The receipt
+            // proves ownership, not permission to race its live origin or
+            // resurrect a killed continuation. Settled successors need no
+            // re-observation of origin-owned dirt.
+            if request.destination == RecoveryDestinationWire::Pending {
+                if request.killed_or_discarded {
+                    return decided(
+                        RecoveryActionWire::Refuse,
+                        "explicit kill or discard forbids successor delivery",
+                        true,
+                    );
+                }
+                if request.mode == RecoveryModeWire::Automatic
+                    && request.runner != RecoveryRunnerStateWire::Dead
+                {
+                    return decided(RecoveryActionWire::Hold, "automatic delivery requires a proven-dead originating runner", true);
+                }
+            }
             return decided(
                 RecoveryActionWire::Adopt,
                 "matching success receipt already owns this adoption",
@@ -294,6 +312,15 @@ fn decide(request: &RecoveryDecisionRequestWire) -> RecoveryDecisionWire {
         return decided(
             RecoveryActionWire::Refuse,
             "explicit kill or discard forbids later activation",
+            false,
+        );
+    }
+    if request.mode == RecoveryModeWire::Automatic
+        && request.receipt == RecoveryReceiptStateWire::Held
+    {
+        return decided(
+            RecoveryActionWire::Hold,
+            "held handoff requires explicit re-adoption",
             false,
         );
     }

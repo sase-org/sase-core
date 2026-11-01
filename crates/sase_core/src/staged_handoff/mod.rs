@@ -7,6 +7,7 @@
 pub mod gate;
 mod monitor_launch;
 mod monitor_lifecycle;
+mod reconcile;
 pub mod recovery;
 mod validate;
 mod wire;
@@ -31,6 +32,10 @@ pub use monitor_lifecycle::{
     StagedMonitorMembershipWire, StagedOwnerLivenessDecisionWire,
     StagedOwnerLivenessRequestWire, StagedSelfWaitDecisionWire,
     StagedSelfWaitRequestWire,
+};
+pub use reconcile::{
+    staged_reconcile_page, StagedReconcileCursorWire,
+    StagedReconcileDirectoryWire, StagedReconcilePageWire,
 };
 pub use recovery::{
     evaluate_recovery_decision, receipt_transition_allowed,

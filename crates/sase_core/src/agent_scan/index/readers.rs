@@ -12,6 +12,40 @@ use serde_json::{Number, Value as JsonValue};
 use std::path::Path;
 use std::time::Duration;
 
+/// Keyset page of local origins, including hidden and terminal rows. Recovery
+/// must not confuse a terminalized UI projection with completed host work.
+pub fn agent_artifact_recovery_page(
+    index_path: &Path,
+    projects_root: &Path,
+    after: &str,
+    limit: usize,
+) -> Result<Vec<String>, String> {
+    if !index_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let conn = open_index_read_only_no_migrate(
+        index_path,
+        AGENT_ARTIFACT_INDEX_PROJECTION_BUSY_TIMEOUT,
+    )?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT artifact_dir FROM agent_artifacts \
+         WHERE artifact_dir > ?1 AND projects_root = ?2 \
+         AND workflow_dir_name = 'ace-run' \
+         AND imported_owner_machine IS NULL \
+         ORDER BY artifact_dir LIMIT ?3",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(
+            params![after, projects_root.to_string_lossy(), limit as i64],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
 /// Default busy timeout for the catalog and provenance projections.
 pub const AGENT_ARTIFACT_INDEX_PROJECTION_BUSY_TIMEOUT: Duration =
     Duration::from_millis(250);

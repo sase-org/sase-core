@@ -1178,3 +1178,43 @@ fn receipt_transition_is_monotonic() {
     receipt_transition_allowed(&JsonValue::Null, &other, STAGED_ID)
         .expect_err("staged mismatch");
 }
+#[test]
+fn automatic_recovery_skips_holds_and_live_pending_delivery() {
+    let mut facts = serde_json::json!({
+        "schema_version": 1,
+        "staged_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "receipt": "held", "runner": "dead", "killed_or_discarded": false,
+        "mode": "automatic", "settlement": "settled", "destination": "absent"
+    });
+    assert_eq!(
+        super::evaluate_recovery_decision(&facts).unwrap()["action"],
+        "hold"
+    );
+    facts["mode"] = serde_json::json!("explicit");
+    assert_eq!(
+        super::evaluate_recovery_decision(&facts).unwrap()["action"],
+        "adopt"
+    );
+    facts["mode"] = serde_json::json!("automatic");
+    facts["receipt"] = serde_json::json!("adopted");
+    facts["destination"] = serde_json::json!("pending");
+    for runner in ["alive", "unknown"] {
+        facts["runner"] = serde_json::json!(runner);
+        assert_eq!(
+            super::evaluate_recovery_decision(&facts).unwrap()["action"],
+            "hold"
+        );
+    }
+    facts["runner"] = serde_json::json!("dead");
+    facts["killed_or_discarded"] = serde_json::json!(true);
+    assert_eq!(
+        super::evaluate_recovery_decision(&facts).unwrap()["action"],
+        "refuse"
+    );
+    facts["killed_or_discarded"] = serde_json::json!(false);
+    facts["settlement"] = serde_json::json!("missing");
+    assert_eq!(
+        super::evaluate_recovery_decision(&facts).unwrap()["action"],
+        "adopt"
+    );
+}

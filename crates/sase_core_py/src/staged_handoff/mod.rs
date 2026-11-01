@@ -265,6 +265,7 @@ fn py_staged_handoff_receipt_transition_allowed(
 }
 
 pub(crate) fn register_staged_handoff(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(py_staged_reconcile_page, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_staged_handoff_wire_schema_version,
         m
@@ -310,3 +311,29 @@ pub(crate) fn register_staged_handoff(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests;
+
+/// Discover a bounded page of staged origins from the index and disk.
+#[pyfunction]
+#[pyo3(name = "staged_reconcile_page")]
+fn py_staged_reconcile_page<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    projects_root: &str,
+    cursor: &Bound<'py, PyDict>,
+    limit: usize,
+) -> PyResult<PyObject> {
+    let cursor = serde_json::from_value(py_to_json_value(cursor.as_any())?)
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "invalid reconciliation cursor: {error}"
+            ))
+        })?;
+    let page = sase_core::staged_handoff::staged_reconcile_page(
+        std::path::Path::new(index_path),
+        std::path::Path::new(projects_root),
+        cursor,
+        limit,
+    )
+    .map_err(PyValueError::new_err)?;
+    serialize_to_py(py, &page)
+}

@@ -76,8 +76,8 @@ pub use query::{
 };
 
 pub use readers::{
-    delete_agent_artifact_alias, list_agent_artifact_aliases,
-    load_agent_artifact_index_projection,
+    agent_artifact_recovery_page, delete_agent_artifact_alias,
+    list_agent_artifact_aliases, load_agent_artifact_index_projection,
     read_agent_artifact_index_schema_version, upsert_agent_artifact_alias,
     AGENT_ARTIFACT_INDEX_PROJECTION_BUSY_TIMEOUT,
 };
