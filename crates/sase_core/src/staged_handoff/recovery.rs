@@ -250,11 +250,7 @@ pub fn receipt_transition_allowed(
         {
             Ok(true)
         }
-        (current, _)
-            if current == STAGED_HANDOFF_OUTCOME_ADOPTED =>
-        {
-            Ok(false)
-        }
+        (current, _) if current == STAGED_HANDOFF_OUTCOME_ADOPTED => Ok(false),
         (current, next)
             if current == STAGED_HANDOFF_OUTCOME_NOT_ADOPTED
                 && (next == STAGED_HANDOFF_OUTCOME_ADOPTED
@@ -267,16 +263,15 @@ pub fn receipt_transition_allowed(
 }
 
 fn decide(request: &RecoveryDecisionRequestWire) -> RecoveryDecisionWire {
-    let decided = |action: RecoveryActionWire,
-                   reason: &str,
-                   already_adopted: bool| {
-        RecoveryDecisionWire {
-            schema_version: RECOVERY_CONTEXT_WIRE_SCHEMA_VERSION,
-            action,
-            reason: reason.to_string(),
-            already_adopted,
-        }
-    };
+    let decided =
+        |action: RecoveryActionWire, reason: &str, already_adopted: bool| {
+            RecoveryDecisionWire {
+                schema_version: RECOVERY_CONTEXT_WIRE_SCHEMA_VERSION,
+                action,
+                reason: reason.to_string(),
+                already_adopted,
+            }
+        };
     match request.receipt {
         RecoveryReceiptStateWire::Malformed
         | RecoveryReceiptStateWire::Mismatched => {
@@ -374,12 +369,12 @@ fn receipt_staged_id<'a>(
         .as_object()
         .and_then(|object| object.get("staged_id"))
         .and_then(JsonValue::as_str)
-        .ok_or_else(|| {
-            invalid(format!("{which} receipt has no staged_id"))
-        })
+        .ok_or_else(|| invalid(format!("{which} receipt has no staged_id")))
 }
 
-fn reject_context_schema(schema_version: u32) -> Result<(), StagedHandoffError> {
+fn reject_context_schema(
+    schema_version: u32,
+) -> Result<(), StagedHandoffError> {
     if schema_version == 0
         || schema_version > RECOVERY_CONTEXT_WIRE_SCHEMA_VERSION
     {
@@ -406,7 +401,10 @@ fn validate_uuid(value: &str, field: &str) -> Result<(), StagedHandoffError> {
     }
 }
 
-fn validate_rfc3339(value: &str, field: &str) -> Result<(), StagedHandoffError> {
+fn validate_rfc3339(
+    value: &str,
+    field: &str,
+) -> Result<(), StagedHandoffError> {
     if DateTime::parse_from_rfc3339(value).is_ok() {
         Ok(())
     } else {

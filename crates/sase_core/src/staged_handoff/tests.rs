@@ -1042,15 +1042,17 @@ fn recovery_context_schema_version_is_one() {
 #[test]
 fn recovery_context_round_trips() {
     let context = recovery_context();
-    assert_eq!(validate_recovery_context(&context).expect("context"), context);
+    assert_eq!(
+        validate_recovery_context(&context).expect("context"),
+        context
+    );
 }
 
 #[test]
 fn recovery_context_rejects_missing_origin() {
     let mut context = recovery_context();
     context["origin_agent"] = json!("  ");
-    let error =
-        validate_recovery_context(&context).expect_err("origin_agent");
+    let error = validate_recovery_context(&context).expect_err("origin_agent");
     assert!(error.to_string().contains("origin_agent"));
 
     let mut context = recovery_context();
@@ -1065,13 +1067,23 @@ fn recovery_context_rejects_missing_origin() {
 fn recovery_decision_table() {
     assert_eq!(
         recovery_action(recovery_request(
-            "adopted", "dead", false, "automatic", "settled", "absent"
+            "adopted",
+            "dead",
+            false,
+            "automatic",
+            "settled",
+            "absent"
         )),
         ("adopt".to_string(), true)
     );
     assert_eq!(
         recovery_action(recovery_request(
-            "absent", "dead", false, "automatic", "settled", "absent"
+            "absent",
+            "dead",
+            false,
+            "automatic",
+            "settled",
+            "absent"
         )),
         ("adopt".to_string(), false)
     );
@@ -1153,22 +1165,14 @@ fn receipt_transition_is_monotonic() {
         receipt_transition_allowed(&JsonValue::Null, &held, STAGED_ID)
             .expect("absent to held")
     );
-    assert!(
-        receipt_transition_allowed(&held, &adopted, STAGED_ID)
-            .expect("held to adopted")
-    );
-    assert!(
-        receipt_transition_allowed(&held, &held, STAGED_ID)
-            .expect("held to held")
-    );
-    assert!(
-        receipt_transition_allowed(&adopted, &adopted, STAGED_ID)
-            .expect("adopted replay")
-    );
-    assert!(
-        !receipt_transition_allowed(&adopted, &held, STAGED_ID)
-            .expect("adopted blocks hold")
-    );
+    assert!(receipt_transition_allowed(&held, &adopted, STAGED_ID)
+        .expect("held to adopted"));
+    assert!(receipt_transition_allowed(&held, &held, STAGED_ID)
+        .expect("held to held"));
+    assert!(receipt_transition_allowed(&adopted, &adopted, STAGED_ID)
+        .expect("adopted replay"));
+    assert!(!receipt_transition_allowed(&adopted, &held, STAGED_ID)
+        .expect("adopted blocks hold"));
     let mut other = adopted.clone();
     other["staged_id"] = json!("bbbbbbbb-cccc-4ddd-8eee-ffffffffffff");
     receipt_transition_allowed(&JsonValue::Null, &other, STAGED_ID)

@@ -298,10 +298,7 @@ pub(crate) fn register_staged_handoff(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_recovery_context_wire_schema_version,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(
-        py_recovery_adoption_lock_filename,
-        m
-    )?)?;
+    m.add_function(wrap_pyfunction!(py_recovery_adoption_lock_filename, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_recovery_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_recovery_decision, m)?)?;
     m.add_function(wrap_pyfunction!(
