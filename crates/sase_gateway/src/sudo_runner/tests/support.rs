@@ -1,6 +1,9 @@
 use std::fs::{self};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +18,56 @@ use super::super::*;
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
+/// Serializes fixture executable publication against fixture-driven
+/// process spawns.
+///
+/// Exec-ing a file fails with `ETXTBSY` while any process holds it open
+/// for writing. A test binary's threads share their descriptors across
+/// forks, so when one thread's `Command::spawn` forks while another
+/// thread still holds a freshly written fixture script open for
+/// writing, the forked child inherits the write descriptor until its
+/// own exec and any exec of that script in the meantime is refused.
+/// Holding this lock across every script publication's write-open
+/// window and across every fixture-driven spawn attempt (see
+/// [`super::super::retry_on_etxtbsy`], which takes it for the single
+/// spawn and releases it before any wait or backoff sleep) keeps those
+/// two windows mutually exclusive, so no fixture-driven fork can
+/// inherit a fixture write descriptor.
+///
+/// The mutex is not reentrant and must never be held across a wait:
+/// publication helpers take it only for the publish, and spawn
+/// attempts take it only for the spawn. A foreign spawner in the same
+/// test binary (one that does not spawn through the fixture) can still
+/// fork inside a publication window; that residual race is covered by
+/// the [`super::super::retry_on_etxtbsy`] backstop at every spawn site.
+static FIXTURE_SPAWN_LOCK: LazyLock<Mutex<()>> =
+    LazyLock::new(|| Mutex::new(()));
+
+static PUBLISH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn hold_fixture_spawn_lock() -> MutexGuard<'static, ()> {
+    FIXTURE_SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+/// Publish `contents` at `path` as an executable without ever exposing
+/// a partially written file there: write a sibling temp file, close it,
+/// chmod it executable, then atomically rename it into place — all
+/// while holding the fixture spawn lock so no fixture-driven fork can
+/// land inside the write-open window and inherit the write descriptor.
+pub(crate) fn publish_executable(path: &Path, contents: &str) {
+    let _guard = hold_fixture_spawn_lock();
+    let sibling = path.with_extension(format!(
+        "publish-tmp-{}-{}",
+        std::process::id(),
+        PUBLISH_COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    fs::write(&sibling, contents).unwrap();
+    fs::set_permissions(&sibling, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&sibling, path).unwrap();
+}
+
 pub(crate) struct Fixture {
     pub(crate) _tmp: TempDir,
     pub(crate) sudo_path: PathBuf,
@@ -28,13 +81,9 @@ impl Fixture {
     pub(crate) fn new(manifest: SudoManifestWire) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let sudo_path = tmp.path().join("fake-sudo");
-        fs::write(&sudo_path, fake_sudo_script()).unwrap();
-        fs::set_permissions(&sudo_path, fs::Permissions::from_mode(0o755))
-            .unwrap();
+        publish_executable(&sudo_path, fake_sudo_script());
         let executor_path = tmp.path().join("fake-executor");
-        fs::write(&executor_path, fake_executor_script()).unwrap();
-        fs::set_permissions(&executor_path, fs::Permissions::from_mode(0o755))
-            .unwrap();
+        publish_executable(&executor_path, fake_executor_script());
         fs::write(
             sudo_path.with_extension("executor"),
             executor_path.display().to_string(),
@@ -475,8 +524,7 @@ pub(crate) fn write_self_started(
 }
 
 pub(crate) fn write_executable(path: &Path, contents: &str) {
-    fs::write(path, contents).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    publish_executable(path, contents);
 }
 
 pub(crate) fn waiting_worker_script() -> &'static str {

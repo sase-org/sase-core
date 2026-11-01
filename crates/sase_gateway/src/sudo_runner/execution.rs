@@ -177,7 +177,7 @@ pub(crate) fn run_direct_command(
         .map(Duration::from_secs_f64)
         .unwrap_or(DEFAULT_TIMEOUT);
     let started = Instant::now();
-    let mut child = command.spawn().map_err(|error| {
+    let mut child = retry_on_etxtbsy(|| command.spawn()).map_err(|error| {
         cli_error(
             SudoRunnerExitStatus::RunnerError,
             format!(
@@ -277,7 +277,7 @@ pub(crate) fn run_approved_command(
         .map(Duration::from_secs_f64)
         .unwrap_or(DEFAULT_TIMEOUT);
     let started = Instant::now();
-    let mut child = command.spawn().map_err(|error| {
+    let mut child = retry_on_etxtbsy(|| command.spawn()).map_err(|error| {
         cli_error(
             SudoRunnerExitStatus::RunnerError,
             format!(

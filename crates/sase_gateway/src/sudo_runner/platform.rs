@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::{Child, Command};
 use std::sync::atomic::Ordering;
 use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sase_core::{
     truncate_sudo_output_tail, validate_sudo_ledger, SudoLedgerWire,
@@ -503,6 +503,69 @@ pub(crate) fn terminate_child_group(child: &mut Child) {
     let _ = unsafe { libc::kill(-pgid, libc::SIGKILL) };
     let _ = child.wait();
 }
+
+/// Backstop for the fork-inherited write-descriptor race behind
+/// `ETXTBSY` ("Text file busy", os error 26).
+///
+/// Exec-ing a file fails with `ETXTBSY` while any process holds it open
+/// for writing. In a multithreaded test binary a concurrent
+/// `Command::spawn` can fork while another thread's fixture-script
+/// publication still holds its write descriptor open; the forked child
+/// inherits that descriptor until its own exec, and any exec of the
+/// script in the meantime is refused. Under `cfg(test)` each attempt
+/// below also holds the fixture spawn lock (see
+/// `tests::support::hold_fixture_spawn_lock`) across the spawn itself,
+/// so no fixture-driven fork can land inside a fixture publication's
+/// write-open window in the first place; a retry then only ever fires
+/// for a foreign spawner's fork landing inside the microsecond
+/// publication window, and the inheriting child execs within
+/// microseconds, so a short bounded retry recovers in practice. The
+/// lock is scoped to the single spawn attempt — never across waits or
+/// sleeps — so timing-sensitive tests are unaffected. Only `ETXTBSY`
+/// is retried and every other error returns immediately, and a failed
+/// spawn never executed anything, so retrying has no side effects. In
+/// production the lock compiles out and the call sites below exec
+/// reviewed binaries that nothing is writing, so the retry never fires
+/// there.
+#[cfg(unix)]
+pub(crate) fn retry_on_etxtbsy<T>(
+    mut operation: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    let mut attempts = 0;
+    loop {
+        // The guard drops before the match, so the backoff sleep below
+        // never holds the lock.
+        let outcome = {
+            #[cfg(all(test, unix))]
+            let _fixture_spawn_guard =
+                super::tests::support::hold_fixture_spawn_lock();
+            operation()
+        };
+        match outcome {
+            Err(error)
+                if is_etxtbsy(&error) && attempts < ETXTBSY_RETRY_ATTEMPTS =>
+            {
+                attempts += 1;
+                thread::sleep(ETXTBSY_RETRY_DELAY);
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+/// True exactly for the `ETXTBSY` spawn failure described in
+/// [`retry_on_etxtbsy`].
+#[cfg(unix)]
+pub(crate) fn is_etxtbsy(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::ExecutableFileBusy
+        || error.raw_os_error() == Some(libc::ETXTBSY)
+}
+
+#[cfg(unix)]
+const ETXTBSY_RETRY_ATTEMPTS: u32 = 250;
+
+#[cfg(unix)]
+const ETXTBSY_RETRY_DELAY: Duration = Duration::from_millis(2);
 
 pub(crate) fn ledger_output(
     combined: &[u8],

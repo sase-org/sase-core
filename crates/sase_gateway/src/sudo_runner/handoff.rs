@@ -236,7 +236,7 @@ pub(crate) fn sudo_status<const N: usize>(
                 .stderr(Stdio::null());
         }
     }
-    command.status().map_err(|error| {
+    retry_on_etxtbsy(|| command.status()).map_err(|error| {
         cli_error(
             SudoRunnerExitStatus::RunnerError,
             format!("failed to invoke sudo: {error}"),
@@ -296,7 +296,7 @@ pub(crate) fn spawn_internal_root_executor(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let status = command.status().map_err(|error| {
+    let status = retry_on_etxtbsy(|| command.status()).map_err(|error| {
         cli_error(
             SudoRunnerExitStatus::RunnerError,
             format!("failed to invoke sudo root executor: {error}"),

@@ -12,7 +12,6 @@ use sase_core::{
 
 use super::super::*;
 use super::support::*;
-use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn timeout_terminates_process_group_and_records_failed_entry() {
@@ -56,13 +55,10 @@ fn output_policy_full_is_hard_bounded() {
 fn internal_worker_writes_ledger_and_log_for_direct_command() {
     let tmp = tempfile::tempdir().unwrap();
     let command_path = tmp.path().join("emit-output.sh");
-    fs::write(
+    write_executable(
         &command_path,
         "#!/bin/sh\nprintf 'worker-stdout\\n'\nprintf 'worker-stderr\\n' >&2\n",
-    )
-    .unwrap();
-    fs::set_permissions(&command_path, fs::Permissions::from_mode(0o755))
-        .unwrap();
+    );
     let mut manifest = manifest();
     manifest.run_as = current_username();
     manifest.cwd = tmp.path().display().to_string();
@@ -106,9 +102,7 @@ fn internal_worker_writes_ledger_and_log_for_direct_command() {
 fn internal_worker_stop_file_cancels_running_command() {
     let tmp = tempfile::tempdir().unwrap();
     let command_path = tmp.path().join("slow.sh");
-    fs::write(&command_path, "#!/bin/sh\n/bin/sleep 5\n").unwrap();
-    fs::set_permissions(&command_path, fs::Permissions::from_mode(0o755))
-        .unwrap();
+    write_executable(&command_path, "#!/bin/sh\n/bin/sleep 5\n");
     let mut manifest = manifest();
     manifest.run_as = current_username();
     manifest.cwd = tmp.path().display().to_string();

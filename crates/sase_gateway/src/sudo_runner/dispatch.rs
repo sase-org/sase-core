@@ -407,12 +407,13 @@ pub(crate) fn run_internal_root_exec(
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         configure_new_session(&mut command);
-        let mut child = command.spawn().map_err(|error| {
-            cli_error(
-                SudoRunnerExitStatus::RunnerError,
-                format!("failed to spawn sudo root worker: {error}"),
-            )
-        })?;
+        let mut child =
+            retry_on_etxtbsy(|| command.spawn()).map_err(|error| {
+                cli_error(
+                    SudoRunnerExitStatus::RunnerError,
+                    format!("failed to spawn sudo root worker: {error}"),
+                )
+            })?;
         if let Err(error) = publish_worker_started_handshake(
             config,
             &child,
