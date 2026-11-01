@@ -359,6 +359,36 @@ fn owned_staged_handoff_and_held_receipt() {
 }
 
 #[test]
+fn retained_workspace_overrides_stale_handoff_evidence_but_keeps_successor_owner(
+) {
+    let held = StrandedWorkMemberFactsWire {
+        workspace_retention: true,
+        staged_handoff: Some("monitor".to_string()),
+        staged_receipt_outcome: Some("adopted".to_string()),
+        ..agent("w--1")
+    };
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![held.clone()],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "stranded");
+
+    let successor = live_agent("w--2", "running");
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![held, successor],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "owned");
+    assert_eq!(verdict.owner.as_deref(), Some("w--2"));
+}
+
+#[test]
 fn owned_recovery_in_flight_beats_failed_lifecycle() {
     let member = StrandedWorkMemberFactsWire {
         lifecycle: "failed".to_string(),

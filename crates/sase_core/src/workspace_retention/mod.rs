@@ -9,19 +9,25 @@ mod policy;
 mod tests;
 mod wire;
 
-pub use policy::decide_workspace_retention;
+pub use policy::{
+    decide_workspace_retention, decide_workspace_retention_dismissal,
+};
 pub use wire::{
     workspace_retention_wire_schema_version, WorkspaceRetentionClaimWire,
     WorkspaceRetentionDecisionWire, WorkspaceRetentionDirtWire,
-    WorkspaceRetentionRequestWire, WorkspaceRetentionSuccessorWire,
+    WorkspaceRetentionDismissalRequestWire, WorkspaceRetentionRequestWire,
+    WorkspaceRetentionSuccessorWire,
     WORKSPACE_RETENTION_DISPOSITION_OWNERSHIP_MOVED,
     WORKSPACE_RETENTION_DISPOSITION_RELEASE,
     WORKSPACE_RETENTION_DISPOSITION_RETAIN,
+    WORKSPACE_RETENTION_REASON_ALREADY_SETTLED,
     WORKSPACE_RETENTION_REASON_CLAIM_OWNERSHIP_MOVED,
     WORKSPACE_RETENTION_REASON_CREATOR_RESTORED,
     WORKSPACE_RETENTION_REASON_EVIDENCE_UNAVAILABLE,
+    WORKSPACE_RETENTION_REASON_EXPLICIT_DISMISSAL,
     WORKSPACE_RETENTION_REASON_GATE_RELEASED_WORKSPACE,
     WORKSPACE_RETENTION_REASON_MISSING_BASELINE_WITH_CUSTODY,
+    WORKSPACE_RETENTION_REASON_NOT_TERMINAL_RECORD,
     WORKSPACE_RETENTION_REASON_PROVEN_CLEAN,
     WORKSPACE_RETENTION_REASON_SAME_WORKSPACE_SUCCESSOR,
     WORKSPACE_RETENTION_REASON_SESSION_OWNED_DIRT,

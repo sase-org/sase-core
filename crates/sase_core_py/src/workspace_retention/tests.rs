@@ -60,6 +60,9 @@ fn workspace_retention_binding_registered_by_name() {
         let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
         sase_core_rs(py, &module).unwrap();
         let decide = module.getattr("decide_workspace_retention").unwrap();
+        let decide_dismissal = module
+            .getattr("decide_workspace_retention_dismissal")
+            .unwrap();
         let version = module
             .getattr("workspace_retention_wire_schema_version")
             .unwrap();
@@ -68,6 +71,31 @@ fn workspace_retention_binding_registered_by_name() {
         let result = decide.call1((request_obj,)).unwrap();
         let value = py_to_json_value(&result).unwrap();
         assert_eq!(value["disposition"], json!("retain"));
+
+        let request = json!({
+            "schema_version": 1,
+            "expected_claim": {
+                "workspace_num": 17,
+                "workflow": "ace(run)-260101_000000",
+                "cl_name": "feature",
+                "artifacts_timestamp": "20260101000000",
+                "pid": 111
+            },
+            "observed_claim": {
+                "workspace_num": 17,
+                "workflow": "ace(run)-260101_000000",
+                "cl_name": "feature",
+                "artifacts_timestamp": "20260101000000",
+                "pid": 111
+            },
+            "terminal_record": true,
+            "unresolved": true
+        });
+        let request_obj = json_value_to_py(py, &request).unwrap();
+        let result = decide_dismissal.call1((request_obj,)).unwrap();
+        let value = py_to_json_value(&result).unwrap();
+        assert_eq!(value["disposition"], json!("release"));
+        assert_eq!(value["reason"], json!("explicit_dismissal"));
     });
 }
 

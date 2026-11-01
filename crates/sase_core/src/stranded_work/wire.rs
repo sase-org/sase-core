@@ -8,7 +8,7 @@ use crate::bead::wire::BeadCompletionFailureWire;
 use serde::{Deserialize, Serialize};
 
 /// Wire schema version for [`StrandedWorkInputWire`]/[`StrandedWorkReportWire`].
-pub const STRANDED_WORK_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const STRANDED_WORK_WIRE_SCHEMA_VERSION: u32 = 2;
 
 /// Verdict states, one per candidate bead.
 pub const STRANDED_STATE_OWNED: &str = "owned";
@@ -99,6 +99,11 @@ pub struct StrandedWorkMemberFactsWire {
     pub handoff_inflight: bool,
     #[serde(default)]
     pub recovery_in_flight: bool,
+    /// This terminal owner still holds its workspace for explicit recovery.
+    /// It suppresses stale handoff markers on this member; a live successor
+    /// remains visible as a separate owner member in the same session.
+    #[serde(default)]
+    pub workspace_retention: bool,
     #[serde(default)]
     pub turn_state: Option<String>,
     #[serde(default)]

@@ -2,20 +2,58 @@
 
 use super::wire::{
     WorkspaceRetentionClaimWire, WorkspaceRetentionDecisionWire,
-    WorkspaceRetentionRequestWire, WorkspaceRetentionSuccessorWire,
+    WorkspaceRetentionDismissalRequestWire, WorkspaceRetentionRequestWire,
+    WorkspaceRetentionSuccessorWire,
     WORKSPACE_RETENTION_DISPOSITION_OWNERSHIP_MOVED,
     WORKSPACE_RETENTION_DISPOSITION_RELEASE,
     WORKSPACE_RETENTION_DISPOSITION_RETAIN,
+    WORKSPACE_RETENTION_REASON_ALREADY_SETTLED,
     WORKSPACE_RETENTION_REASON_CLAIM_OWNERSHIP_MOVED,
     WORKSPACE_RETENTION_REASON_CREATOR_RESTORED,
     WORKSPACE_RETENTION_REASON_EVIDENCE_UNAVAILABLE,
+    WORKSPACE_RETENTION_REASON_EXPLICIT_DISMISSAL,
     WORKSPACE_RETENTION_REASON_GATE_RELEASED_WORKSPACE,
     WORKSPACE_RETENTION_REASON_MISSING_BASELINE_WITH_CUSTODY,
+    WORKSPACE_RETENTION_REASON_NOT_TERMINAL_RECORD,
     WORKSPACE_RETENTION_REASON_PROVEN_CLEAN,
     WORKSPACE_RETENTION_REASON_SAME_WORKSPACE_SUCCESSOR,
     WORKSPACE_RETENTION_REASON_SESSION_OWNED_DIRT,
     WORKSPACE_RETENTION_WIRE_SCHEMA_VERSION,
 };
+
+/// Classify an explicit user release of a retained terminal workspace.
+///
+/// A live or reused claim has a different exact identity and is never released.
+#[must_use]
+pub fn decide_workspace_retention_dismissal(
+    request: &WorkspaceRetentionDismissalRequestWire,
+) -> WorkspaceRetentionDecisionWire {
+    if !request.terminal_record {
+        return decision(
+            WORKSPACE_RETENTION_DISPOSITION_OWNERSHIP_MOVED,
+            WORKSPACE_RETENTION_REASON_NOT_TERMINAL_RECORD,
+        );
+    }
+    if !request.unresolved {
+        return decision(
+            WORKSPACE_RETENTION_DISPOSITION_OWNERSHIP_MOVED,
+            WORKSPACE_RETENTION_REASON_ALREADY_SETTLED,
+        );
+    }
+    if !observed_matches(
+        &request.expected_claim,
+        request.observed_claim.as_ref(),
+    ) {
+        return decision(
+            WORKSPACE_RETENTION_DISPOSITION_OWNERSHIP_MOVED,
+            WORKSPACE_RETENTION_REASON_CLAIM_OWNERSHIP_MOVED,
+        );
+    }
+    decision(
+        WORKSPACE_RETENTION_DISPOSITION_RELEASE,
+        WORKSPACE_RETENTION_REASON_EXPLICIT_DISMISSAL,
+    )
+}
 
 /// Classify whether the settling owner should retain, release, or stand down.
 #[must_use]

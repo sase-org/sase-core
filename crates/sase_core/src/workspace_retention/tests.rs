@@ -1,8 +1,9 @@
 //! Truth table for [`super::decide_workspace_retention`].
 
 use super::{
-    decide_workspace_retention, WorkspaceRetentionClaimWire,
-    WorkspaceRetentionDirtWire, WorkspaceRetentionRequestWire,
+    decide_workspace_retention, decide_workspace_retention_dismissal,
+    WorkspaceRetentionClaimWire, WorkspaceRetentionDirtWire,
+    WorkspaceRetentionDismissalRequestWire, WorkspaceRetentionRequestWire,
     WorkspaceRetentionSuccessorWire,
     WORKSPACE_RETENTION_DISPOSITION_OWNERSHIP_MOVED,
     WORKSPACE_RETENTION_DISPOSITION_RELEASE,
@@ -10,6 +11,7 @@ use super::{
     WORKSPACE_RETENTION_REASON_CLAIM_OWNERSHIP_MOVED,
     WORKSPACE_RETENTION_REASON_CREATOR_RESTORED,
     WORKSPACE_RETENTION_REASON_EVIDENCE_UNAVAILABLE,
+    WORKSPACE_RETENTION_REASON_EXPLICIT_DISMISSAL,
     WORKSPACE_RETENTION_REASON_GATE_RELEASED_WORKSPACE,
     WORKSPACE_RETENTION_REASON_MISSING_BASELINE_WITH_CUSTODY,
     WORKSPACE_RETENTION_REASON_PROVEN_CLEAN,
@@ -26,6 +28,57 @@ fn claim(pid: u32) -> WorkspaceRetentionClaimWire {
         artifacts_timestamp: "20260101000000".to_string(),
         pid,
     }
+}
+
+fn dismissal_request() -> WorkspaceRetentionDismissalRequestWire {
+    WorkspaceRetentionDismissalRequestWire {
+        schema_version: WORKSPACE_RETENTION_WIRE_SCHEMA_VERSION,
+        expected_claim: claim(111),
+        observed_claim: Some(claim(111)),
+        terminal_record: true,
+        unresolved: true,
+    }
+}
+
+#[test]
+fn explicit_dismissal_releases_matching_terminal_claim_even_when_pid_is_live() {
+    let decision = decide_workspace_retention_dismissal(&dismissal_request());
+    assert_eq!(
+        decision.disposition,
+        WORKSPACE_RETENTION_DISPOSITION_RELEASE
+    );
+    assert_eq!(
+        decision.reason,
+        WORKSPACE_RETENTION_REASON_EXPLICIT_DISMISSAL
+    );
+}
+
+#[test]
+fn explicit_dismissal_refuses_a_transferred_or_reused_claim() {
+    let mut request = dismissal_request();
+    let mut successor = claim(222);
+    successor.artifacts_timestamp = "20260102000000".to_string();
+    request.observed_claim = Some(successor);
+    let decision = decide_workspace_retention_dismissal(&request);
+    assert_eq!(
+        decision.disposition,
+        WORKSPACE_RETENTION_DISPOSITION_OWNERSHIP_MOVED
+    );
+    assert_eq!(
+        decision.reason,
+        WORKSPACE_RETENTION_REASON_CLAIM_OWNERSHIP_MOVED
+    );
+}
+
+#[test]
+fn explicit_dismissal_requires_an_unresolved_terminal_record() {
+    let mut request = dismissal_request();
+    request.unresolved = false;
+    let decision = decide_workspace_retention_dismissal(&request);
+    assert_eq!(
+        decision.disposition,
+        WORKSPACE_RETENTION_DISPOSITION_OWNERSHIP_MOVED
+    );
 }
 
 fn request() -> WorkspaceRetentionRequestWire {

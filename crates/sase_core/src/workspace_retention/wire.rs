@@ -112,6 +112,23 @@ pub struct WorkspaceRetentionRequestWire {
     pub probe_failed: bool,
 }
 
+/// Facts needed to explicitly release a terminal retained claim.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceRetentionDismissalRequestWire {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    pub expected_claim: WorkspaceRetentionClaimWire,
+    #[serde(default)]
+    pub observed_claim: Option<WorkspaceRetentionClaimWire>,
+    /// The record names a completed terminal retention decision.
+    #[serde(default)]
+    pub terminal_record: bool,
+    /// The record still represents an unresolved workspace hold.
+    #[serde(default)]
+    pub unresolved: bool,
+}
+
 /// Explicit retain/release/ownership-moved decision with a stable reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -120,6 +137,13 @@ pub struct WorkspaceRetentionDecisionWire {
     pub disposition: String,
     pub reason: String,
 }
+
+/// Stable refusal reasons for explicit release classification.
+pub const WORKSPACE_RETENTION_REASON_NOT_TERMINAL_RECORD: &str =
+    "not_terminal_record";
+pub const WORKSPACE_RETENTION_REASON_ALREADY_SETTLED: &str = "already_settled";
+pub const WORKSPACE_RETENTION_REASON_EXPLICIT_DISMISSAL: &str =
+    "explicit_dismissal";
 
 /// Return the retention wire schema version.
 #[must_use]

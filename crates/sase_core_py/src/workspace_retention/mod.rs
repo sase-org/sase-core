@@ -5,8 +5,9 @@ use crate::prelude::*;
 
 use pyo3::wrap_pyfunction;
 use sase_core::workspace_retention::{
-    decide_workspace_retention, workspace_retention_wire_schema_version,
-    WorkspaceRetentionRequestWire,
+    decide_workspace_retention, decide_workspace_retention_dismissal,
+    workspace_retention_wire_schema_version,
+    WorkspaceRetentionDismissalRequestWire, WorkspaceRetentionRequestWire,
 };
 
 #[pyfunction]
@@ -35,6 +36,27 @@ fn py_decide_workspace_retention<'py>(
     json_value_to_py(py, &value)
 }
 
+#[pyfunction]
+#[pyo3(name = "decide_workspace_retention_dismissal")]
+fn py_decide_workspace_retention_dismissal<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let input: WorkspaceRetentionDismissalRequestWire =
+        serde_json::from_value(value).map_err(|error| {
+            PyValueError::new_err(format!(
+                "request is not a valid WorkspaceRetentionDismissalRequestWire dict: {error}"
+            ))
+        })?;
+    let decision =
+        py.allow_threads(|| decide_workspace_retention_dismissal(&input));
+    let value = serde_json::to_value(decision).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 pub(crate) fn register_workspace_retention(
     m: &Bound<'_, PyModule>,
 ) -> PyResult<()> {
@@ -43,6 +65,10 @@ pub(crate) fn register_workspace_retention(
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_decide_workspace_retention, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_decide_workspace_retention_dismissal,
+        m
+    )?)?;
     Ok(())
 }
 

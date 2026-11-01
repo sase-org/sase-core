@@ -113,6 +113,11 @@ fn newest_agent_member(
 /// live successor owns the bead through this same rule, which is exactly what
 /// "passes ownership to `followup_agent`" means.
 fn owner_kind(member: &StrandedWorkMemberFactsWire) -> Option<String> {
+    // A terminal hold is recovery evidence, not an active handoff. A real
+    // successor has its own member facts and still wins through `bead_owner`.
+    if member.workspace_retention {
+        return None;
+    }
     if member.finalizing {
         return Some("finalizing".to_string());
     }

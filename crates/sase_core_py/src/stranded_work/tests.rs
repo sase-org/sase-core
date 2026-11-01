@@ -5,7 +5,7 @@ use serde_json::json;
 
 fn leaf_request() -> serde_json::Value {
     json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "now": 1_800_000_000.0,
         "settle_grace_seconds": 120.0,
         "beads": [
@@ -30,6 +30,7 @@ fn leaf_request() -> serde_json::Value {
                         "pending_handoff": null,
                         "handoff_inflight": false,
                         "recovery_in_flight": false,
+                        "workspace_retention": false,
                         "turn_state": null,
                         "followup_pending": false,
                         "followup_outcome": null,
@@ -61,6 +62,7 @@ fn leaf_request() -> serde_json::Value {
                         "pending_handoff": null,
                         "handoff_inflight": false,
                         "recovery_in_flight": false,
+                        "workspace_retention": false,
                         "turn_state": null,
                         "followup_pending": false,
                         "followup_outcome": null,
@@ -83,7 +85,7 @@ fn stranded_work_binding_round_trip() {
         let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
         let result = py_stranded_work_reduce(py, request).unwrap();
         let value = py_to_json_value(result.bind(py)).unwrap();
-        assert_eq!(value["schema_version"], json!(1));
+        assert_eq!(value["schema_version"], json!(2));
         assert_eq!(value["stranded_ids"], json!(["w.1"]));
         assert_eq!(value["blocked_ids"], json!(["w"]));
         let verdicts = value["verdicts"].as_array().unwrap();
