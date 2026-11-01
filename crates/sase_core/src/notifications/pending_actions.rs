@@ -17,6 +17,7 @@ use super::wire::NotificationWire;
 pub const PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION: u32 = 3;
 pub const DEFAULT_PENDING_ACTION_PREFIX_LEN: usize = 8;
 pub const DEFAULT_PENDING_ACTION_STALE_SECONDS: f64 = 24.0 * 60.0 * 60.0;
+const HANDLED_PENDING_ACTION_RETENTION_SECONDS: f64 = 7.0 * 24.0 * 60.0 * 60.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingActionStoreWire {
@@ -136,7 +137,11 @@ pub fn register_pending_action(
             }
         }
         store.actions.insert(action.prefix.clone(), next);
-        write_pending_action_store_unlocked(path, &store)?;
+        write_pending_action_store_unlocked(
+            path,
+            &mut store,
+            action.updated_at_unix,
+        )?;
         Ok(store)
     })();
     unlock(lock)?;
@@ -176,7 +181,7 @@ pub fn cleanup_stale_pending_actions(
             store.actions.remove(prefix);
         }
         if !stale.is_empty() {
-            write_pending_action_store_unlocked(path, &store)?;
+            write_pending_action_store_unlocked(path, &mut store, now_unix)?;
         }
         Ok(stale)
     })();
@@ -191,7 +196,7 @@ pub fn merge_pending_action_transport(
     record: &BTreeMap<String, JsonValue>,
     now_unix: f64,
 ) -> Result<bool, String> {
-    mutate_pending_action_store(path, |store| {
+    mutate_pending_action_store(path, now_unix, |store| {
         let Some(key) = find_pending_action_key(store, identifier) else {
             return Ok((false, false));
         };
@@ -212,7 +217,7 @@ pub fn mark_pending_action_handled(
     action: Option<&str>,
     now_unix: f64,
 ) -> Result<bool, String> {
-    mutate_pending_action_store(path, |store| {
+    mutate_pending_action_store(path, now_unix, |store| {
         let Some(key) = find_pending_action_key(store, identifier) else {
             return Ok((false, false));
         };
@@ -229,7 +234,7 @@ pub fn remove_pending_action(
     path: &Path,
     identifier: &str,
 ) -> Result<bool, String> {
-    mutate_pending_action_store(path, |store| {
+    mutate_pending_action_store(path, current_unix_time(), |store| {
         let Some(key) = find_pending_action_key(store, identifier) else {
             return Ok((false, false));
         };
@@ -302,6 +307,7 @@ pub fn pending_action_transport(
                 request.legacy_path.as_deref(),
                 identifier,
                 transport,
+                request.now_unix,
             )?))
         }
         "cleanup" => {
@@ -358,7 +364,7 @@ pub fn pending_action_state_for_notification(
     if !action_kind.is_gate() {
         return MobileActionStateWire::Unsupported;
     }
-    if externally_handled_state(notification) {
+    if notification.dismissed || externally_handled_state(notification) {
         return MobileActionStateWire::AlreadyHandled;
     }
     if required_target_missing(notification) {
@@ -396,6 +402,19 @@ pub fn current_unix_time() -> f64 {
         .unwrap_or(0.0)
 }
 
+fn prune_old_handled_pending_actions(
+    store: &mut PendingActionStoreWire,
+    now_unix: f64,
+) {
+    let cutoff = now_unix - HANDLED_PENDING_ACTION_RETENTION_SECONDS;
+    store.actions.retain(|_, entry| {
+        if entry.state != MobileActionStateWire::AlreadyHandled {
+            return true;
+        }
+        entry.handled_at_unix.unwrap_or(entry.updated_at_unix) >= cutoff
+    });
+}
+
 fn required_field<'a>(
     value: Option<&'a str>,
     field: &str,
@@ -407,6 +426,7 @@ fn required_field<'a>(
 
 fn mutate_pending_action_store<T>(
     path: &Path,
+    now_unix: f64,
     mutator: impl FnOnce(&mut PendingActionStoreWire) -> Result<(T, bool), String>,
 ) -> Result<T, String> {
     let lock = open_lock_file(path)?;
@@ -415,7 +435,7 @@ fn mutate_pending_action_store<T>(
         let mut store = read_pending_action_store_unlocked(path)?;
         let (value, changed) = mutator(&mut store)?;
         if changed {
-            write_pending_action_store_unlocked(path, &store)?;
+            write_pending_action_store_unlocked(path, &mut store, now_unix)?;
         }
         Ok(value)
     })();
@@ -490,7 +510,7 @@ fn upsert_pending_action_transport(
     record: &BTreeMap<String, JsonValue>,
     now_unix: f64,
 ) -> Result<(), String> {
-    mutate_pending_action_store(path, |store| {
+    mutate_pending_action_store(path, now_unix, |store| {
         if let Some(legacy_path) = legacy_path {
             merge_legacy_telegram_pending_actions(store, legacy_path)?;
         }
@@ -638,8 +658,9 @@ fn remove_pending_action_transport(
     legacy_path: Option<&Path>,
     identifier: &str,
     transport: &str,
+    now_unix: f64,
 ) -> Result<bool, String> {
-    mutate_pending_action_store(path, |store| {
+    mutate_pending_action_store(path, now_unix, |store| {
         if let Some(legacy_path) = legacy_path {
             merge_legacy_telegram_pending_actions(store, legacy_path)?;
         }
@@ -671,7 +692,7 @@ fn cleanup_pending_action_transport(
     transport: &str,
     now_unix: f64,
 ) -> Result<Vec<String>, String> {
-    mutate_pending_action_store(path, |store| {
+    mutate_pending_action_store(path, now_unix, |store| {
         if let Some(legacy_path) = legacy_path {
             merge_legacy_telegram_pending_actions(store, legacy_path)?;
         }
@@ -713,7 +734,7 @@ fn mark_plan_pending_actions_handled(
     if identity.is_empty() {
         return Ok(Vec::new());
     }
-    mutate_pending_action_store(path, |store| {
+    mutate_pending_action_store(path, now_unix, |store| {
         if let Some(legacy_path) = legacy_path {
             merge_legacy_telegram_pending_actions(store, legacy_path)?;
         }
@@ -777,8 +798,10 @@ fn read_pending_action_store_unlocked(
 
 fn write_pending_action_store_unlocked(
     path: &Path,
-    store: &PendingActionStoreWire,
+    store: &mut PendingActionStoreWire,
+    now_unix: f64,
 ) -> Result<(), String> {
+    prune_old_handled_pending_actions(store, now_unix);
     let parent = ensure_parent(path)?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     reap_stale_pending_action_temps(path);
@@ -1149,6 +1172,10 @@ mod tests {
             pending_action_state_for_notification(&n, Some(&pending), 21.0),
             MobileActionStateWire::AlreadyHandled
         );
+        assert_eq!(
+            pending_action_state_for_notification(&n, None, 21.0),
+            MobileActionStateWire::AlreadyHandled
+        );
     }
 
     #[test]
@@ -1338,5 +1365,150 @@ mod tests {
 
         assert_eq!(removed, vec!["abcdef01".to_string()]);
         assert!(store.actions.is_empty());
+    }
+
+    #[test]
+    fn handled_action_pruning_respects_retention_boundary_and_state() {
+        let now = 1_000_000.0;
+        let cutoff = now - HANDLED_PENDING_ACTION_RETENTION_SECONDS;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = PendingActionStoreWire::default();
+
+        let mut older_handled = pending_action_from_notification(
+            &notification(
+                "older001-notification",
+                "PlanApproval",
+                "response_dir",
+                tmp.path(),
+            ),
+            now,
+        )
+        .unwrap();
+        older_handled.state = MobileActionStateWire::AlreadyHandled;
+        older_handled.handled_at_unix = Some(cutoff - 1.0);
+        older_handled.updated_at_unix = now;
+        store
+            .actions
+            .insert(older_handled.prefix.clone(), older_handled);
+
+        let mut boundary_handled = pending_action_from_notification(
+            &notification(
+                "boundary-notification",
+                "PlanApproval",
+                "response_dir",
+                tmp.path(),
+            ),
+            now,
+        )
+        .unwrap();
+        boundary_handled.state = MobileActionStateWire::AlreadyHandled;
+        boundary_handled.handled_at_unix = Some(cutoff);
+        boundary_handled.updated_at_unix = now;
+        store
+            .actions
+            .insert(boundary_handled.prefix.clone(), boundary_handled);
+
+        let mut fallback_handled = pending_action_from_notification(
+            &notification(
+                "fallback01-notification",
+                "PlanApproval",
+                "response_dir",
+                tmp.path(),
+            ),
+            now,
+        )
+        .unwrap();
+        fallback_handled.state = MobileActionStateWire::AlreadyHandled;
+        fallback_handled.handled_at_unix = None;
+        fallback_handled.updated_at_unix = cutoff - 1.0;
+        store
+            .actions
+            .insert(fallback_handled.prefix.clone(), fallback_handled);
+
+        let mut old_available = pending_action_from_notification(
+            &notification(
+                "available-notification",
+                "PlanApproval",
+                "response_dir",
+                tmp.path(),
+            ),
+            now,
+        )
+        .unwrap();
+        old_available.updated_at_unix = cutoff - 1.0;
+        old_available.handled_at_unix = Some(cutoff - 1.0);
+        store
+            .actions
+            .insert(old_available.prefix.clone(), old_available);
+
+        prune_old_handled_pending_actions(&mut store, now);
+
+        assert_eq!(
+            store.actions.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["availabl", "boundary"]
+        );
+    }
+
+    #[test]
+    fn pending_action_write_prunes_old_handled_entries_without_reopening_them()
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = pending_action_store_path(tmp.path());
+        let response_dir = tmp.path().join("plan");
+        fs::create_dir_all(&response_dir).unwrap();
+        fs::write(response_dir.join("plan_request.json"), "{}").unwrap();
+
+        let now = current_unix_time();
+        let mut handled_notification = notification(
+            "handled01-notification",
+            "PlanApproval",
+            "response_dir",
+            &response_dir,
+        );
+        handled_notification.dismissed = true;
+        let mut handled =
+            pending_action_from_notification(&handled_notification, now)
+                .unwrap();
+        handled.state = MobileActionStateWire::AlreadyHandled;
+        handled.handled_at_unix =
+            Some(now - HANDLED_PENDING_ACTION_RETENTION_SECONDS - 1.0);
+        handled.updated_at_unix = now;
+
+        let mut store = PendingActionStoreWire::default();
+        store.actions.insert(handled.prefix.clone(), handled);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec(&store).unwrap()).unwrap();
+
+        let mut available_notification = notification(
+            "available1-notification",
+            "PlanApproval",
+            "response_dir",
+            &response_dir,
+        );
+        available_notification.timestamp =
+            "2026-11-01T12:00:00+00:00".to_string();
+        let available =
+            pending_action_from_notification(&available_notification, now)
+                .unwrap();
+        let written = register_pending_action(&path, &available).unwrap();
+
+        assert!(!written.actions.contains_key("handled01"));
+        assert!(written.actions.contains_key(&available.prefix));
+        assert_eq!(
+            pending_action_state_from_store(
+                &written,
+                &handled_notification,
+                now
+            ),
+            MobileActionStateWire::AlreadyHandled
+        );
+        assert_eq!(
+            pending_action_state_from_store(
+                &written,
+                &available_notification,
+                now
+            ),
+            MobileActionStateWire::Available
+        );
     }
 }
