@@ -13,6 +13,12 @@ use crate::json_bridge::{
 
 use pyo3::wrap_pyfunction;
 
+use sase_core::bead::epic_symbols::{
+    assess_epic_symbol_freshness as core_assess_epic_symbol_freshness,
+    parse_epic_symbol_entries as core_parse_epic_symbol_entries,
+    EpicSymbolFreshnessRequestWire,
+};
+
 mod artifact_refs;
 mod board;
 mod fingerprint;
@@ -555,6 +561,39 @@ fn py_bead_statuses_for_ids<'py>(
             sase_core::bead::statuses_for_ids(&beads_dir, &issue_ids)
         }),
     )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_parse_epic_symbol_entries")]
+fn py_bead_parse_epic_symbol_entries(
+    py: Python<'_>,
+    text: &str,
+) -> PyResult<PyObject> {
+    let rows = core_parse_epic_symbol_entries(text);
+    let value = serde_json::to_value(rows).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_assess_epic_symbol_freshness")]
+fn py_bead_assess_epic_symbol_freshness(
+    py: Python<'_>,
+    request: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request)?;
+    let request: EpicSymbolFreshnessRequestWire = serde_json::from_value(value)
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "request is not a valid EpicSymbolFreshnessRequestWire: {error}"
+            ))
+        })?;
+    let assessments = core_assess_epic_symbol_freshness(&request);
+    let value = serde_json::to_value(assessments).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 #[pyfunction]
@@ -1605,6 +1644,8 @@ pub(crate) fn register_beads(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_list_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_statuses_for_ids, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_parse_epic_symbol_entries, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_assess_epic_symbol_freshness, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_closed_ids, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_ready, m)?)?;

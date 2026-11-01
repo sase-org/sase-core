@@ -8,6 +8,52 @@ use std::fs;
 use tempfile::tempdir;
 
 #[test]
+fn epic_symbol_bindings_round_trip_parser_and_freshness_evidence() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        for name in [
+            "bead_parse_epic_symbol_entries",
+            "bead_assess_epic_symbol_freshness",
+        ] {
+            assert!(module.getattr(name).is_ok(), "{name}");
+        }
+
+        let parsed = py_bead_parse_epic_symbol_entries(
+            py,
+            r#"--epic-symbol "sase-1(OldSymbol)" --epic-symbol=sase-2(NewSymbol)"#,
+        )
+        .unwrap();
+        let parsed = py_to_json_value(parsed.bind(py)).unwrap();
+        assert_eq!(parsed[0]["bead_id"], json!("sase-1"));
+        assert_eq!(parsed[1]["symbol"], json!("NewSymbol"));
+
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "local_rows": [{"bead_id": "sase-1", "symbol": "OldSymbol"}],
+                "head_rows": [{"bead_id": "sase-1", "symbol": "OldSymbol"}],
+                "statuses": {"sase-1": "closed"},
+                "local_head": "abc123",
+                "upstream_revision": "def456",
+                "upstream_fetch_succeeded": true,
+                "upstream_rows": [],
+                "upstream_descends_from_head": true
+            }),
+        )
+        .unwrap()
+        .into_bound(py);
+        let result =
+            py_bead_assess_epic_symbol_freshness(py, &request).unwrap();
+        let result = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(result[0]["classification"], json!("stale_checkout"));
+        assert_eq!(result[0]["local_head"], json!("abc123"));
+        assert_eq!(result[0]["upstream_revision"], json!("def456"));
+    });
+}
+
+#[test]
 fn bead_target_routing_binding_round_trips() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

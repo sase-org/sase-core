@@ -9,6 +9,7 @@ pub mod attachments;
 pub mod board;
 pub mod cli;
 pub mod config;
+pub mod epic_symbols;
 pub mod events;
 pub mod fingerprint;
 pub mod history;
@@ -43,6 +44,11 @@ pub use cli::{
 pub use config::{
     default_config, load_config, load_config_from_str, save_config,
     BeadConfigWire,
+};
+pub use epic_symbols::{
+    assess_epic_symbol_freshness, parse_epic_symbol_entries,
+    EpicSymbolFreshnessAssessmentWire, EpicSymbolFreshnessKindWire,
+    EpicSymbolFreshnessRequestWire, EpicSymbolRowWire,
 };
 pub use events::{
     import_issues_to_event_streams, merge_bead_event_streams,
