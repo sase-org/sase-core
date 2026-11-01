@@ -12,7 +12,10 @@ fn agent_run_state_bindings_register_and_round_trip() {
         for name in [
             "agent_run_state_wire_schema_version",
             "resolve_agent_run_state",
+            "resolve_agent_run_state_observations",
             "select_agent_run_state_window",
+            "select_agent_run_state_hoods",
+            "select_agent_run_state_discovery_window",
             "advance_agent_run_state_schedule",
         ] {
             assert!(module.getattr(name).is_ok(), "missing {name}");
@@ -60,6 +63,42 @@ fn agent_run_state_bindings_register_and_round_trip() {
         assert_eq!(resolved["changed"], json!(true));
         assert_eq!(resolved["reason"], json!("updated_from_terminal_marker"));
 
+        let classified = module
+            .getattr("resolve_agent_run_state_observations")
+            .unwrap()
+            .call1((json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": AGENT_RUN_STATE_WIRE_SCHEMA_VERSION,
+                    "identity": identity,
+                    "local_name": "worker",
+                    "published_state": "active",
+                    "published_started_at": null,
+                    "published_finished_at": null,
+                    "observations": [{
+                        "source": "terminal_marker",
+                        "read_status": "present",
+                        "identity_claims": {
+                            "source_run_id": "run-1",
+                            "name": "worker"
+                        },
+                        "outcome": "noop",
+                        "repeat_stopped": false,
+                        "started_at": "2026-10-29T12:00:00Z",
+                        "finished_at": null
+                    }]
+                }),
+            )
+            .unwrap(),))
+            .unwrap();
+        let classified = py_to_json_value(&classified).unwrap();
+        assert_eq!(classified["selected_state"], json!("completed"));
+        assert_eq!(classified["changed"], json!(true));
+        assert_eq!(
+            classified["observations"][0]["evidence_state"],
+            json!("completed")
+        );
+
         let selected = module
             .getattr("select_agent_run_state_window")
             .unwrap()
@@ -86,6 +125,63 @@ fn agent_run_state_bindings_register_and_round_trip() {
             .as_str()
             .unwrap()
             .starts_with("ars1:"));
+
+        let hood_window = module
+            .getattr("select_agent_run_state_hoods")
+            .unwrap()
+            .call1((json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": AGENT_RUN_STATE_WIRE_SCHEMA_VERSION,
+                    "project": "project-a",
+                    "owner": "alice@athena",
+                    "manifest_status": "valid",
+                    "after": null,
+                    "hoods": ["hood-c", "hood-a", "hood-b", "hood-d", "hood-e", "hood-f"]
+                }),
+            )
+            .unwrap(),))
+            .unwrap();
+        let hood_window = py_to_json_value(&hood_window).unwrap();
+        assert_eq!(
+            hood_window["selected_hoods"],
+            json!(["hood-a", "hood-b", "hood-c", "hood-d", "hood-e"])
+        );
+        assert_eq!(hood_window["has_more_hoods"], json!(true));
+
+        let discovery = module
+            .getattr("select_agent_run_state_discovery_window")
+            .unwrap()
+            .call1((json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": AGENT_RUN_STATE_WIRE_SCHEMA_VERSION,
+                    "project": "project-a",
+                    "owner": "alice@athena",
+                    "manifest_status": "valid",
+                    "scan_status": "complete",
+                    "after": null,
+                    "manifest_hoods": ["hood-a", "hood-b", "hood-c", "hood-d", "hood-e", "hood-f"],
+                    "hoods": [
+                        {"local_hood": "hood-a", "status": "empty", "source_run_ids": []},
+                        {"local_hood": "hood-b", "status": "corrupt", "source_run_ids": []},
+                        {"local_hood": "hood-c", "status": "available", "source_run_ids": ["run-2", "run-1"]},
+                        {"local_hood": "hood-d", "status": "empty", "source_run_ids": []},
+                        {"local_hood": "hood-e", "status": "empty", "source_run_ids": []}
+                    ]
+                }),
+            )
+            .unwrap(),))
+            .unwrap();
+        let discovery = py_to_json_value(&discovery).unwrap();
+        assert_eq!(discovery["selected"][0]["source_run_id"], json!("run-1"));
+        assert_eq!(discovery["selected"].as_array().unwrap().len(), 2);
+        assert_eq!(discovery["diagnostics"].as_array().unwrap().len(), 4);
+        assert_eq!(discovery["pass_complete"], json!(false));
+        assert!(discovery["next_cursor"]
+            .as_str()
+            .unwrap()
+            .starts_with("ars2:"));
 
         let schedule = module
             .getattr("advance_agent_run_state_schedule")

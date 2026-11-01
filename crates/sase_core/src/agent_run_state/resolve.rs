@@ -37,6 +37,10 @@ pub fn resolve_agent_run_state(
             response.reason =
                 AGENT_RUN_STATE_REASON_MISSING_EVIDENCE.to_string();
         }
+        AGENT_RUN_STATE_EVIDENCE_UNREADABLE => {
+            response.reason =
+                AGENT_RUN_STATE_REASON_UNREADABLE_EVIDENCE.to_string();
+        }
         AGENT_RUN_STATE_EVIDENCE_UNFINISHED => {
             let Some(evidence_identity) = request.evidence_identity.as_ref()
             else {

@@ -13,6 +13,26 @@ struct CursorWire {
     source_run_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DiscoveryCursorPosition {
+    AfterRun {
+        local_hood: String,
+        source_run_id: String,
+    },
+    AfterHood {
+        local_hood: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HoodCursorWire {
+    schema_version: u32,
+    project: String,
+    owner: String,
+    local_hood: String,
+    position: String,
+}
+
 pub fn select_agent_run_state_window(
     request: AgentRunStateWindowRequestWire,
 ) -> Result<AgentRunStateWindowResponseWire, AgentRunStateError> {
@@ -153,4 +173,113 @@ fn decode_cursor(
         ));
     }
     Ok(cursor)
+}
+
+pub(super) fn decode_discovery_cursor(
+    encoded: &str,
+    project: &str,
+    owner: &str,
+) -> Result<DiscoveryCursorPosition, AgentRunStateError> {
+    if encoded.starts_with("ars1:") {
+        let cursor = decode_cursor(encoded, project, owner)?;
+        return Ok(DiscoveryCursorPosition::AfterRun {
+            local_hood: cursor.local_hood,
+            source_run_id: cursor.source_run_id,
+        });
+    }
+    let bytes = decode_hex_payload(encoded, "ars2:")?;
+    let cursor: HoodCursorWire =
+        serde_json::from_slice(&bytes).map_err(|_| {
+            AgentRunStateError::InvalidRequest(
+                "after cursor is malformed".to_string(),
+            )
+        })?;
+    if cursor.schema_version != AGENT_RUN_STATE_WIRE_SCHEMA_VERSION {
+        return Err(AgentRunStateError::InvalidRequest(
+            "after cursor uses an unsupported schema".to_string(),
+        ));
+    }
+    if cursor.project != project || cursor.owner != owner {
+        return Err(AgentRunStateError::InvalidRequest(
+            "after cursor belongs to a different project or owner".to_string(),
+        ));
+    }
+    if cursor.position != "after_hood" || cursor.local_hood.trim().is_empty() {
+        return Err(AgentRunStateError::InvalidRequest(
+            "after cursor is malformed".to_string(),
+        ));
+    }
+    Ok(DiscoveryCursorPosition::AfterHood {
+        local_hood: cursor.local_hood,
+    })
+}
+
+pub(super) fn encode_discovery_run_cursor(
+    project: &str,
+    owner: &str,
+    local_hood: &str,
+    source_run_id: &str,
+) -> String {
+    encode_cursor(&CursorWire {
+        schema_version: AGENT_RUN_STATE_WIRE_SCHEMA_VERSION,
+        project: project.to_string(),
+        owner: owner.to_string(),
+        local_hood: local_hood.to_string(),
+        source_run_id: source_run_id.to_string(),
+    })
+}
+
+pub(super) fn encode_discovery_hood_cursor(
+    project: &str,
+    owner: &str,
+    local_hood: &str,
+) -> String {
+    let bytes = serde_json::to_vec(&HoodCursorWire {
+        schema_version: AGENT_RUN_STATE_WIRE_SCHEMA_VERSION,
+        project: project.to_string(),
+        owner: owner.to_string(),
+        local_hood: local_hood.to_string(),
+        position: "after_hood".to_string(),
+    })
+    .expect("cursor serialization is infallible");
+    encode_hex_payload("ars2:", &bytes)
+}
+
+fn decode_hex_payload(
+    encoded: &str,
+    prefix: &str,
+) -> Result<Vec<u8>, AgentRunStateError> {
+    let Some(hex) = encoded.strip_prefix(prefix) else {
+        return Err(AgentRunStateError::InvalidRequest(
+            "after cursor has an unsupported format".to_string(),
+        ));
+    };
+    if hex.len() % 2 != 0 {
+        return Err(AgentRunStateError::InvalidRequest(
+            "after cursor is malformed".to_string(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    let (pairs, _) = hex.as_bytes().as_chunks::<2>();
+    for [high_byte, low_byte] in pairs {
+        let high = (*high_byte as char).to_digit(16);
+        let low = (*low_byte as char).to_digit(16);
+        let (Some(high), Some(low)) = (high, low) else {
+            return Err(AgentRunStateError::InvalidRequest(
+                "after cursor is malformed".to_string(),
+            ));
+        };
+        bytes.push(((high << 4) | low) as u8);
+    }
+    Ok(bytes)
+}
+
+fn encode_hex_payload(prefix: &str, bytes: &[u8]) -> String {
+    let mut result = String::from(prefix);
+    for byte in bytes {
+        use std::fmt::Write;
+        write!(&mut result, "{byte:02x}")
+            .expect("writing to String is infallible");
+    }
+    result
 }
