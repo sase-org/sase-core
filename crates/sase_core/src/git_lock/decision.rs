@@ -110,11 +110,32 @@ pub fn decide_eager_git_lock_cleanup(
     })
 }
 
+fn effective_budget_ns(request: &GitLockRecoveryRequestWire) -> i64 {
+    match request.remaining_command_deadline_ns {
+        Some(deadline) => request.remaining_recovery_budget_ns.min(deadline),
+        None => request.remaining_recovery_budget_ns,
+    }
+}
+
 fn decide_index_lock(
     request: &GitLockRecoveryRequestWire,
     lock_path: Option<String>,
     identity_disqualified: bool,
 ) -> GitLockRecoveryDecisionWire {
+    if effective_budget_ns(request) <= 0 {
+        if request.remaining_recovery_budget_ns <= 0 {
+            return stop(
+                "recovery budget exhausted",
+                lock_path,
+                identity_disqualified,
+            );
+        }
+        return stop(
+            "caller deadline exhausted",
+            lock_path,
+            identity_disqualified,
+        );
+    }
     if let Some(decision) =
         maybe_backoff(request, lock_path.clone(), identity_disqualified)
     {
@@ -182,9 +203,16 @@ fn decide_absent_owner(
 ) -> GitLockRecoveryDecisionWire {
     let age = request.now_unix_ns.saturating_sub(snapshot.mtime_ns);
     if age >= STALE_GIT_INDEX_LOCK_MIN_AGE_NS {
-        if request.remaining_recovery_budget_ns <= 0 {
+        if effective_budget_ns(request) <= 0 {
+            if request.remaining_recovery_budget_ns <= 0 {
+                return stop(
+                    "recovery budget exhausted",
+                    Some(snapshot.path.clone()),
+                    false,
+                );
+            }
             return stop(
-                "recovery budget exhausted",
+                "caller deadline exhausted",
                 Some(snapshot.path.clone()),
                 false,
             );
@@ -228,6 +256,20 @@ fn retry_or_give_up(
     lock_path: Option<String>,
     identity_disqualified: bool,
 ) -> GitLockRecoveryDecisionWire {
+    if effective_budget_ns(request) <= 0 {
+        if request.remaining_recovery_budget_ns <= 0 {
+            return stop(
+                "recovery budget exhausted",
+                lock_path,
+                identity_disqualified,
+            );
+        }
+        return stop(
+            "caller deadline exhausted",
+            lock_path,
+            identity_disqualified,
+        );
+    }
     maybe_backoff(request, lock_path.clone(), identity_disqualified)
         .unwrap_or_else(|| {
             stop("retries exhausted", lock_path, identity_disqualified)
@@ -242,6 +284,29 @@ fn maybe_backoff(
     let index = request.attempts.saturating_sub(1) as usize;
     let delay = *request.delays.get(index)?;
     let delay_ns = delay_seconds_to_ns(delay)?;
+    let cap = effective_budget_ns(request);
+    if cap <= 0 {
+        return Some(stop(
+            if request.remaining_recovery_budget_ns <= 0 {
+                "recovery budget exhausted"
+            } else {
+                "caller deadline exhausted"
+            },
+            lock_path,
+            identity_disqualified,
+        ));
+    }
+    if delay_ns > cap {
+        return Some(stop(
+            format!(
+                "retry delay {:.3}s exceeds remaining budget {:.3}s",
+                delay_ns as f64 / 1_000_000_000.0,
+                cap as f64 / 1_000_000_000.0,
+            ),
+            lock_path,
+            identity_disqualified,
+        ));
+    }
     Some(GitLockRecoveryDecisionWire {
         schema_version: GIT_LOCK_WIRE_SCHEMA_VERSION,
         action: GIT_LOCK_ACTION_RETRY.to_string(),

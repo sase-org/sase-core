@@ -1349,3 +1349,9 @@ fn stale_repair_rejects_unknown_scopes() {
     ));
     assert!(result.is_err());
 }
+
+#[test]
+fn cleanup_budget_is_one_second() {
+    assert_eq!(default_publication_cleanup_timeout(), 1.0);
+    assert_eq!(DEFAULT_PUBLICATION_CLEANUP_TIMEOUT_SECONDS, 1.0);
+}

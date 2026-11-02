@@ -533,3 +533,83 @@ fn honors_shorter_caller_deadline_for_age_wait() {
     let decision = decide_git_lock_recovery(&request).unwrap();
     assert_eq!(decision.action, GIT_LOCK_ACTION_STOP);
 }
+
+#[test]
+fn expired_budgets_stop_before_retry_or_removal() {
+    let snap = snapshot("/repo/.git/index.lock", 4, 0);
+    for (recovery_ns, deadline) in [
+        (0, None),
+        (-1, None),
+        (30_000_000_000, Some(0)),
+        (30_000_000_000, Some(-5)),
+    ] {
+        let mut request = recovery_request(
+            1,
+            20_000_000_000,
+            Some(snap.clone()),
+            GIT_LOCK_OWNER_ABSENT,
+        );
+        request.remaining_recovery_budget_ns = recovery_ns;
+        request.remaining_command_deadline_ns = deadline;
+        let decision = decide_git_lock_recovery(&request).unwrap();
+        assert_eq!(decision.action, GIT_LOCK_ACTION_STOP);
+        assert!(!decision.claim_lock_removed);
+
+        let mut aged = recovery_request(
+            3,
+            20_000_000_000,
+            Some(snap.clone()),
+            GIT_LOCK_OWNER_ABSENT,
+        );
+        aged.remaining_recovery_budget_ns = recovery_ns;
+        aged.remaining_command_deadline_ns = deadline;
+        let decision = decide_git_lock_recovery(&aged).unwrap();
+        assert_eq!(decision.action, GIT_LOCK_ACTION_STOP);
+        assert!(!decision.claim_lock_removed);
+
+        let mut gone =
+            recovery_request(3, 20_000_000_000, None, GIT_LOCK_OWNER_ABSENT);
+        gone.first_snapshot = Some(snap.clone());
+        gone.remaining_recovery_budget_ns = recovery_ns;
+        gone.remaining_command_deadline_ns = deadline;
+        let decision = decide_git_lock_recovery(&gone).unwrap();
+        assert_eq!(decision.action, GIT_LOCK_ACTION_STOP);
+        assert!(!decision.claim_lock_removed);
+    }
+}
+
+#[test]
+fn shorter_than_next_backoff_stops_without_granting_delay() {
+    let snap = snapshot("/repo/.git/index.lock", 4, 0);
+    let mut request =
+        recovery_request(1, 20_000_000_000, Some(snap), GIT_LOCK_OWNER_ABSENT);
+    // Next delay is 0.1s; grant only 0.05s.
+    request.remaining_recovery_budget_ns = 50_000_000;
+    request.remaining_command_deadline_ns = None;
+    let decision = decide_git_lock_recovery(&request).unwrap();
+    assert_eq!(decision.action, GIT_LOCK_ACTION_STOP);
+    assert_eq!(decision.delay_ns, None);
+    assert!(!decision.claim_lock_removed);
+
+    // Tighter caller deadline also caps the retry even when recovery is ample.
+    let snap = snapshot("/repo/.git/index.lock", 4, 0);
+    let mut request =
+        recovery_request(1, 20_000_000_000, Some(snap), GIT_LOCK_OWNER_ABSENT);
+    request.remaining_recovery_budget_ns = 30_000_000_000;
+    request.remaining_command_deadline_ns = Some(50_000_000);
+    let decision = decide_git_lock_recovery(&request).unwrap();
+    assert_eq!(decision.action, GIT_LOCK_ACTION_STOP);
+    assert_eq!(decision.delay_ns, None);
+}
+
+#[test]
+fn aged_lock_with_exhausted_caller_deadline_never_removes() {
+    let snap = snapshot("/repo/.git/index.lock", 4, 0);
+    let mut request =
+        recovery_request(3, 20_000_000_000, Some(snap), GIT_LOCK_OWNER_ABSENT);
+    request.remaining_recovery_budget_ns = 30_000_000_000;
+    request.remaining_command_deadline_ns = Some(0);
+    let decision = decide_git_lock_recovery(&request).unwrap();
+    assert_eq!(decision.action, GIT_LOCK_ACTION_STOP);
+    assert!(!decision.claim_lock_removed);
+}

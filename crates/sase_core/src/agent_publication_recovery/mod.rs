@@ -10,6 +10,7 @@
 
 mod accounting;
 mod classify;
+mod cleanup;
 mod complete;
 mod replay;
 mod select;
@@ -23,6 +24,10 @@ mod tests;
 pub use accounting::decide_publication_failure_accounting;
 pub use classify::{
     classify_publication_error, classify_publication_error_class,
+};
+pub use cleanup::{
+    default_publication_cleanup_timeout,
+    DEFAULT_PUBLICATION_CLEANUP_TIMEOUT_SECONDS,
 };
 pub use complete::{
     classify_deferred_prompt_obligation, decide_publication_request_completion,

@@ -833,6 +833,8 @@ fn publication_recovery_bindings_select_and_complete() {
             .as_str()
             .unwrap()
             .contains("linked-scope"));
+
+        assert_eq!(py_default_publication_cleanup_timeout(), 1.0);
     });
 }
 
@@ -1113,5 +1115,59 @@ fn git_lock_bindings_round_trip_classify_and_decide() {
         let decision_value = py_to_json_value(&decision).unwrap();
         assert_eq!(decision_value["action"], json!("remove_then_retry"));
         assert_eq!(decision_value["claim_lock_removed"], json!(true));
+
+        let exhausted = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "failure": classified_value,
+                "delays": [0.1],
+                "allow_lock_removal": true,
+                "attempts": 1,
+                "now_unix_ns": 20_000_000_000i64,
+                "remaining_recovery_budget_ns": 0i64,
+                "cancelled": false,
+                "removal_already_attempted": false,
+                "identity_disqualified": false,
+                "first_snapshot": {
+                    "path": "/repo/.git/index.lock",
+                    "file_type": "regular",
+                    "device": 1,
+                    "inode": 4,
+                    "size": 8,
+                    "mtime_ns": 0,
+                    "ctime_ns": 0
+                },
+                "current_snapshot": {
+                    "path": "/repo/.git/index.lock",
+                    "file_type": "regular",
+                    "device": 1,
+                    "inode": 4,
+                    "size": 8,
+                    "mtime_ns": 0,
+                    "ctime_ns": 0
+                },
+                "path_match": {
+                    "schema_version": 1,
+                    "matched_path": "/repo/.git/index.lock",
+                    "eligible_for_removal": true,
+                    "reason": "matched"
+                },
+                "owner": {
+                    "schema_version": 1,
+                    "status": "absent",
+                    "reason": "none"
+                }
+            }),
+        )
+        .unwrap();
+        let decision = module
+            .getattr("decide_git_lock_recovery")
+            .unwrap()
+            .call1((exhausted.bind(py).downcast::<PyDict>().unwrap(),))
+            .unwrap();
+        let decision_value = py_to_json_value(&decision).unwrap();
+        assert_eq!(decision_value["action"], json!("stop"));
+        assert_eq!(decision_value["claim_lock_removed"], json!(false));
     });
 }

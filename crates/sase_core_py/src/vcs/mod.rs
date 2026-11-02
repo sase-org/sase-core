@@ -539,6 +539,13 @@ fn py_publication_recovery_wire_schema_version() -> u32 {
     PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION
 }
 
+/// Return the shared best-effort publication cleanup budget in seconds.
+#[pyfunction]
+#[pyo3(name = "default_publication_cleanup_timeout")]
+fn py_default_publication_cleanup_timeout() -> f64 {
+    core_default_publication_cleanup_timeout()
+}
+
 /// Select retired and/or quarantined publication rows for one explicit retry.
 #[pyfunction]
 #[pyo3(name = "select_publication_retries")]
@@ -1034,6 +1041,10 @@ pub(crate) fn register_vcs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_repair_session_manifest_entry, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_publication_recovery_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_default_publication_cleanup_timeout,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_select_publication_retries, m)?)?;
