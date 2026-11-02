@@ -20,7 +20,7 @@ fn timeout_terminates_process_group_and_records_failed_entry() {
     manifest.commands[0].timeout_seconds = Some(0.05);
     let fixture = Fixture::new(manifest);
     let (result, stdout, _) = fixture.run();
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{result:?}");
     let ledger = ledger(&stdout);
     assert_eq!(ledger.entries[0].status, SudoLedgerEntryStatusWire::Failed);
     assert_eq!(ledger.entries[0].exit_code, None);
@@ -34,7 +34,7 @@ fn output_policy_none_keeps_ledger_empty() {
     manifest.output_to_agent = SudoOutputPolicyWire::None;
     let fixture = Fixture::new(manifest);
     let (result, stdout, _) = fixture.run();
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{result:?}");
     let ledger = ledger(&stdout);
     assert_eq!(ledger.entries[0].output_tail, "");
 }
@@ -46,7 +46,7 @@ fn output_policy_full_is_hard_bounded() {
     manifest.commands[0].argv = vec!["ok".to_string()];
     let fixture = Fixture::new(manifest);
     let (result, stdout, _) = fixture.run();
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{result:?}");
     let ledger = ledger(&stdout);
     assert!(ledger.entries[0].output_tail.len() <= SUDO_MAX_OUTPUT_TAIL_BYTES);
 }
@@ -718,7 +718,7 @@ fn initgroups_c_int_conversion_rejects_too_large_gid() {
 fn ledger_json_validates_against_manifest() {
     let fixture = Fixture::new(manifest());
     let (result, stdout, _) = fixture.run();
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{result:?}");
     let manifest_json =
         serde_json::from_slice(&fs::read(&fixture.manifest_path).unwrap())
             .unwrap();

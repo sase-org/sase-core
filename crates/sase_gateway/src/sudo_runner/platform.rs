@@ -1,6 +1,10 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
+#[cfg(unix)]
+use std::process::ExitStatus;
+#[cfg(all(test, unix))]
+use std::process::Output;
 use std::process::{Child, Command};
 use std::sync::atomic::Ordering;
 use std::thread;
@@ -528,9 +532,9 @@ pub(crate) fn terminate_child_group(child: &mut Child) {
 /// reviewed binaries that nothing is writing, so the retry never fires
 /// there.
 #[cfg(unix)]
-pub(crate) fn retry_on_etxtbsy<T>(
-    mut operation: impl FnMut() -> io::Result<T>,
-) -> io::Result<T> {
+pub(crate) fn retry_on_etxtbsy(
+    mut spawn: impl FnMut() -> io::Result<Child>,
+) -> io::Result<Child> {
     let mut attempts = 0;
     loop {
         // The guard drops before the match, so the backoff sleep below
@@ -539,7 +543,7 @@ pub(crate) fn retry_on_etxtbsy<T>(
             #[cfg(all(test, unix))]
             let _fixture_spawn_guard =
                 super::tests::support::hold_fixture_spawn_lock();
-            operation()
+            spawn()
         };
         match outcome {
             Err(error)
@@ -551,6 +555,28 @@ pub(crate) fn retry_on_etxtbsy<T>(
             outcome => return outcome,
         }
     }
+}
+
+/// Spawn with the ETXTBSY backstop, then wait after releasing the fixture lock.
+#[cfg(unix)]
+pub(crate) fn status_with_etxtbsy_retry(
+    mut command: Command,
+) -> io::Result<ExitStatus> {
+    let mut child = retry_on_etxtbsy(|| command.spawn())?;
+    child.wait()
+}
+
+/// Test-only output helper that keeps the fixture lock scoped to spawn.
+#[cfg(all(test, unix))]
+pub(crate) fn output_with_etxtbsy_retry(
+    mut command: Command,
+) -> io::Result<Output> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = retry_on_etxtbsy(|| command.spawn())?;
+    child.wait_with_output()
 }
 
 /// True exactly for the `ETXTBSY` spawn failure described in

@@ -20,7 +20,7 @@ fn help_succeeds_without_tty_or_sudo() {
         &mut stdout,
         &mut stderr,
     );
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{result:?}");
     let help = String::from_utf8(stdout).unwrap();
     assert!(help.contains("sase_sudo_runner"));
     assert!(help.contains("--detach-dir"));
@@ -40,7 +40,7 @@ fn capabilities_succeed_without_tty_manifest_or_sudo() {
         &mut stdout,
         &mut stderr,
     );
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{result:?}");
     assert!(stderr.is_empty());
     let value: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(
@@ -65,7 +65,7 @@ fn capabilities_omit_detached_execution_when_identity_backend_is_absent() {
         &mut stdout,
         &mut stderr,
     );
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{result:?}");
     assert!(stderr.is_empty());
     let value: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(
@@ -90,7 +90,7 @@ fn linux_identity_backend_advertises_detached_execution() {
         &mut stdout,
         &mut stderr,
     );
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{result:?}");
     let value: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(
         value["capabilities"],
@@ -119,7 +119,7 @@ fn non_linux_identity_backend_reports_explicit_unsupported_error() {
         &mut stdout,
         &mut stderr,
     );
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{result:?}");
     let value: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(
         value,

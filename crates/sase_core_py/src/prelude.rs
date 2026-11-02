@@ -176,7 +176,6 @@ pub(crate) use sase_core::agent_publication_recovery::{
     decide_replay_apply as core_decide_replay_apply,
     decide_replay_byte_divergence as core_decide_replay_byte_divergence,
     decide_replay_hood_merge as core_decide_replay_hood_merge,
-    default_publication_cleanup_timeout as core_default_publication_cleanup_timeout,
     select_publication_drain as core_select_publication_drain,
     select_publication_retries as core_select_publication_retries,
     DeferredPromptClassifyRequestWire, PublicationCompletionRequestWire,

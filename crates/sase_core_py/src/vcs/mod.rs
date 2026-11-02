@@ -543,7 +543,7 @@ fn py_publication_recovery_wire_schema_version() -> u32 {
 #[pyfunction]
 #[pyo3(name = "default_publication_cleanup_timeout")]
 fn py_default_publication_cleanup_timeout() -> f64 {
-    core_default_publication_cleanup_timeout()
+    sase_core::agent_publication_recovery::default_publication_cleanup_timeout()
 }
 
 /// Select retired and/or quarantined publication rows for one explicit retry.

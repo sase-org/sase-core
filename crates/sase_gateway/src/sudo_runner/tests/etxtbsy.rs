@@ -1,47 +1,81 @@
 //! Deterministic regression tests for the fork-inherited
-//! write-descriptor `ETXTBSY` race behind sase-15h.
+//! write-descriptor ETXTBSY race behind sase-15h.
 //!
 //! A test binary's threads share their descriptors across forks: when one
-//! thread's `Command::spawn` forks while another thread still holds a
+//! thread's Command::spawn forks while another thread still holds a
 //! freshly written fixture script open for writing, the forked child
 //! inherits the write descriptor until its own exec, and the kernel
-//! refuses to exec the script with `ETXTBSY` ("Text file busy", os error
+//! refuses to exec the script with ETXTBSY ("Text file busy", os error
 //! 26) until that child execs or exits. These tests replay that shape
-//! deterministically: a `sleep` child plays the forked inheritor while
-//! the test execs the script it holds open for writing.
+//! deterministically: a handshake child keeps the inherited writer open
+//! while the test execs the held script.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
-use std::thread;
-use std::time::Duration;
 
 use super::super::*;
 use super::support::*;
 
 #[test]
 fn exec_while_fork_child_holds_write_descriptor_fails_with_etxtbsy() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
     let tmp = tempfile::tempdir().unwrap();
     let script = tmp.path().join("held-open.sh");
     publish_executable(&script, "#!/bin/sh\nprintf 'replayed\\n'\n");
-    // Hold the script open for writing, exactly as a forked child holds
-    // the descriptor it inherited from a write still in flight.
+
+    let ready = tmp.path().join("inheritor-ready");
+    let release = tmp.path().join("inheritor-release");
     let held = fs::File::options().write(true).open(&script).unwrap();
-    // A forked child that has not exec'd yet: it carries the inherited
-    // write descriptor for its whole pre-exec life.
-    let mut inheritor = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    let fd = held.as_raw_fd();
+
+    let mut inheritor_command = Command::new("/bin/sh");
+    inheritor_command
+        .arg("-c")
+        .arg(
+            "test -e \"/dev/fd/$1\" || exit 88; : > \"$2\"; \
+             i=0; while [ ! -e \"$3\" ] && [ \"$i\" -lt 50000000 ]; \
+             do i=$((i + 1)); done",
+        )
+        .arg("sase-etxtbsy-inheritor")
+        .arg(fd.to_string())
+        .arg(&ready)
+        .arg(&release);
+    // Make only this child inherit the writer. The parent's descriptor stays
+    // close-on-exec, so unrelated tests cannot prolong the held-open window.
+    unsafe {
+        inheritor_command.pre_exec(move || {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut inheritor = retry_on_etxtbsy(|| inheritor_command.spawn()).unwrap();
+    let ready_deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !ready.exists() && std::time::Instant::now() < ready_deadline {
+        std::thread::yield_now();
+    }
+    assert!(ready.exists(), "child did not inherit the writer fd");
+
+    drop(held);
     let error = Command::new(&script).status().unwrap_err();
     assert!(
         is_etxtbsy(&error),
         "expected ETXTBSY while a fork child holds the script open for \
          writing, got: {error}"
     );
-    let _ = inheritor.kill();
-    let _ = inheritor.wait();
-    drop(held);
-    // A foreign test thread may have forked while `held` was open and
-    // its child may still be pre-exec; the backstop absorbs that tail.
-    let output = retry_on_etxtbsy(|| Command::new(&script).output()).unwrap();
+    fs::write(&release, "release").unwrap();
+    assert!(inheritor.wait().unwrap().success());
+
+    let output = output_with_etxtbsy_retry(Command::new(&script)).unwrap();
     assert!(output.status.success());
     assert_eq!(output.stdout, b"replayed\n");
 }
@@ -52,25 +86,26 @@ fn etxtbsy_retry_recovers_once_writer_closes() {
     let script = tmp.path().join("closing.sh");
     publish_executable(&script, "#!/bin/sh\nprintf 'recovered\\n'\n");
     let held = fs::File::options().write(true).open(&script).unwrap();
-    // Drop the write descriptor after 100ms from a helper thread. Every
-    // retry attempt before that must fail; the helper budget below is an
-    // order of magnitude larger, so recovery is deterministic.
-    let closer = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(100));
-        drop(held);
-    });
-    thread::sleep(Duration::from_millis(10));
     let mut attempts = 0;
-    let output = retry_on_etxtbsy(|| {
+    let mut held = Some(held);
+    let mut command = Command::new(&script);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = retry_on_etxtbsy(|| {
         attempts += 1;
-        Command::new(&script).output()
+        if attempts > 1 {
+            drop(held.take());
+        }
+        command.spawn()
     })
     .unwrap();
-    closer.join().unwrap();
     assert!(
         attempts >= 2,
         "expected at least one ETXTBSY retry, got {attempts} attempt(s)"
     );
+    let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
     assert_eq!(output.stdout, b"recovered\n");
 }
@@ -93,6 +128,6 @@ fn publish_executable_lands_atomically_with_exec_permissions() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(leftover, vec!["published.sh".to_string()]);
-    let output = retry_on_etxtbsy(|| Command::new(&script).output()).unwrap();
+    let output = output_with_etxtbsy_retry(Command::new(&script)).unwrap();
     assert!(output.status.success());
 }
