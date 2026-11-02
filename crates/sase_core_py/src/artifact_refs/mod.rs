@@ -921,6 +921,38 @@ fn py_artifact_context_query_wire_schema_version() -> u64 {
     ARTIFACT_CONTEXT_QUERY_WIRE_SCHEMA_VERSION
 }
 
+/// Select the expanded agent prompt path from observed candidates.
+///
+/// The request carries candidate paths with integer nanosecond mtimes plus
+/// `is_workflow_child` and an optional `step_name`. Raw prompts and
+/// commit-finalizer re-prompts are never selected; ties prefer the
+/// lexicographically greatest path.
+#[pyfunction]
+#[pyo3(name = "agent_prompt_select")]
+fn py_agent_prompt_select(
+    request: &Bound<'_, PyDict>,
+) -> PyResult<Option<String>> {
+    let request = serde_json::from_value::<
+        sase_core::agent_prompt_selection::AgentPromptSelectionRequestWire,
+    >(py_to_json_value(request.as_any())?)
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid AgentPromptSelectionRequestWire dict: \
+             {error}"
+        ))
+    })?;
+    Ok(sase_core::agent_prompt_selection::select_agent_prompt(
+        &request,
+    ))
+}
+
+/// Return the agent prompt selection wire schema version.
+#[pyfunction]
+#[pyo3(name = "agent_prompt_selection_wire_schema_version")]
+fn py_agent_prompt_selection_wire_schema_version() -> u64 {
+    sase_core::agent_prompt_selection::AGENT_PROMPT_SELECTION_WIRE_SCHEMA_VERSION
+}
+
 /// Materialize one VCS-backed artifact into its content-addressed cache.
 #[pyfunction]
 #[pyo3(name = "artifact_file_materialize_vcs")]
@@ -1332,6 +1364,11 @@ pub(crate) fn register_artifact_refs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_artifact_context_query, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_artifact_context_query_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_agent_prompt_select, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_agent_prompt_selection_wire_schema_version,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_payload_inventory, m)?)?;

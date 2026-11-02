@@ -24,6 +24,7 @@ pub mod agent_launch;
 pub mod agent_models;
 pub mod agent_name_template;
 pub mod agent_ownership;
+pub mod agent_prompt_selection;
 pub mod agent_publication_batches;
 pub mod agent_publication_protection;
 pub mod agent_publication_recovery;
