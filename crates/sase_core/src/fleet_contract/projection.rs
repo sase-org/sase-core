@@ -382,6 +382,23 @@ pub(crate) fn lifecycle_for_record(
     record: &AgentArtifactRecordWire,
 ) -> FleetLifecycleWire {
     if let Some(done) = &record.done {
+        if let Some(status) =
+            crate::agent_hijack::agent_hijack_status_for_done_marker(
+                done.outcome.as_deref(),
+                done.recovery.as_ref(),
+            )
+        {
+            return match status {
+                crate::agent_hijack::HIJACKED_STATUS => {
+                    FleetLifecycleWire::Asking
+                }
+                crate::agent_hijack::ESCALATED_STATUS
+                | crate::agent_hijack::CONTINUED_STATUS => {
+                    FleetLifecycleWire::Running
+                }
+                _ => FleetLifecycleWire::Terminal,
+            };
+        }
         if done
             .error
             .as_deref()
@@ -454,6 +471,14 @@ pub(crate) fn bucket_for_lifecycle(
 
 pub(crate) fn status_for_record(record: &AgentArtifactRecordWire) -> String {
     if let Some(done) = &record.done {
+        if let Some(status) =
+            crate::agent_hijack::agent_hijack_status_for_done_marker(
+                done.outcome.as_deref(),
+                done.recovery.as_ref(),
+            )
+        {
+            return status.to_string();
+        }
         if let Some(status) = first_non_empty([done.status_label.as_deref()]) {
             return status.to_string();
         }

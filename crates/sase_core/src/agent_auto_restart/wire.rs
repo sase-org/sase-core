@@ -111,6 +111,9 @@ pub struct AutoRestartContextWire {
     pub has_pending_handoff: bool,
     #[serde(default)]
     pub is_remote: bool,
+    /// A durable user hijack intent exists, even if done.json is not written yet.
+    #[serde(default)]
+    pub has_hijack_intent: bool,
     #[serde(default)]
     pub error_text: String,
     #[serde(default)]
@@ -278,4 +281,16 @@ pub struct AgentRecoveryWire {
     pub episode_id: Option<String>,
     #[serde(default)]
     pub ledger_key: Option<String>,
+    /// Recovery transaction kind. `hijack` distinguishes this state from
+    /// update-skew recovery while sharing done.json's recovery object.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub hijack_id: Option<String>,
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub successor: Option<String>,
+    #[serde(default)]
+    pub model_changed: Option<bool>,
 }

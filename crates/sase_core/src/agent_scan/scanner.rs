@@ -2091,8 +2091,17 @@ fn agent_session_turn_from_object(
 }
 
 fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
+    let outcome = coerce_str(data.get("outcome"));
+    let recovery = coerce_recovery(data.get("recovery"));
+    let status_label = coerce_str(data.get("status_label")).or_else(|| {
+        crate::agent_hijack::agent_hijack_status_for_done_marker(
+            outcome.as_deref(),
+            recovery.as_ref(),
+        )
+        .map(str::to_string)
+    });
     DoneMarkerWire {
-        outcome: coerce_str(data.get("outcome")),
+        outcome,
         finished_at: coerce_float(data.get("finished_at")),
         finished_at_estimated: coerce_bool_truthy(
             data.get("finished_at_estimated"),
@@ -2132,7 +2141,7 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
         imported_source_owner: coerce_imported_source_owner(
             data.get("imported_source_owner"),
         ),
-        status_label: coerce_str(data.get("status_label")),
+        status_label,
         agent_session_turn: agent_session_turn_from_object(data),
         monitor_diagnostic_manifest_ref: coerce_str(
             data.get("monitor_diagnostic_manifest_ref"),
@@ -2156,7 +2165,7 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
         monitor_followup_budget_decision_path: coerce_str(
             data.get("monitor_followup_budget_decision_path"),
         ),
-        recovery: coerce_recovery(data.get("recovery")),
+        recovery,
     }
 }
 
@@ -2173,6 +2182,11 @@ fn coerce_recovery(value: Option<&Value>) -> Option<AgentRecoveryWire> {
         updated_at: coerce_str(obj.get("updated_at")),
         episode_id: coerce_str(obj.get("episode_id")),
         ledger_key: coerce_str(obj.get("ledger_key")),
+        kind: coerce_str(obj.get("kind")),
+        hijack_id: coerce_str(obj.get("hijack_id")),
+        action: coerce_str(obj.get("action")),
+        successor: coerce_str(obj.get("successor")),
+        model_changed: obj.get("model_changed").and_then(Value::as_bool),
     })
 }
 

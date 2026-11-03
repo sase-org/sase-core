@@ -297,6 +297,14 @@ fn base_status(record: &AgentArtifactRecordWire) -> String {
         if done.repeat_stopped {
             return "STOPPED".to_string();
         }
+        if let Some(status) =
+            crate::agent_hijack::agent_hijack_status_for_done_marker(
+                done.outcome.as_deref(),
+                done.recovery.as_ref(),
+            )
+        {
+            return status.to_string();
+        }
         if let Some(status) = label(done.status_label.as_deref()) {
             return status;
         }
@@ -548,6 +556,7 @@ fn apply_turn_facts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_auto_restart::AgentRecoveryWire;
     use crate::agent_scan::wire::PendingQuestionMarkerWire;
     use crate::agent_scan::{
         AgentMetaWire, AgentSessionTurnGateWire, AgentSessionTurnMonitorWire,
@@ -613,6 +622,41 @@ mod tests {
         assert_eq!(derive(&rec, &Files::default()).status, "STOPPED");
         rec.done = Some(DoneMarkerWire::default());
         assert_eq!(derive(&rec, &Files::default()).status, "DONE");
+    }
+
+    #[test]
+    fn hijack_done_states_derive_parked_and_handoff_statuses() {
+        let mut rec = record(AgentMetaWire::default());
+        rec.done = Some(DoneMarkerWire {
+            outcome: Some("hijacked".into()),
+            recovery: Some(AgentRecoveryWire {
+                state: Some("pending".into()),
+                kind: Some("hijack".into()),
+                hijack_id: Some("h-1".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(derive(&rec, &Files::default()).status, "HIJACKED");
+
+        rec.done.as_mut().unwrap().recovery = Some(AgentRecoveryWire {
+            state: Some("resolved".into()),
+            model_changed: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(derive(&rec, &Files::default()).status, "ESCALATED");
+        rec.done
+            .as_mut()
+            .unwrap()
+            .recovery
+            .as_mut()
+            .unwrap()
+            .model_changed = Some(false);
+        assert_eq!(derive(&rec, &Files::default()).status, "CONTINUED");
+
+        rec.done.as_mut().unwrap().recovery.as_mut().unwrap().state =
+            Some("dismissed".into());
+        assert_eq!(derive(&rec, &Files::default()).status, "INTERRUPTED");
     }
 
     #[test]

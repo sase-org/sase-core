@@ -116,6 +116,14 @@ pub fn never_restart_reason(
     facts: Option<&AgentFailureFactsWire>,
     context: &AutoRestartContextWire,
 ) -> Option<&'static str> {
+    if context.has_hijack_intent
+        || context
+            .outcome
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("hijacked"))
+    {
+        return Some("agent_hijacked");
+    }
     if context.is_remote {
         return Some("remote_row");
     }

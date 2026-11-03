@@ -356,7 +356,7 @@ fn marker_state(
         "completed" | "noop" | "epic_approved" | "plan_committed"
         | "plan_rejected" => Some("completed"),
         "failed" | "killed" | "epic_launch_failed" => Some("failed"),
-        "stopped" => Some("stopped"),
+        "stopped" | "hijacked" => Some("stopped"),
         "monitored" => match observation.monitor_state.as_deref()? {
             "completed" => Some("completed"),
             "stopped" => Some("stopped"),

@@ -1,8 +1,68 @@
 use super::super::*;
 use super::support::*;
+use crate::agent_auto_restart::AgentRecoveryWire;
 use crate::agent_scan::DoneMarkerWire;
 use crate::fleet_contract::projection::current_project_locator_schema;
 use serde_json::json;
+
+#[test]
+fn hijack_done_markers_are_needs_input_and_never_failed() {
+    let mut record = record_running();
+    record.done = Some(DoneMarkerWire {
+        outcome: Some("hijacked".into()),
+        recovery: Some(AgentRecoveryWire {
+            state: Some("pending".into()),
+            kind: Some("hijack".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let lifecycle =
+        crate::fleet_contract::projection::lifecycle_for_record(&record);
+    assert_eq!(lifecycle, FleetLifecycleWire::Asking);
+    assert_eq!(
+        crate::fleet_contract::projection::bucket_for_lifecycle(
+            lifecycle,
+            OwnerLivenessWire::Dead,
+        ),
+        FleetStatusBucketWire::Stopped
+    );
+    assert_eq!(
+        crate::fleet_contract::projection::status_for_record(&record),
+        "HIJACKED"
+    );
+
+    record
+        .done
+        .as_mut()
+        .unwrap()
+        .recovery
+        .as_mut()
+        .unwrap()
+        .state = Some("resolved".into());
+    record
+        .done
+        .as_mut()
+        .unwrap()
+        .recovery
+        .as_mut()
+        .unwrap()
+        .model_changed = Some(true);
+    assert_eq!(
+        crate::fleet_contract::projection::lifecycle_for_record(&record),
+        FleetLifecycleWire::Running
+    );
+    assert_eq!(
+        crate::fleet_contract::projection::status_for_record(&record),
+        "ESCALATED"
+    );
+
+    record.done.as_mut().unwrap().error = Some("stale error field".into());
+    assert_ne!(
+        crate::fleet_contract::projection::lifecycle_for_record(&record),
+        FleetLifecycleWire::Failed
+    );
+}
 
 #[test]
 fn projection_outputs_safe_summary_and_detail_without_local_fields() {

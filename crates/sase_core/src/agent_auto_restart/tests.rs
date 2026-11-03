@@ -42,10 +42,26 @@ fn managed_context() -> AutoRestartContextWire {
         has_pending_question: false,
         has_pending_handoff: false,
         is_remote: false,
+        has_hijack_intent: false,
         error_text: INCIDENT_ERROR.to_string(),
         traceback_text: incident_traceback(),
         log_tail: "Refreshing sase runner code after dependency wait"
             .to_string(),
+    }
+}
+
+#[test]
+fn hijack_intent_and_outcome_exclude_auto_restart() {
+    for (has_hijack_intent, outcome) in
+        [(true, Some("failed")), (false, Some("hijacked"))]
+    {
+        let mut context = managed_context();
+        context.has_hijack_intent = has_hijack_intent;
+        context.outcome = outcome.map(str::to_string);
+        let verdict =
+            classify_agent_failure(None, &context, &strong_witnesses());
+        assert_eq!(verdict.mode, MODE_DECLINE);
+        assert_eq!(verdict.reason, "agent_hijacked");
     }
 }
 

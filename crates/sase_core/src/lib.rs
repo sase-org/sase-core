@@ -17,6 +17,7 @@ pub mod agent_clan_record;
 pub mod agent_clan_tribe;
 pub mod agent_cleanup;
 pub mod agent_group_archive;
+pub mod agent_hijack;
 pub mod agent_hold;
 pub mod agent_hold_deadlock;
 pub mod agent_identity;

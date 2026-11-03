@@ -14,10 +14,12 @@ pub fn status_bucket_for_status(canonical_status: &str) -> &'static str {
     match canonical_status {
         "DONE" | "PLAN DONE" | "TALE DONE" | "PLAN REJECTED"
         | "EPIC CREATED" | "STOPPED" | "FEEDBACK" => "Done",
-        "EPIC" | "TALE" | "PLAN" | "QUESTION" => "Stopped",
+        "EPIC" | "TALE" | "PLAN" | "QUESTION" | "HIJACKED" | "INTERRUPTED" => {
+            "Stopped"
+        }
         "STARTING" => "Starting",
         "PLAN APPROVED" | "TALE APPROVED" | "WORKING PLAN" | "WORKING TALE"
-        | "ANSWERED" => "Running",
+        | "ANSWERED" | "ESCALATED" | "CONTINUED" => "Running",
         "QUEUED" => "Queued",
         "WAITING" => "Waiting",
         _ if canonical_status == "PLAN FAILED"
@@ -64,7 +66,14 @@ mod tests {
 
     #[test]
     fn input_pause_statuses_bucket_as_stopped() {
-        for status in ["EPIC", "TALE", "PLAN", "QUESTION"] {
+        for status in [
+            "EPIC",
+            "TALE",
+            "PLAN",
+            "QUESTION",
+            "HIJACKED",
+            "INTERRUPTED",
+        ] {
             assert_eq!(status_bucket_for_status(status), "Stopped", "{status}");
         }
     }
@@ -77,6 +86,8 @@ mod tests {
             "WORKING PLAN",
             "WORKING TALE",
             "ANSWERED",
+            "ESCALATED",
+            "CONTINUED",
             "RUNNING",
             "RETRYING",
             "TESTING",

@@ -343,6 +343,7 @@ fn raw_done_outcomes_are_classified_from_the_marker_vocabulary() {
         ("killed", "failed"),
         ("epic_launch_failed", "failed"),
         ("stopped", "stopped"),
+        ("hijacked", "stopped"),
     ] {
         let result =
             resolve_agent_run_state_observations(observations_request(
