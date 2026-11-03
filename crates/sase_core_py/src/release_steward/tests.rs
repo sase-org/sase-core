@@ -62,11 +62,12 @@ fn releasable_request_json() -> serde_json::Value {
                         "url": "https://example.test/gate-1"
                     },
                     "expected_required_checks": [
-                        {"name": "tests", "source": "branch protection"},
-                        {"name": "lint", "source": "branch protection"}
+                        {"name": "tests", "source": "release-qualification inventory"},
+                        {"name": "lint", "source": "release-qualification inventory"}
                     ],
-                    "expected_checks_source": "branch protection",
-                    "expected_checks_readable": true
+                    "expected_checks_source": "release-qualification inventory",
+                    "expected_checks_readable": true,
+                    "inventory_digest": "d".repeat(64)
                 }
             },
             "release_pr": {

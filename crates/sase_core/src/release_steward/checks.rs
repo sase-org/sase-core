@@ -56,22 +56,19 @@ pub fn master_gate_green(master: &MasterFactsWire) -> Result<(), String> {
     {
         return Err("master gate is not successful".to_string());
     }
-    let checks: Vec<CheckFactsWire> = run
-        .jobs
-        .iter()
-        .map(|job| CheckFactsWire {
-            name: job.name.clone(),
-            conclusion: job.conclusion.unwrap_or(CheckConclusionWire::Missing),
-            is_test: job.is_test,
-            is_lint: job.is_lint,
-            url: None,
-        })
-        .collect();
-    required_checks_green(
-        &master.expected_required_checks,
-        master.expected_checks_readable,
-        &checks,
-    )
+    if run.jobs.is_empty() {
+        return Err("master gate jobs are missing".to_string());
+    }
+    for job in &run.jobs {
+        if !conclusion_is_green(job.conclusion) {
+            return Err(format!(
+                "master gate job {} is {:?}",
+                job.name,
+                job.conclusion.unwrap_or(CheckConclusionWire::Missing)
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn pr_checks_green(

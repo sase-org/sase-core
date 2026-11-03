@@ -1,6 +1,7 @@
 mod cadence;
 mod escalation;
 mod fixtures;
+mod merge_checks;
 mod states;
 
 use super::release_steward_decide;
@@ -40,7 +41,7 @@ fn from_json_round_trips_a_releasable_snapshot() {
 #[test]
 fn from_json_rejects_unknown_fields() {
     let error = super::release_steward_decide_from_json(&json!({
-        "schema_version": 1,
+        "schema_version": RELEASE_STEWARD_WIRE_SCHEMA_VERSION,
         "extra": true
     }))
     .unwrap_err();

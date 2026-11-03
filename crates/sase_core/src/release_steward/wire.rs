@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use super::facts::{EvidenceRefWire, ReleaseStewardSnapshotWire};
 
-pub const RELEASE_STEWARD_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const RELEASE_STEWARD_WIRE_SCHEMA_VERSION: u32 = 2;
 
 pub const RELEASE_STEWARD_CODE_UNSUPPORTED_SCHEMA: &str =
     "unsupported_release_steward_schema";

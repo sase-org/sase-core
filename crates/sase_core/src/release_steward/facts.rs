@@ -171,9 +171,11 @@ pub struct WorkflowRunFactsWire {
 pub struct MasterFactsWire {
     pub sha: String,
     pub gate_run: Option<WorkflowRunFactsWire>,
+    /// Required release-PR checks; never the Master Gate job inventory.
     pub expected_required_checks: Vec<RequiredCheckWire>,
     pub expected_checks_source: String,
     pub expected_checks_readable: bool,
+    pub inventory_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

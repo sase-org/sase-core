@@ -169,15 +169,17 @@ pub fn snapshot() -> ReleaseStewardSnapshotWire {
             expected_required_checks: vec![
                 RequiredCheckWire {
                     name: "tests".to_string(),
-                    source: "branch protection".to_string(),
+                    source: "release-qualification inventory".to_string(),
                 },
                 RequiredCheckWire {
                     name: "lint".to_string(),
-                    source: "branch protection".to_string(),
+                    source: "release-qualification inventory".to_string(),
                 },
             ],
-            expected_checks_source: "branch protection".to_string(),
+            expected_checks_source: "release-qualification inventory"
+                .to_string(),
             expected_checks_readable: true,
+            inventory_digest: "d".repeat(64),
         }),
         release_pr: FactRead::ready(Some(releasable_pr())),
         tags: FactRead::ready(Vec::new()),
