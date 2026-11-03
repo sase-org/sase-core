@@ -21,7 +21,7 @@ use tempfile::TempDir;
 /// Serializes fixture executable publication against fixture-driven
 /// process spawns.
 ///
-/// Exec-ing a file fails with `ETXTBSY` while any process holds it open
+/// On Linux, exec-ing a file fails with `ETXTBSY` while any process holds it open
 /// for writing. A test binary's threads share their descriptors across
 /// forks, so when one thread's `Command::spawn` forks while another
 /// thread still holds a freshly written fixture script open for

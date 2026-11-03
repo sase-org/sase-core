@@ -511,7 +511,7 @@ pub(crate) fn terminate_child_group(child: &mut Child) {
 /// Backstop for the fork-inherited write-descriptor race behind
 /// `ETXTBSY` ("Text file busy", os error 26).
 ///
-/// Exec-ing a file fails with `ETXTBSY` while any process holds it open
+/// On Linux, exec-ing a file fails with `ETXTBSY` while any process holds it open
 /// for writing. In a multithreaded test binary a concurrent
 /// `Command::spawn` can fork while another thread's fixture-script
 /// publication still holds its write descriptor open; the forked child
