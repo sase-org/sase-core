@@ -57,7 +57,7 @@ pub fn agent_hijack_eligibility(
             "missing_capability",
             "launched before hijack support; use x",
         ))
-    } else if !facts.workspace_num.is_some_and(|number| number > 0) {
+    } else if facts.workspace_num.is_none_or(|number| number <= 0) {
         Some(("unnumbered_workspace", "agent has no numbered workspace"))
     } else if !facts.status.as_deref().is_some_and(|status| {
         matches!(
@@ -69,7 +69,7 @@ pub fn agent_hijack_eligibility(
             "ineligible_status",
             "agent is not RUNNING, STARTING, or RETRYING",
         ))
-    } else if !facts.pid.is_some_and(|pid| pid > 0) {
+    } else if facts.pid.is_none_or(|pid| pid <= 0) {
         Some(("missing_pid", "agent process is not running"))
     } else {
         None

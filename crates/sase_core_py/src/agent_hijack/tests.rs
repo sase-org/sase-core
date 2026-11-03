@@ -1,0 +1,171 @@
+use super::*;
+use crate::json_bridge::{json_value_to_py, py_to_json_value};
+use serde_json::json;
+
+fn dict<'py>(py: Python<'py>, value: serde_json::Value) -> Bound<'py, PyDict> {
+    json_value_to_py(py, &value)
+        .unwrap()
+        .bind(py)
+        .downcast::<PyDict>()
+        .unwrap()
+        .clone()
+}
+
+fn escalation_request() -> serde_json::Value {
+    json!({
+        "schema_version": 1,
+        "model_facts": {
+            "alias": "large",
+            "alias_trail": [],
+            "origin": null,
+            "provider": "claude",
+            "model": "opus",
+            "effort": "high",
+        },
+        "ladder": ["@large", "@xlarge"],
+        "alias_candidates": {
+            "@large": ["claude/opus@high", "codex/gpt-6.1-sol@xhigh"],
+            "@xlarge": ["claude/opus@xhigh", "codex/gpt-6.1-sol@xhigh"],
+        },
+        "lineage_to_rung": null,
+        "stalled_concrete": "claude/opus@high",
+    })
+}
+
+fn continuation_request() -> serde_json::Value {
+    json!({
+        "schema_version": 1,
+        "original_prompt": "Do the thing.\n%model:@large\n",
+        "hijacked_name": "sase-7f.2",
+        "model_target": "claude/opus@xhigh",
+        "evidence": {
+            "run_duration_display": "47m",
+            "last_tool": "Bash `just check`",
+            "last_tool_age": "22m",
+            "files_changed": 5,
+            "insertions": 212,
+            "deletions": 31,
+            "snapshot_ref": "snap-abc",
+            "model_display": "claude/opus@high",
+        },
+        "context_mode": "fork",
+        "transcript_path": null,
+        "guidance_requested": false,
+        "stale_lock_files": [],
+    })
+}
+
+#[test]
+fn hijack_bindings_are_registered() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        register_agent_hijack(&module).unwrap();
+        assert!(module.getattr("agent_hijack_escalation_target").is_ok());
+        assert!(module.getattr("agent_hijack_continuation_prompt").is_ok());
+        assert!(module.getattr("strip_hijack_launch_directives").is_ok());
+        assert!(module.getattr("normalize_hijack_rung").is_ok());
+        assert_eq!(py_agent_hijack_escalation_wire_schema_version(), 1);
+        assert_eq!(py_agent_hijack_continuation_wire_schema_version(), 1);
+    });
+}
+
+#[test]
+fn escalation_binding_escalates() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let request = dict(py, escalation_request());
+        let result = py_agent_hijack_escalation_target(py, &request).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["available"], json!(true));
+        assert_eq!(value["kind"], json!("escalate"));
+        assert_eq!(value["to_rung"], json!("@xlarge"));
+        assert_eq!(value["concrete"], json!("claude/opus@xhigh"));
+    });
+}
+
+#[test]
+fn continuation_binding_builds_prompt() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let request = dict(py, continuation_request());
+        let result = py_agent_hijack_continuation_prompt(py, &request).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        let prompt = value.as_str().unwrap().to_owned();
+        assert!(prompt.starts_with("%model:claude/opus@xhigh\n"));
+        assert!(prompt.contains("#fork:sase-7f.2"));
+        assert!(prompt.contains("Hijack continuation."));
+        assert!(!prompt.contains("%model:@large"));
+    });
+}
+
+#[test]
+fn strip_binding_preserves_fenced_model() {
+    assert_eq!(
+        py_strip_hijack_launch_directives(
+            "```\n%model:keep\n```\n%model:drop\nok"
+        ),
+        "```\n%model:keep\n```\nok",
+    );
+}
+
+#[test]
+fn hijack_bindings_are_registered_and_advance_records() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        register_agent_hijack(&module).unwrap();
+        assert_eq!(py_agent_hijack_wire_schema_version(), 1);
+        assert!(module.getattr("agent_hijack_eligibility").is_ok());
+
+        let record = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "state": "requested",
+                "revision": 0,
+            }),
+        );
+        let event = dict(py, json!({"event": "begin_stop"}));
+        let updated =
+            py_advance_agent_hijack_record(py, &record, &event).unwrap();
+        let value = py_to_json_value(updated.bind(py)).unwrap();
+        assert_eq!(value["state"], json!("stopping"));
+        assert_eq!(value["revision"], json!(1));
+    });
+}
+
+#[test]
+fn eligibility_and_done_status_bindings_share_core_rules() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let facts = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "is_local": true,
+                "is_llm_agent": true,
+                "workspace_num": 4,
+                "status": "RUNNING",
+                "lifecycle_phase": "provider_running",
+                "has_hijack_capability": true,
+                "pid": 42,
+            }),
+        );
+        let decision = py_agent_hijack_eligibility(py, &facts).unwrap();
+        let value = py_to_json_value(decision.bind(py)).unwrap();
+        assert_eq!(value["eligible"], json!(true));
+
+        let recovery =
+            dict(py, json!({"state": "resolved", "model_changed": true}));
+        assert_eq!(
+            py_agent_hijack_status_for_done_marker(
+                Some("hijacked"),
+                Some(&recovery),
+            )
+            .unwrap()
+            .as_deref(),
+            Some("ESCALATED")
+        );
+    });
+}

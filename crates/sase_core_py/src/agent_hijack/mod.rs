@@ -1,4 +1,5 @@
-//! PyO3 bindings for Agent Hijack state and eligibility policy.
+//! PyO3 bindings for Agent Hijack state, eligibility, escalation, and
+//! continuation policy.
 
 use crate::json_bridge::{py_to_json_value, serialize_to_py};
 use crate::prelude::*;
@@ -6,11 +7,17 @@ use pyo3::wrap_pyfunction;
 use sase_core::agent_auto_restart::AgentRecoveryWire;
 use sase_core::agent_hijack::{
     advance_agent_hijack_record as core_advance_record,
+    agent_hijack_continuation_prompt as core_continuation,
     agent_hijack_eligibility as core_eligibility,
+    agent_hijack_escalation_target as core_escalation,
     agent_hijack_status_for_done_marker as core_done_status,
     agent_hijack_wire_schema_version as core_wire_version,
-    AgentHijackEligibilityFactsWire, AgentHijackEventWire,
-    AgentHijackRecordWire,
+    normalize_hijack_rung as core_normalize_rung,
+    strip_launch_directives as core_strip, AgentHijackContinuationRequestWire,
+    AgentHijackEligibilityFactsWire, AgentHijackEscalationRequestWire,
+    AgentHijackEventWire, AgentHijackRecordWire,
+    AGENT_HIJACK_CONTINUATION_WIRE_SCHEMA_VERSION,
+    AGENT_HIJACK_ESCALATION_WIRE_SCHEMA_VERSION,
 };
 
 #[pyfunction]
@@ -88,6 +95,72 @@ fn py_agent_hijack_status_for_done_marker<'py>(
     Ok(core_done_status(outcome, recovery.as_ref()).map(str::to_string))
 }
 
+/// Return the hijack escalation wire schema version.
+#[pyfunction]
+#[pyo3(name = "agent_hijack_escalation_wire_schema_version")]
+fn py_agent_hijack_escalation_wire_schema_version() -> u32 {
+    AGENT_HIJACK_ESCALATION_WIRE_SCHEMA_VERSION
+}
+
+/// Return the hijack continuation wire schema version.
+#[pyfunction]
+#[pyo3(name = "agent_hijack_continuation_wire_schema_version")]
+fn py_agent_hijack_continuation_wire_schema_version() -> u32 {
+    AGENT_HIJACK_CONTINUATION_WIRE_SCHEMA_VERSION
+}
+
+/// Normalize a ladder rung to `@`-prefixed canonical form.
+#[pyfunction]
+#[pyo3(name = "normalize_hijack_rung")]
+fn py_normalize_hijack_rung(value: &str) -> String {
+    core_normalize_rung(value)
+}
+
+/// Compute the never-downgrade escalation target for a hijacked run.
+#[pyfunction]
+#[pyo3(name = "agent_hijack_escalation_target")]
+fn py_agent_hijack_escalation_target<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: AgentHijackEscalationRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid AgentHijackEscalationRequestWire dict: {error}"
+        ))
+    })?;
+    let result = py.allow_threads(|| core_escalation(&request));
+    serialize_to_py(py, &result)
+}
+
+/// Build the continuation prompt for a hijack successor.
+#[pyfunction]
+#[pyo3(name = "agent_hijack_continuation_prompt")]
+fn py_agent_hijack_continuation_prompt<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: AgentHijackContinuationRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid AgentHijackContinuationRequestWire dict: {error}"
+        ))
+    })?;
+    let prompt = py.allow_threads(|| core_continuation(&request));
+    serialize_to_py(py, &prompt)
+}
+
+/// Strip launch-only directives, preserving fenced code blocks.
+#[pyfunction]
+#[pyo3(name = "strip_hijack_launch_directives")]
+fn py_strip_hijack_launch_directives(prompt: &str) -> String {
+    core_strip(prompt)
+}
+
 pub(crate) fn register_agent_hijack(
     module: &Bound<'_, PyModule>,
 ) -> PyResult<()> {
@@ -105,85 +178,29 @@ pub(crate) fn register_agent_hijack(
         py_agent_hijack_status_for_done_marker,
         module
     )?)?;
+    module.add_function(wrap_pyfunction!(
+        py_agent_hijack_escalation_wire_schema_version,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        py_agent_hijack_continuation_wire_schema_version,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(py_normalize_hijack_rung, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        py_agent_hijack_escalation_target,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        py_agent_hijack_continuation_prompt,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        py_strip_hijack_launch_directives,
+        module
+    )?)?;
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::json_bridge::{json_value_to_py, py_to_json_value};
-    use serde_json::json;
-
-    fn dict<'py>(
-        py: Python<'py>,
-        value: serde_json::Value,
-    ) -> Bound<'py, PyDict> {
-        json_value_to_py(py, &value)
-            .unwrap()
-            .bind(py)
-            .downcast::<PyDict>()
-            .unwrap()
-            .clone()
-    }
-
-    #[test]
-    fn hijack_bindings_are_registered_and_advance_records() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
-            register_agent_hijack(&module).unwrap();
-            assert_eq!(py_agent_hijack_wire_schema_version(), 1);
-            assert!(module.getattr("agent_hijack_eligibility").is_ok());
-
-            let record = dict(
-                py,
-                json!({
-                    "schema_version": 1,
-                    "state": "requested",
-                    "revision": 0,
-                }),
-            );
-            let event = dict(py, json!({"event": "begin_stop"}));
-            let updated =
-                py_advance_agent_hijack_record(py, &record, &event).unwrap();
-            let value = py_to_json_value(updated.bind(py)).unwrap();
-            assert_eq!(value["state"], json!("stopping"));
-            assert_eq!(value["revision"], json!(1));
-        });
-    }
-
-    #[test]
-    fn eligibility_and_done_status_bindings_share_core_rules() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let facts = dict(
-                py,
-                json!({
-                    "schema_version": 1,
-                    "is_local": true,
-                    "is_llm_agent": true,
-                    "workspace_num": 4,
-                    "status": "RUNNING",
-                    "lifecycle_phase": "provider_running",
-                    "has_hijack_capability": true,
-                    "pid": 42,
-                }),
-            );
-            let decision = py_agent_hijack_eligibility(py, &facts).unwrap();
-            let value = py_to_json_value(decision.bind(py)).unwrap();
-            assert_eq!(value["eligible"], json!(true));
-
-            let recovery =
-                dict(py, json!({"state": "resolved", "model_changed": true}));
-            assert_eq!(
-                py_agent_hijack_status_for_done_marker(
-                    Some("hijacked"),
-                    Some(&recovery),
-                )
-                .unwrap()
-                .as_deref(),
-                Some("ESCALATED")
-            );
-        });
-    }
-}
+mod tests;
