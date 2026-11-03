@@ -47,6 +47,7 @@ mod fleet_attention;
 mod footprint;
 mod goals;
 mod instruction_manifest;
+mod instruction_readout;
 mod json_bridge;
 mod macro_input_types;
 mod memory_history;
@@ -134,5 +135,6 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     telemetry::register_telemetry(m)?;
     prompt_prediction::register_prompt_prediction(m)?;
     instruction_manifest::register_instruction_manifest(m)?;
+    instruction_readout::register_instruction_readout(m)?;
     Ok(())
 }
