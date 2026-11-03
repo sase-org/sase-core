@@ -80,8 +80,13 @@ pub struct LaunchAdmissionJournalEntryWire {
     pub seq: u64,
     pub logical_id: String,
     pub phase: LaunchUnitPhaseWire,
+    /// Stable request fingerprint. Hijack keep-work recovery stores this
+    /// on `AgentHijackRecordWire.admission_request_id` so a retry addresses
+    /// the same durable request instead of submitting another launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// Reserved successor identity. Hijack recovery copies this onto
+    /// `AgentHijackRecordWire.admission_identity`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

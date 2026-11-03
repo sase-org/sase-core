@@ -12,12 +12,17 @@ use sase_core::agent_hijack::{
     agent_hijack_escalation_target as core_escalation,
     agent_hijack_status_for_done_marker as core_done_status,
     agent_hijack_wire_schema_version as core_wire_version,
+    hijack_recovery_preview as core_preview,
+    hijack_recovery_reconcile as core_reconcile,
     normalize_hijack_rung as core_normalize_rung,
     strip_launch_directives as core_strip, AgentHijackContinuationRequestWire,
     AgentHijackEligibilityFactsWire, AgentHijackEscalationRequestWire,
-    AgentHijackEventWire, AgentHijackRecordWire,
+    AgentHijackEventWire, AgentHijackReconcileFactsWire, AgentHijackRecordWire,
+    AgentHijackRecoveryPreviewRequestWire,
     AGENT_HIJACK_CONTINUATION_WIRE_SCHEMA_VERSION,
     AGENT_HIJACK_ESCALATION_WIRE_SCHEMA_VERSION,
+    AGENT_HIJACK_RECONCILE_WIRE_SCHEMA_VERSION,
+    AGENT_HIJACK_RECOVERY_PREVIEW_WIRE_SCHEMA_VERSION,
 };
 
 #[pyfunction]
@@ -161,6 +166,71 @@ fn py_strip_hijack_launch_directives(prompt: &str) -> String {
     core_strip(prompt)
 }
 
+/// Return the hijack recovery preview wire schema version.
+#[pyfunction]
+#[pyo3(name = "hijack_recovery_preview_wire_schema_version")]
+fn py_hijack_recovery_preview_wire_schema_version() -> u32 {
+    AGENT_HIJACK_RECOVERY_PREVIEW_WIRE_SCHEMA_VERSION
+}
+
+/// Assemble a side-effect-free keep-work recovery preview.
+#[pyfunction]
+#[pyo3(name = "hijack_recovery_preview")]
+fn py_hijack_recovery_preview<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: AgentHijackRecoveryPreviewRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid AgentHijackRecoveryPreviewRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    let preview = py
+        .allow_threads(|| core_preview(&request))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &preview)
+}
+
+/// Return the hijack recovery reconcile wire schema version.
+#[pyfunction]
+#[pyo3(name = "hijack_recovery_reconcile_wire_schema_version")]
+fn py_hijack_recovery_reconcile_wire_schema_version() -> u32 {
+    AGENT_HIJACK_RECONCILE_WIRE_SCHEMA_VERSION
+}
+
+/// Decide how to repair an abandoned resolving hijack record.
+#[pyfunction]
+#[pyo3(name = "hijack_recovery_reconcile")]
+fn py_hijack_recovery_reconcile<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyDict>,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let record: AgentHijackRecordWire = serde_json::from_value(
+        py_to_json_value(record.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "record is not a valid AgentHijackRecordWire dict: {error}"
+        ))
+    })?;
+    let facts: AgentHijackReconcileFactsWire = serde_json::from_value(
+        py_to_json_value(facts.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "facts is not a valid AgentHijackReconcileFactsWire dict: {error}"
+        ))
+    })?;
+    let decision = py
+        .allow_threads(|| core_reconcile(&record, &facts))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &decision)
+}
+
 pub(crate) fn register_agent_hijack(
     module: &Bound<'_, PyModule>,
 ) -> PyResult<()> {
@@ -197,6 +267,20 @@ pub(crate) fn register_agent_hijack(
     )?)?;
     module.add_function(wrap_pyfunction!(
         py_strip_hijack_launch_directives,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        py_hijack_recovery_preview_wire_schema_version,
+        module
+    )?)?;
+    module
+        .add_function(wrap_pyfunction!(py_hijack_recovery_preview, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        py_hijack_recovery_reconcile_wire_schema_version,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        py_hijack_recovery_reconcile,
         module
     )?)?;
     Ok(())

@@ -19,6 +19,7 @@ pub const HIJACK_EVENT_CONFIRMED_STOP: &str = "confirmed_stop";
 pub const HIJACK_EVENT_STOP_FAILED: &str = "stop_failed";
 pub const HIJACK_EVENT_FINISHED_FIRST: &str = "finished_first";
 pub const HIJACK_EVENT_BEGIN_RESOLUTION: &str = "begin_resolution";
+pub const HIJACK_EVENT_RECORD_LAUNCH: &str = "record_launch";
 pub const HIJACK_EVENT_COMPLETE_RESOLUTION: &str = "complete_resolution";
 pub const HIJACK_EVENT_RESOLUTION_FAILED: &str = "resolution_failed";
 pub const HIJACK_EVENT_EXPIRE: &str = "expire";
@@ -30,6 +31,26 @@ pub const HIJACK_ACTION_RESTART: &str = "restart";
 pub const HIJACK_ACTION_EDIT: &str = "edit";
 pub const HIJACK_ACTION_VIEW: &str = "view";
 pub const HIJACK_ACTION_DISMISS: &str = "dismiss";
+
+/// Durable successor launch stage persisted on a resolving record.
+pub const HIJACK_LAUNCH_QUEUED: &str = "queued";
+pub const HIJACK_LAUNCH_PREPARED: &str = "prepared";
+pub const HIJACK_LAUNCH_CONFIRMED: &str = "confirmed";
+
+/// Observed successor states supplied to recovery reconciliation.
+pub const HIJACK_SUCCESSOR_ABSENT: &str = "absent";
+pub const HIJACK_SUCCESSOR_QUEUED: &str = "queued";
+pub const HIJACK_SUCCESSOR_PREPARED: &str = "prepared";
+pub const HIJACK_SUCCESSOR_LIVE: &str = "live";
+pub const HIJACK_SUCCESSOR_COMPLETED: &str = "completed";
+pub const HIJACK_SUCCESSOR_MISMATCHED: &str = "mismatched";
+pub const HIJACK_SUCCESSOR_UNCERTAIN: &str = "uncertain";
+
+/// Reconciliation outcomes. `retain_with_error` keeps custody.
+pub const HIJACK_RECONCILE_KEEP_RESOLVING: &str = "keep_resolving";
+pub const HIJACK_RECONCILE_ADOPT: &str = "adopt";
+pub const HIJACK_RECONCILE_RETURN_TO_HELD: &str = "return_to_held";
+pub const HIJACK_RECONCILE_RETAIN_WITH_ERROR: &str = "retain_with_error";
 
 /// Per-repository change summary captured when a run is hijacked.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +151,37 @@ pub struct AgentHijackRecordWire {
     pub concrete_target_model: Option<String>,
     #[serde(default)]
     pub model_changed: Option<bool>,
+    /// Pid of the process that won the held→resolving CAS.
+    #[serde(default)]
+    pub resolver_pid: Option<i64>,
+    /// Process-identity token for [`Self::resolver_pid`] (`boot_id:start_ticks`).
+    #[serde(default)]
+    pub resolver_process_identity_token: Option<String>,
+    /// Durable successor launch identity. Names alone are not proof.
+    ///
+    /// Keep-work recovery binds this to one admission request by storing
+    /// [`crate::agent_launch::LaunchAdmissionJournalEntryWire::fingerprint`]
+    /// in [`Self::admission_request_id`] and that entry's `identity` in
+    /// [`Self::admission_identity`]. Retries must address that request
+    /// rather than submit another. Wait following uses
+    /// `recovery.successor` after settlement; wait wires are unchanged.
+    #[serde(default)]
+    pub launch_identity: Option<String>,
+    #[serde(default)]
+    pub admission_request_id: Option<String>,
+    #[serde(default)]
+    pub admission_identity: Option<String>,
+    /// `queued`, `prepared`, or `confirmed`.
+    #[serde(default)]
+    pub launch_stage: Option<String>,
+    #[serde(default)]
+    pub successor_pid: Option<i64>,
+    #[serde(default)]
+    pub successor_process_identity_token: Option<String>,
+    #[serde(default)]
+    pub successor_artifacts_dir: Option<String>,
+    #[serde(default)]
+    pub inheritance_acknowledged: Option<bool>,
     #[serde(default)]
     pub error: Option<String>,
     #[serde(default)]
@@ -148,6 +200,26 @@ pub struct AgentHijackEventWire {
     pub concrete_target_model: Option<String>,
     #[serde(default)]
     pub model_changed: Option<bool>,
+    #[serde(default)]
+    pub resolver_pid: Option<i64>,
+    #[serde(default)]
+    pub resolver_process_identity_token: Option<String>,
+    #[serde(default)]
+    pub launch_identity: Option<String>,
+    #[serde(default)]
+    pub admission_request_id: Option<String>,
+    #[serde(default)]
+    pub admission_identity: Option<String>,
+    #[serde(default)]
+    pub launch_stage: Option<String>,
+    #[serde(default)]
+    pub successor_pid: Option<i64>,
+    #[serde(default)]
+    pub successor_process_identity_token: Option<String>,
+    #[serde(default)]
+    pub successor_artifacts_dir: Option<String>,
+    #[serde(default)]
+    pub inheritance_acknowledged: Option<bool>,
     #[serde(default)]
     pub error: Option<String>,
     #[serde(default)]

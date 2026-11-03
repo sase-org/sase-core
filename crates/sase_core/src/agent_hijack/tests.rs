@@ -370,3 +370,121 @@ fn eligibility_rejects_unsupported_schema() {
     facts.schema_version += 1;
     assert!(agent_hijack_eligibility(&facts).is_err());
 }
+
+#[test]
+fn old_v1_records_round_trip_without_recovery_identity() {
+    let json =
+        r#"{"schema_version":1,"state":"held","revision":3,"hijack_id":"h-1"}"#;
+    let record: AgentHijackRecordWire = serde_json::from_str(json).unwrap();
+    assert_eq!(record.state, HIJACK_HELD);
+    assert_eq!(record.revision, 3);
+    assert!(record.resolver_pid.is_none());
+    assert!(record.resolver_process_identity_token.is_none());
+    assert!(record.launch_identity.is_none());
+    assert!(record.admission_request_id.is_none());
+    let encoded = serde_json::to_value(&record).unwrap();
+    let again: AgentHijackRecordWire = serde_json::from_value(encoded).unwrap();
+    assert_eq!(again, record);
+}
+
+#[test]
+fn selected_model_and_reservation_survive_launch_progress_and_complete() {
+    let mut begin = event(HIJACK_EVENT_BEGIN_RESOLUTION);
+    begin.action = Some(HIJACK_ACTION_ESCALATE.to_string());
+    begin.reserved_successor_name = Some("agent.2".to_string());
+    begin.concrete_target_model = Some("openai/gpt@xhigh".to_string());
+    begin.model_changed = Some(true);
+    begin.resolver_pid = Some(77);
+    begin.resolver_process_identity_token = Some("boot:1".to_string());
+    let resolving =
+        advance_agent_hijack_record(&record(HIJACK_HELD), &begin).unwrap();
+    assert_eq!(resolving.state, HIJACK_RESOLVING);
+    assert_eq!(resolving.resolver_pid, Some(77));
+    assert_eq!(
+        resolving.resolver_process_identity_token.as_deref(),
+        Some("boot:1")
+    );
+    assert_eq!(
+        resolving.reserved_successor_name.as_deref(),
+        Some("agent.2")
+    );
+    assert_eq!(
+        resolving.concrete_target_model.as_deref(),
+        Some("openai/gpt@xhigh")
+    );
+
+    let mut progress = event(HIJACK_EVENT_RECORD_LAUNCH);
+    progress.launch_identity = Some("launch-abc".to_string());
+    progress.admission_request_id = Some("req-1".to_string());
+    progress.admission_identity = Some("agent.2".to_string());
+    progress.launch_stage = Some(HIJACK_LAUNCH_QUEUED.to_string());
+    let queued = advance_agent_hijack_record(&resolving, &progress).unwrap();
+    assert_eq!(queued.state, HIJACK_RESOLVING);
+    assert_eq!(queued.revision, resolving.revision + 1);
+    assert_eq!(queued.launch_identity.as_deref(), Some("launch-abc"));
+    assert_eq!(queued.launch_stage.as_deref(), Some(HIJACK_LAUNCH_QUEUED));
+    assert_eq!(
+        queued.concrete_target_model.as_deref(),
+        Some("openai/gpt@xhigh")
+    );
+    assert_eq!(queued.reserved_successor_name.as_deref(), Some("agent.2"));
+    assert_eq!(queued.resolver_pid, Some(77));
+
+    let mut confirm = event(HIJACK_EVENT_RECORD_LAUNCH);
+    confirm.launch_stage = Some(HIJACK_LAUNCH_CONFIRMED.to_string());
+    confirm.successor_pid = Some(101);
+    confirm.successor_process_identity_token = Some("boot:9".to_string());
+    confirm.successor_artifacts_dir = Some("/tmp/a".to_string());
+    confirm.inheritance_acknowledged = Some(true);
+    let confirmed = advance_agent_hijack_record(&queued, &confirm).unwrap();
+    assert_eq!(confirmed.state, HIJACK_RESOLVING);
+    assert_eq!(confirmed.launch_identity.as_deref(), Some("launch-abc"));
+    assert!(confirmed.inheritance_acknowledged.unwrap());
+
+    let completed = advance_agent_hijack_record(
+        &confirmed,
+        &event(HIJACK_EVENT_COMPLETE_RESOLUTION),
+    )
+    .unwrap();
+    assert_eq!(completed.state, HIJACK_RESOLVED);
+    assert_eq!(
+        completed.concrete_target_model.as_deref(),
+        Some("openai/gpt@xhigh")
+    );
+    assert_eq!(
+        completed.reserved_successor_name.as_deref(),
+        Some("agent.2")
+    );
+    assert_eq!(completed.launch_identity.as_deref(), Some("launch-abc"));
+    assert_eq!(completed.resolver_pid, Some(77));
+}
+
+#[test]
+fn record_launch_is_illegal_outside_resolving_and_failure_clears_launch_evidence(
+) {
+    let mut progress = event(HIJACK_EVENT_RECORD_LAUNCH);
+    progress.launch_identity = Some("launch-abc".to_string());
+    assert!(
+        advance_agent_hijack_record(&record(HIJACK_HELD), &progress).is_err()
+    );
+
+    let mut begin = event(HIJACK_EVENT_BEGIN_RESOLUTION);
+    begin.action = Some(HIJACK_ACTION_CONTINUE.to_string());
+    begin.reserved_successor_name = Some("agent.2".to_string());
+    begin.concrete_target_model = Some("claude/opus@high".to_string());
+    begin.resolver_pid = Some(5);
+    begin.launch_identity = Some("launch-abc".to_string());
+    let resolving =
+        advance_agent_hijack_record(&record(HIJACK_HELD), &begin).unwrap();
+    let mut failed = event(HIJACK_EVENT_RESOLUTION_FAILED);
+    failed.error = Some("spawn failed".to_string());
+    let held = advance_agent_hijack_record(&resolving, &failed).unwrap();
+    assert_eq!(held.state, HIJACK_HELD);
+    assert!(held.launch_identity.is_none());
+    assert!(held.resolver_pid.is_none());
+    assert_eq!(held.error.as_deref(), Some("spawn failed"));
+    assert_eq!(
+        held.concrete_target_model.as_deref(),
+        Some("claude/opus@high")
+    );
+}

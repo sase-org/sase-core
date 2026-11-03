@@ -65,8 +65,12 @@ fn hijack_bindings_are_registered() {
         assert!(module.getattr("agent_hijack_continuation_prompt").is_ok());
         assert!(module.getattr("strip_hijack_launch_directives").is_ok());
         assert!(module.getattr("normalize_hijack_rung").is_ok());
+        assert!(module.getattr("hijack_recovery_preview").is_ok());
+        assert!(module.getattr("hijack_recovery_reconcile").is_ok());
         assert_eq!(py_agent_hijack_escalation_wire_schema_version(), 1);
         assert_eq!(py_agent_hijack_continuation_wire_schema_version(), 1);
+        assert_eq!(py_hijack_recovery_preview_wire_schema_version(), 1);
+        assert_eq!(py_hijack_recovery_reconcile_wire_schema_version(), 1);
     });
 }
 
@@ -167,5 +171,65 @@ fn eligibility_and_done_status_bindings_share_core_rules() {
             .as_deref(),
             Some("ESCALATED")
         );
+    });
+}
+
+#[test]
+fn preview_and_reconcile_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let request = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "hijack_id": "h-1",
+                "revision": 4,
+                "state": "held",
+                "header": {"agent_name": "agent.1", "workspace_num": 4},
+                "escalate": {
+                    "schema_version": 1,
+                    "available": true,
+                    "kind": "escalate",
+                    "from_rung": "@large",
+                    "to_rung": "@xlarge",
+                    "concrete": "claude/opus@xhigh",
+                },
+                "continue_target": "claude/opus@high",
+            }),
+        );
+        let preview = py_hijack_recovery_preview(py, &request).unwrap();
+        let value = py_to_json_value(preview.bind(py)).unwrap();
+        assert_eq!(value["default_action"], json!("escalate"));
+        assert_eq!(value["actions"][0]["target"], json!("claude/opus@xhigh"));
+
+        let record = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "state": "resolving",
+                "revision": 4,
+                "reserved_successor_name": "agent.2",
+                "resolver_pid": 99,
+                "resolver_process_identity_token": "boot:1",
+            }),
+        );
+        let facts = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "resolving_age_seconds": 90.0,
+                "min_age_seconds": 60.0,
+                "resolver": {
+                    "pid_live": false,
+                    "identity_matches": false,
+                },
+                "successor": {"kind": "absent"},
+            }),
+        );
+        let decision =
+            py_hijack_recovery_reconcile(py, &record, &facts).unwrap();
+        let value = py_to_json_value(decision.bind(py)).unwrap();
+        assert_eq!(value["outcome"], json!("return_to_held"));
+        assert_eq!(value["code"], json!("absent"));
     });
 }

@@ -1,15 +1,18 @@
-//! Agent Hijack ledger, eligibility, status, escalation, and continuation
-//! policy.
+//! Agent Hijack ledger, eligibility, status, escalation, continuation,
+//! recovery preview, and reconciliation policy.
 //!
 //! Shared semantics every frontend must match: the pure ledger, eligibility,
-//! and status policy plus the never-downgrade rung walk and the successor
-//! prompt shape. Python owns file I/O, locks, signals, launches, and the
+//! and status policy plus the never-downgrade rung walk, the successor
+//! prompt shape, keep-work preview assembly, and abandoned-resolution
+//! decisions. Python owns file I/O, locks, signals, launches, and the
 //! CLI/TUI. Mirrors the `agent_auto_restart` split.
 
 pub mod continuation;
 mod eligibility;
 pub mod escalation;
 mod ledger;
+pub mod preview;
+pub mod reconcile;
 mod status;
 pub mod wire;
 
@@ -29,6 +32,18 @@ pub use escalation::{
     AgentHijackModelFactsWire, AGENT_HIJACK_ESCALATION_WIRE_SCHEMA_VERSION,
 };
 pub use ledger::{advance_agent_hijack_record, AgentHijackLedgerError};
+pub use preview::{
+    hijack_recovery_preview, AgentHijackPreviewError,
+    AgentHijackRecoveryActionWire, AgentHijackRecoveryHeaderWire,
+    AgentHijackRecoveryPreviewRequestWire, AgentHijackRecoveryPreviewWire,
+    AGENT_HIJACK_RECOVERY_PREVIEW_WIRE_SCHEMA_VERSION,
+};
+pub use reconcile::{
+    hijack_recovery_reconcile, AgentHijackReconcileDecisionWire,
+    AgentHijackReconcileError, AgentHijackReconcileFactsWire,
+    AgentHijackResolverObservationWire, AgentHijackSuccessorObservationWire,
+    AGENT_HIJACK_RECONCILE_WIRE_SCHEMA_VERSION,
+};
 pub use status::{
     agent_hijack_status_for_done_marker, CONTINUED_STATUS, ESCALATED_STATUS,
     HIJACKED_STATUS, INTERRUPTED_STATUS,
