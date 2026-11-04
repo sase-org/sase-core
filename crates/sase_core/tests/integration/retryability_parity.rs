@@ -1,8 +1,9 @@
 use sase_core::retryability::{
     classify_failure_retryability, retryability_wire_schema_version,
     FailureObservationWire, RETRYABILITY_VERDICT_AFTER_DELAY,
+    RETRYABILITY_VERDICT_CREDENTIAL_UNCONFIRMED,
     RETRYABILITY_VERDICT_PERMANENT, RETRYABILITY_VERDICT_TRANSIENT,
-    RETRYABILITY_WIRE_SCHEMA_VERSION, RETRY_OPERATION_GH,
+    RETRYABILITY_WIRE_SCHEMA_VERSION, RETRY_OPERATION_GH, RETRY_OPERATION_GIT,
     RETRY_OPERATION_GIT_CLONE,
 };
 use serde_json::json;
@@ -43,6 +44,24 @@ fn retryability_verdict_serializes_to_python_shape() {
 }
 
 #[test]
+fn credential_unconfirmed_verdict_serializes_to_python_shape() {
+    let verdict = classify_failure_retryability(&observation(
+        RETRY_OPERATION_GIT_CLONE,
+        "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+    ));
+    assert_eq!(
+        serde_json::to_value(&verdict).unwrap(),
+        json!({
+            "schema_version": 1,
+            "verdict": RETRYABILITY_VERDICT_CREDENTIAL_UNCONFIRMED,
+            "reason": "authentication: ssh publickey denied; GitHub may be rejecting a valid key transiently",
+            "retryable": false,
+            "retry_after_seconds": null,
+        })
+    );
+}
+
+#[test]
 fn parity_cases_cover_transient_delayed_and_permanent_verdicts() {
     let cases = [
         (
@@ -66,6 +85,30 @@ fn parity_cases_cover_transient_delayed_and_permanent_verdicts() {
         (
             RETRY_OPERATION_GH,
             "gh: Not Found (HTTP 404)",
+            RETRYABILITY_VERDICT_PERMANENT,
+            false,
+        ),
+        (
+            RETRY_OPERATION_GIT_CLONE,
+            "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+            RETRYABILITY_VERDICT_CREDENTIAL_UNCONFIRMED,
+            false,
+        ),
+        (
+            RETRY_OPERATION_GIT,
+            "Permission denied (publickey,keyboard-interactive).",
+            RETRYABILITY_VERDICT_CREDENTIAL_UNCONFIRMED,
+            false,
+        ),
+        (
+            RETRY_OPERATION_GH,
+            "git@github.com: Permission denied (publickey).",
+            RETRYABILITY_VERDICT_PERMANENT,
+            false,
+        ),
+        (
+            RETRY_OPERATION_GIT_CLONE,
+            "ERROR: denied to deploy key for org/repo",
             RETRYABILITY_VERDICT_PERMANENT,
             false,
         ),

@@ -7,6 +7,8 @@ pub const RETRYABILITY_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const RETRYABILITY_VERDICT_TRANSIENT: &str = "retryable_transient";
 pub const RETRYABILITY_VERDICT_AFTER_DELAY: &str = "retryable_after_delay";
 pub const RETRYABILITY_VERDICT_PERMANENT: &str = "permanent";
+pub const RETRYABILITY_VERDICT_CREDENTIAL_UNCONFIRMED: &str =
+    "credential_unconfirmed";
 
 pub const RETRY_OPERATION_GIT: &str = "git";
 pub const RETRY_OPERATION_GIT_CLONE: &str = "git_clone";
