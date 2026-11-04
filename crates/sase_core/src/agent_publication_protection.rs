@@ -9,7 +9,10 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::note_attachment::{AttachmentScanHitKindWire, AttachmentScanWire};
+use crate::note_attachment::{
+    AttachmentScanHitKindWire, AttachmentScanWire,
+    ATTACHMENT_SCANNER_RULES_VERSION,
+};
 use crate::sidecar_publication::SidecarPublicationClassificationWire;
 
 pub const AGENT_PUBLICATION_PROTECTION_WIRE_SCHEMA_VERSION: u32 = 1;
@@ -97,6 +100,16 @@ pub struct PublicationProtectionLedgerWire {
     pub schema_version: u32,
     #[serde(default)]
     pub records: Vec<PublicationProtectionRecordWire>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded: Vec<PublicationProtectionSupersededWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublicationProtectionSupersededWire {
+    pub record: PublicationProtectionRecordWire,
+    pub superseded_at: f64,
+    pub superseded_by_rules_version: u32,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -162,6 +175,10 @@ pub struct PublicationProtectionResolveVerifiedCleanRequestWire {
     pub schema_version: u32,
     pub ledger: PublicationProtectionLedgerWire,
     pub identity: PublicationProtectionIdentityWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_rules_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<f64>,
 }
 
 /// Map the attachment scanner result into the fail-closed publication policy.
@@ -253,6 +270,7 @@ pub fn publication_protection_ledger_empty() -> PublicationProtectionLedgerWire
     PublicationProtectionLedgerWire {
         schema_version: AGENT_PUBLICATION_PROTECTION_WIRE_SCHEMA_VERSION,
         records: Vec::new(),
+        superseded: Vec::new(),
     }
 }
 
@@ -278,10 +296,79 @@ pub fn publication_protection_ledger_validate(
         record.rules_versions.dedup();
     }
     records.sort_by_key(record_key);
+    let mut superseded = ledger.superseded.clone();
+    for entry in &mut superseded {
+        validate_record(&mut entry.record)?;
+        validate_timestamp(entry.superseded_at)?;
+        if entry.superseded_by_rules_version == 0 {
+            return Err(AgentPublicationProtectionError::InvalidRecord(
+                "superseded entry must name a rules version",
+            ));
+        }
+        if entry.reason.trim().is_empty() {
+            return Err(AgentPublicationProtectionError::InvalidRecord(
+                "superseded entry must name a reason",
+            ));
+        }
+    }
+    superseded.sort_by(|left, right| {
+        record_key(&left.record)
+            .cmp(&record_key(&right.record))
+            .then_with(|| left.superseded_at.total_cmp(&right.superseded_at))
+            .then_with(|| {
+                left.superseded_by_rules_version
+                    .cmp(&right.superseded_by_rules_version)
+            })
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+    superseded.dedup();
     Ok(PublicationProtectionLedgerWire {
         schema_version: AGENT_PUBLICATION_PROTECTION_WIRE_SCHEMA_VERSION,
         records,
+        superseded,
     })
+}
+
+fn max_evidence_rules_version(
+    record: &PublicationProtectionRecordWire,
+) -> Option<u32> {
+    record
+        .evidence
+        .iter()
+        .map(|entry| entry.rules_version)
+        .max()
+}
+
+fn is_stale_scanner_hit(record: &PublicationProtectionRecordWire) -> bool {
+    if record.status != PublicationProtectionStatusWire::Blocked
+        || record.reason != PublicationProtectionReasonWire::ScannerHit
+    {
+        return false;
+    }
+    if record.evidence.is_empty() {
+        return false;
+    }
+    if record
+        .evidence
+        .iter()
+        .any(|entry| entry.kind == AttachmentScanHitKindWire::KnownValue)
+    {
+        return false;
+    }
+    match max_evidence_rules_version(record) {
+        Some(max) => max < ATTACHMENT_SCANNER_RULES_VERSION,
+        None => false,
+    }
+}
+
+/// A scanner-hit block is enforced only while its evidence is current.
+/// Remote rejections, KnownValue verdicts, records without evidence, and
+/// blocks whose evidence already meets the current rules stay enforced.
+/// Staleness is computed from evidence, never from `rules_versions`.
+pub fn publication_protection_record_enforced(
+    record: &PublicationProtectionRecordWire,
+) -> bool {
+    !is_stale_scanner_hit(record)
 }
 
 /// Convert a scan result into a durable row. Clean scans intentionally have no row.
@@ -474,25 +561,83 @@ pub fn publication_protection_lookup(
     }))
 }
 
-/// Exact blocked content never becomes retryable; a changed digest is a new scan.
+/// Look up the enforced protection record. Stale scanner-hit blocks are
+/// hidden so the caller rescans under the current rules. Raw diagnostics
+/// should use `publication_protection_lookup`.
+pub fn publication_protection_lookup_enforced(
+    request: &PublicationProtectionLookupRequestWire,
+) -> Result<
+    Option<PublicationProtectionRecordWire>,
+    AgentPublicationProtectionError,
+> {
+    Ok(publication_protection_lookup(request)?
+        .filter(publication_protection_record_enforced))
+}
+
+/// Enforced blocks never become retryable; stale scanner-hit blocks do, so
+/// the next publish attempt rescans under the current rules. A changed
+/// digest is a new scan.
 pub fn publication_protection_retry_allowed(
     request: &PublicationProtectionLookupRequestWire,
 ) -> Result<bool, AgentPublicationProtectionError> {
-    Ok(
-        publication_protection_lookup(request)?.is_none_or(|record| {
+    Ok(match publication_protection_lookup(request)? {
+        None => true,
+        Some(record) => {
             record.status != PublicationProtectionStatusWire::Blocked
-        }),
-    )
+                || !publication_protection_record_enforced(&record)
+        }
+    })
 }
 
 /// Remove a transient unverified row after a later complete clean scan.
-/// Confirmed blocks are permanent and remain in the ledger.
+/// A stale scanner-hit block whose evidence predates `clean_rules_version`
+/// moves to `superseded` with provenance instead of staying enforced.
+/// Enforced blocks behave exactly as before. Without both new fields,
+/// resolve behaves exactly as before (fail-closed for old callers).
 pub fn publication_protection_resolve_verified_clean(
     request: &PublicationProtectionResolveVerifiedCleanRequestWire,
 ) -> Result<PublicationProtectionLedgerWire, AgentPublicationProtectionError> {
     require_schema(request.schema_version)?;
     validate_identity(&request.identity)?;
+    if let Some(timestamp) = request.timestamp {
+        validate_timestamp(timestamp)?;
+    }
     let mut ledger = publication_protection_ledger_validate(&request.ledger)?;
+    if let (Some(clean_version), Some(timestamp)) =
+        (request.clean_rules_version, request.timestamp)
+    {
+        if let Some(index) = ledger.records.iter().position(|record| {
+            record.repository_identity == request.identity.repository_identity
+                && record.relative_destination
+                    == request.identity.relative_destination
+                && record.sha256 == request.identity.sha256
+        }) {
+            let stale = {
+                let record = &ledger.records[index];
+                record.status == PublicationProtectionStatusWire::Blocked
+                    && record.reason
+                        == PublicationProtectionReasonWire::ScannerHit
+                    && !record.evidence.is_empty()
+                    && !record.evidence.iter().any(|entry| {
+                        entry.kind == AttachmentScanHitKindWire::KnownValue
+                    })
+                    && match max_evidence_rules_version(record) {
+                        Some(max) => max < clean_version,
+                        None => false,
+                    }
+            };
+            if stale {
+                let record = ledger.records.remove(index);
+                ledger.superseded.push(PublicationProtectionSupersededWire {
+                    record,
+                    superseded_at: timestamp,
+                    superseded_by_rules_version: clean_version,
+                    reason: "rescanned_clean".to_string(),
+                });
+                return publication_protection_ledger_validate(&ledger);
+            }
+        }
+    }
     ledger.records.retain(|record| {
         record.repository_identity != request.identity.repository_identity
             || record.relative_destination
@@ -1039,6 +1184,8 @@ mod tests {
                 schema_version: 1,
                 ledger,
                 identity: unverified_identity,
+                clean_rules_version: None,
+                timestamp: None,
             },
         )
         .unwrap();
@@ -1104,5 +1251,237 @@ mod tests {
             };
             assert!(validate_record(&mut record).is_err());
         }
+    }
+
+    fn credential_block(
+        destination: &str,
+        digest: char,
+        rules_version: u32,
+        kind: AttachmentScanHitKindWire,
+        rule_id: &str,
+    ) -> PublicationProtectionRecordWire {
+        let scan = AttachmentScanWire {
+            outcome: AttachmentScanOutcomeWire::Hit,
+            hit: Some(AttachmentScanHitWire {
+                kind,
+                rule_id: rule_id.to_string(),
+                line: 1,
+            }),
+            bytes_scanned: 64,
+            rules_version,
+        };
+        let result = publication_scan_disposition(
+            &PublicationScanDispositionRequestWire {
+                schema_version: 1,
+                scan: Some(scan),
+                failure: None,
+            },
+        )
+        .unwrap();
+        publication_protection_record_from_scan(
+            &PublicationProtectionRecordFromScanRequestWire {
+                schema_version: 1,
+                identity: identity(destination, digest),
+                affected_requests: vec!["request-1".to_string()],
+                disposition: result,
+                timestamp: 5.0,
+            },
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    fn ledger_with(
+        record: PublicationProtectionRecordWire,
+    ) -> PublicationProtectionLedgerWire {
+        publication_protection_upsert(&PublicationProtectionUpsertRequestWire {
+            schema_version: 1,
+            ledger: publication_protection_ledger_empty(),
+            record,
+        })
+        .unwrap()
+    }
+
+    fn lookup_request(
+        ledger: PublicationProtectionLedgerWire,
+        destination: &str,
+        digest: char,
+    ) -> PublicationProtectionLookupRequestWire {
+        PublicationProtectionLookupRequestWire {
+            schema_version: 1,
+            ledger,
+            identity: identity(destination, digest),
+        }
+    }
+
+    #[test]
+    fn stale_scanner_hit_is_not_enforced_and_retries() {
+        let record = credential_block(
+            "agents/a/run/chat.md",
+            'a',
+            1,
+            AttachmentScanHitKindWire::CredentialPattern,
+            "openai-key",
+        );
+        assert!(!publication_protection_record_enforced(&record));
+        let ledger = ledger_with(record);
+        let request =
+            lookup_request(ledger.clone(), "agents/a/run/chat.md", 'a');
+        assert!(publication_protection_lookup(&request).unwrap().is_some());
+        assert!(publication_protection_lookup_enforced(&request)
+            .unwrap()
+            .is_none());
+        assert!(publication_protection_retry_allowed(&request).unwrap());
+    }
+
+    #[test]
+    fn current_scanner_hit_stays_enforced() {
+        let record = credential_block(
+            "agents/a/run/chat.md",
+            'a',
+            ATTACHMENT_SCANNER_RULES_VERSION,
+            AttachmentScanHitKindWire::CredentialPattern,
+            "openai-key",
+        );
+        assert!(publication_protection_record_enforced(&record));
+        let ledger = ledger_with(record);
+        let request = lookup_request(ledger, "agents/a/run/chat.md", 'a');
+        assert!(publication_protection_lookup_enforced(&request)
+            .unwrap()
+            .is_some());
+        assert!(!publication_protection_retry_allowed(&request).unwrap());
+    }
+
+    #[test]
+    fn known_value_and_remote_blocks_stay_enforced() {
+        let known = credential_block(
+            "agents/a/run/known.md",
+            'b',
+            1,
+            AttachmentScanHitKindWire::KnownValue,
+            "known-value",
+        );
+        assert!(publication_protection_record_enforced(&known));
+        let ledger = ledger_with(known);
+        let request = lookup_request(ledger, "agents/a/run/known.md", 'b');
+        assert!(publication_protection_lookup_enforced(&request)
+            .unwrap()
+            .is_some());
+        assert!(!publication_protection_retry_allowed(&request).unwrap());
+
+        let rejection = publication_protection_record_from_rejection(
+            &PublicationProtectionRecordFromRejectionRequestWire {
+                schema_version: 1,
+                identity: identity("agents/a/run/remote.md", 'c'),
+                affected_requests: vec![],
+                classification: classify_sidecar_publication_push_result(
+                    1,
+                    "",
+                    "remote: error: GH013: Repository rule violations found",
+                )
+                .classification,
+                timestamp: 3.0,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(publication_protection_record_enforced(&rejection));
+    }
+
+    #[test]
+    fn staleness_ignores_rules_versions() {
+        let mut record = credential_block(
+            "agents/a/run/chat.md",
+            'a',
+            1,
+            AttachmentScanHitKindWire::CredentialPattern,
+            "openai-key",
+        );
+        record.rules_versions.push(ATTACHMENT_SCANNER_RULES_VERSION);
+        assert!(!publication_protection_record_enforced(&record));
+    }
+
+    #[test]
+    fn resolve_supersedes_stale_with_provenance() {
+        let record = credential_block(
+            "agents/a/run/chat.md",
+            'a',
+            1,
+            AttachmentScanHitKindWire::CredentialPattern,
+            "openai-key",
+        );
+        let ledger = ledger_with(record.clone());
+        let resolved = publication_protection_resolve_verified_clean(
+            &PublicationProtectionResolveVerifiedCleanRequestWire {
+                schema_version: 1,
+                ledger,
+                identity: identity("agents/a/run/chat.md", 'a'),
+                clean_rules_version: Some(ATTACHMENT_SCANNER_RULES_VERSION),
+                timestamp: Some(9.0),
+            },
+        )
+        .unwrap();
+        assert!(resolved.records.is_empty());
+        assert_eq!(resolved.superseded.len(), 1);
+        let entry = &resolved.superseded[0];
+        assert_eq!(entry.record, record);
+        assert_eq!(entry.superseded_at, 9.0);
+        assert_eq!(
+            entry.superseded_by_rules_version,
+            ATTACHMENT_SCANNER_RULES_VERSION
+        );
+        assert_eq!(entry.reason, "rescanned_clean");
+        assert_eq!(
+            publication_protection_ledger_validate(&resolved).unwrap(),
+            resolved
+        );
+    }
+
+    #[test]
+    fn resolve_without_fields_keeps_stale_blocked() {
+        let record = credential_block(
+            "agents/a/run/chat.md",
+            'a',
+            1,
+            AttachmentScanHitKindWire::CredentialPattern,
+            "openai-key",
+        );
+        let ledger = ledger_with(record);
+        let resolved = publication_protection_resolve_verified_clean(
+            &PublicationProtectionResolveVerifiedCleanRequestWire {
+                schema_version: 1,
+                ledger,
+                identity: identity("agents/a/run/chat.md", 'a'),
+                clean_rules_version: None,
+                timestamp: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(resolved.records.len(), 1);
+        assert!(resolved.superseded.is_empty());
+    }
+
+    #[test]
+    fn resolve_keeps_enforced_block() {
+        let record = credential_block(
+            "agents/a/run/chat.md",
+            'a',
+            ATTACHMENT_SCANNER_RULES_VERSION,
+            AttachmentScanHitKindWire::CredentialPattern,
+            "openai-key",
+        );
+        let ledger = ledger_with(record);
+        let resolved = publication_protection_resolve_verified_clean(
+            &PublicationProtectionResolveVerifiedCleanRequestWire {
+                schema_version: 1,
+                ledger,
+                identity: identity("agents/a/run/chat.md", 'a'),
+                clean_rules_version: Some(ATTACHMENT_SCANNER_RULES_VERSION),
+                timestamp: Some(9.0),
+            },
+        )
+        .unwrap();
+        assert_eq!(resolved.records.len(), 1);
+        assert!(resolved.superseded.is_empty());
     }
 }

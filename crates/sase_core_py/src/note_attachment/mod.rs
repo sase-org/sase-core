@@ -31,6 +31,8 @@ use sase_core::agent_publication_protection::{
     publication_protection_ledger_empty as core_publication_protection_ledger_empty,
     publication_protection_ledger_validate as core_publication_protection_ledger_validate,
     publication_protection_lookup as core_publication_protection_lookup,
+    publication_protection_lookup_enforced as core_publication_protection_lookup_enforced,
+    publication_protection_record_enforced as core_publication_protection_record_enforced,
     publication_protection_record_from_rejection as core_publication_protection_record_from_rejection,
     publication_protection_record_from_scan as core_publication_protection_record_from_scan,
     publication_protection_resolve_verified_clean as core_publication_protection_resolve_verified_clean,
@@ -41,6 +43,7 @@ use sase_core::agent_publication_protection::{
     PublicationProtectionLookupRequestWire,
     PublicationProtectionRecordFromRejectionRequestWire,
     PublicationProtectionRecordFromScanRequestWire,
+    PublicationProtectionRecordWire,
     PublicationProtectionResolveVerifiedCleanRequestWire,
     PublicationProtectionUpsertRequestWire,
     PublicationScanDispositionRequestWire,
@@ -202,6 +205,41 @@ fn py_publication_protection_retry_allowed(
         )?;
     core_publication_protection_retry_allowed(&request)
         .map_err(publication_protection_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "publication_protection_record_enforced")]
+fn py_publication_protection_record_enforced(
+    record: &Bound<'_, PyDict>,
+) -> PyResult<bool> {
+    let record: PublicationProtectionRecordWire = serde_json::from_value(
+        py_to_json_value(record.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "record is not a valid PublicationProtectionRecordWire dict: {error}"
+        ))
+    })?;
+    Ok(core_publication_protection_record_enforced(&record))
+}
+
+#[pyfunction]
+#[pyo3(name = "publication_protection_lookup_enforced")]
+fn py_publication_protection_lookup_enforced<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PublicationProtectionLookupRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid PublicationProtectionLookupRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    core_publication_protection_lookup_enforced(&request)
+        .map(|result| serialize_to_py(py, &result))
+        .map_err(publication_protection_error_to_pyerr)?
 }
 
 #[pyfunction]
@@ -447,6 +485,14 @@ pub(crate) fn register_note_attachment(
     )?)?;
     m.add_function(wrap_pyfunction!(py_publication_protection_upsert, m)?)?;
     m.add_function(wrap_pyfunction!(py_publication_protection_lookup, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_publication_protection_lookup_enforced,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_publication_protection_record_enforced,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         py_publication_protection_retry_allowed,
         m

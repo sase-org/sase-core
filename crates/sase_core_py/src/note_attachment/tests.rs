@@ -35,6 +35,8 @@ fn note_attachment_bindings_are_registered() {
             "publication_protection_record_from_rejection",
             "publication_protection_upsert",
             "publication_protection_lookup",
+            "publication_protection_lookup_enforced",
+            "publication_protection_record_enforced",
             "publication_protection_retry_allowed",
             "publication_protection_resolve_verified_clean",
         ] {
@@ -66,7 +68,7 @@ fn publication_protection_bindings_round_trip_content_blocks() {
                         "line": 4
                     },
                     "bytes_scanned": 128,
-                    "rules_version": 1
+                    "rules_version": 2
                 },
                 "failure": null
             }),
@@ -155,6 +157,146 @@ fn publication_protection_bindings_round_trip_content_blocks() {
         let found = py_to_json_value(found.bind(py)).unwrap();
         assert_eq!(found["status"], json!("blocked"));
         assert!(!found.to_string().contains("SYNTHETIC_SECRET"));
+
+        let record_input = json_value_to_py(py, &found).unwrap();
+        let record_input = record_input.bind(py).downcast::<PyDict>().unwrap();
+        assert!(
+            py_publication_protection_record_enforced(record_input).unwrap()
+        );
+        let enforced =
+            py_publication_protection_lookup_enforced(py, lookup_input)
+                .unwrap();
+        let enforced = py_to_json_value(enforced.bind(py)).unwrap();
+        assert_eq!(enforced["status"], json!("blocked"));
+    });
+}
+
+#[test]
+fn stale_block_supersede_round_trips_with_provenance() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        register_note_attachment(&module).unwrap();
+        let ledger = py_publication_protection_ledger_empty(py).unwrap();
+        let mut ledger = py_to_json_value(ledger.bind(py)).unwrap();
+
+        let disposition_input = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "scan": {
+                    "outcome": "hit",
+                    "hit": {
+                        "kind": "credential_pattern",
+                        "rule_id": "openai-key",
+                        "line": 4
+                    },
+                    "bytes_scanned": 128,
+                    "rules_version": 1
+                },
+                "failure": null
+            }),
+        )
+        .unwrap();
+        let disposition_input =
+            disposition_input.bind(py).downcast::<PyDict>().unwrap();
+        let disposition =
+            py_publication_scan_disposition(py, disposition_input).unwrap();
+        let disposition = py_to_json_value(disposition.bind(py)).unwrap();
+
+        let record_input = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "identity": {
+                    "repository_identity": "sase-org/sase--agents",
+                    "relative_destination": "agents/a/run/chat.md",
+                    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "affected_requests": ["request-a"],
+                "disposition": disposition,
+                "timestamp": 42.0
+            }),
+        )
+        .unwrap();
+        let record_input = record_input.bind(py).downcast::<PyDict>().unwrap();
+        let record =
+            py_publication_protection_record_from_scan(py, record_input)
+                .unwrap();
+        let record_value = py_to_json_value(record.bind(py)).unwrap();
+
+        let record_check = json_value_to_py(py, &record_value).unwrap();
+        let record_check = record_check.bind(py).downcast::<PyDict>().unwrap();
+        assert!(
+            !py_publication_protection_record_enforced(record_check).unwrap()
+        );
+
+        let upsert_input = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "ledger": ledger,
+                "record": record_value
+            }),
+        )
+        .unwrap();
+        let upsert_input = upsert_input.bind(py).downcast::<PyDict>().unwrap();
+        let upserted =
+            py_publication_protection_upsert(py, upsert_input).unwrap();
+        ledger = py_to_json_value(upserted.bind(py)).unwrap();
+
+        let lookup_input = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "ledger": ledger,
+                "identity": {
+                    "repository_identity": "sase-org/sase--agents",
+                    "relative_destination": "agents/a/run/chat.md",
+                    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                }
+            }),
+        )
+        .unwrap();
+        let lookup_input = lookup_input.bind(py).downcast::<PyDict>().unwrap();
+        assert!(py_publication_protection_retry_allowed(lookup_input).unwrap());
+        let enforced =
+            py_publication_protection_lookup_enforced(py, lookup_input)
+                .unwrap();
+        let enforced = py_to_json_value(enforced.bind(py)).unwrap();
+        assert!(enforced.is_null());
+
+        let resolve_input = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "ledger": ledger,
+                "identity": {
+                    "repository_identity": "sase-org/sase--agents",
+                    "relative_destination": "agents/a/run/chat.md",
+                    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "clean_rules_version": 2,
+                "timestamp": 99.0
+            }),
+        )
+        .unwrap();
+        let resolve_input =
+            resolve_input.bind(py).downcast::<PyDict>().unwrap();
+        let resolved =
+            py_publication_protection_resolve_verified_clean(py, resolve_input)
+                .unwrap();
+        let resolved = py_to_json_value(resolved.bind(py)).unwrap();
+        assert_eq!(resolved["records"].as_array().unwrap().len(), 0);
+        assert_eq!(resolved["superseded"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            resolved["superseded"][0]["superseded_by_rules_version"],
+            json!(2)
+        );
+        assert_eq!(
+            resolved["superseded"][0]["reason"],
+            json!("rescanned_clean")
+        );
     });
 }
 
@@ -229,7 +371,7 @@ fn uniquify_bumps_on_digest_conflict() {
 fn audience_and_object_bindings_round_trip() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
-        assert_eq!(py_attachment_scanner_rules_version(), 1);
+        assert_eq!(py_attachment_scanner_rules_version(), 2);
         assert_eq!(
             py_attachment_canonical_extension("image/png").unwrap(),
             "png"
@@ -266,7 +408,7 @@ fn audience_and_object_bindings_round_trip() {
                 "size_bytes": 1024,
                 "public_max_bytes": 26214400,
                 "class": "text",
-                "scan": {"outcome": "clean", "bytes_scanned": 1024, "rules_version": 1},
+                "scan": {"outcome": "clean", "bytes_scanned": 1024, "rules_version": 2},
                 "owner_only": false,
                 "workspace_root": "/work/repo",
                 "scratch_roots": [],
@@ -294,7 +436,7 @@ fn audience_and_object_bindings_round_trip() {
         .unwrap();
         let value = py_to_json_value(scan.bind(py)).unwrap();
         assert_eq!(value["outcome"], json!("clean"));
-        assert_eq!(value["rules_version"], json!(1));
+        assert_eq!(value["rules_version"], json!(2));
     });
 }
 

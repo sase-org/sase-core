@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use super::zones::sase_secret_file_paths;
 
 /// Scanner rules version, pinned by tests and exposed to Python.
-pub const ATTACHMENT_SCANNER_RULES_VERSION: u32 = 1;
+pub const ATTACHMENT_SCANNER_RULES_VERSION: u32 = 2;
 
 const MAX_KNOWN_VALUE_CHARS: usize = 12;
 const MAX_LINE_SCAN_BYTES: usize = 16 * 1024;
@@ -243,20 +243,117 @@ fn env_assign_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^[A-Z][A-Z0-9_]{2,}\s*=\S+").unwrap())
 }
 
-type CredentialRule = (&'static str, fn() -> &'static Regex);
+fn is_token_boundary(prev: Option<u8>) -> bool {
+    match prev {
+        None => true,
+        Some(byte) => {
+            !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        }
+    }
+}
+
+fn preceding_byte(window: &str, offset: usize) -> Option<u8> {
+    if offset == 0 {
+        return None;
+    }
+    window.as_bytes()[..offset].last().copied()
+}
+
+fn bounded_match(re: &Regex, window: &str, is_first: bool) -> bool {
+    for hit in re.find_iter(window) {
+        if hit.start() == 0 && !is_first {
+            continue;
+        }
+        if is_token_boundary(preceding_byte(window, hit.start())) {
+            return true;
+        }
+    }
+    false
+}
+
+fn body_has_digit_or_upper(body: &str) -> bool {
+    body.bytes()
+        .any(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase())
+}
+
+fn openai_hit(window: &str, is_first: bool) -> bool {
+    for hit in openai_re().find_iter(window) {
+        if hit.start() == 0 && !is_first {
+            continue;
+        }
+        if !is_token_boundary(preceding_byte(window, hit.start())) {
+            continue;
+        }
+        let matched = hit.as_str();
+        if matched.len() > 3 && body_has_digit_or_upper(&matched[3..]) {
+            return true;
+        }
+    }
+    false
+}
+
+fn anthropic_hit(window: &str, is_first: bool) -> bool {
+    for hit in anthropic_re().find_iter(window) {
+        if hit.start() == 0 && !is_first {
+            continue;
+        }
+        if !is_token_boundary(preceding_byte(window, hit.start())) {
+            continue;
+        }
+        let matched = hit.as_str();
+        if matched.len() > 7 && body_has_digit_or_upper(&matched[7..]) {
+            return true;
+        }
+    }
+    false
+}
+
+fn github_hit(window: &str, is_first: bool) -> bool {
+    bounded_match(github_re(), window, is_first)
+}
+
+fn google_hit(window: &str, is_first: bool) -> bool {
+    bounded_match(google_re(), window, is_first)
+}
+
+fn aws_hit(window: &str, is_first: bool) -> bool {
+    bounded_match(aws_re(), window, is_first)
+}
+
+fn slack_hit(window: &str, is_first: bool) -> bool {
+    bounded_match(slack_re(), window, is_first)
+}
+
+fn telegram_hit(window: &str, is_first: bool) -> bool {
+    bounded_match(telegram_re(), window, is_first)
+}
+
+fn stripe_hit(window: &str, is_first: bool) -> bool {
+    bounded_match(stripe_re(), window, is_first)
+}
+
+fn pem_hit(window: &str, is_first: bool) -> bool {
+    bounded_match(pem_re(), window, is_first)
+}
+
+fn jwt_hit(window: &str, is_first: bool) -> bool {
+    bounded_match(jwt_re(), window, is_first)
+}
+
+type CredentialRule = (&'static str, fn(&str, bool) -> bool);
 
 fn credential_rules() -> &'static [CredentialRule] {
     static RULES: &[CredentialRule] = &[
-        ("github-token", github_re),
-        ("openai-key", openai_re),
-        ("anthropic-key", anthropic_re),
-        ("google-api-key", google_re),
-        ("aws-access-key", aws_re),
-        ("slack-token", slack_re),
-        ("telegram-bot-token", telegram_re),
-        ("stripe-key", stripe_re),
-        ("pem-private-key", pem_re),
-        ("jwt", jwt_re),
+        ("github-token", github_hit),
+        ("anthropic-key", anthropic_hit),
+        ("openai-key", openai_hit),
+        ("google-api-key", google_hit),
+        ("aws-access-key", aws_hit),
+        ("slack-token", slack_hit),
+        ("telegram-bot-token", telegram_hit),
+        ("stripe-key", stripe_hit),
+        ("pem-private-key", pem_hit),
+        ("jwt", jwt_hit),
     ];
     RULES
 }
@@ -411,9 +508,10 @@ pub fn attachment_scan_file(
     let mut assign_window: Vec<bool> = Vec::new();
     for (index, line) in text.lines().enumerate() {
         let line_no = index as u64 + 1;
-        for window in scan_windows(line) {
+        for (window_index, window) in scan_windows(line).iter().enumerate() {
+            let is_first = window_index == 0;
             for (rule_id, rule) in credential_rules() {
-                if rule().is_match(window) {
+                if rule(window, is_first) {
                     return AttachmentScanWire::hit(
                         AttachmentScanHitKindWire::CredentialPattern,
                         rule_id,

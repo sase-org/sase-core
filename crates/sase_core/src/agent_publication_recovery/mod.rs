@@ -12,6 +12,7 @@ mod accounting;
 mod classify;
 mod cleanup;
 mod complete;
+mod parked;
 mod replay;
 mod select;
 mod stale;
@@ -32,6 +33,7 @@ pub use cleanup::{
 pub use complete::{
     classify_deferred_prompt_obligation, decide_publication_request_completion,
 };
+pub use parked::publication_parked_recheck_due;
 pub use replay::{
     classify_replay_path, classify_replay_paths, decide_replay_apply,
     decide_replay_byte_divergence, decide_replay_hood_merge,

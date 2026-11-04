@@ -546,6 +546,26 @@ fn py_default_publication_cleanup_timeout() -> f64 {
     sase_core::agent_publication_recovery::default_publication_cleanup_timeout()
 }
 
+/// A parked request is due when the rules moved, the interval elapsed, or
+/// its last check lies in the future.
+#[pyfunction]
+#[pyo3(name = "publication_parked_recheck_due")]
+fn py_publication_parked_recheck_due(
+    now: f64,
+    parked_checked_at: f64,
+    parked_rules_version: u32,
+    current_rules_version: u32,
+    recheck_interval_seconds: f64,
+) -> bool {
+    core_publication_parked_recheck_due(
+        now,
+        parked_checked_at,
+        parked_rules_version,
+        current_rules_version,
+        recheck_interval_seconds,
+    )
+}
+
 /// Select retired and/or quarantined publication rows for one explicit retry.
 #[pyfunction]
 #[pyo3(name = "select_publication_retries")]
@@ -1047,6 +1067,7 @@ pub(crate) fn register_vcs(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_default_publication_cleanup_timeout,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_publication_parked_recheck_due, m)?)?;
     m.add_function(wrap_pyfunction!(py_select_publication_retries, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_publication_error, m)?)?;
     m.add_function(wrap_pyfunction!(

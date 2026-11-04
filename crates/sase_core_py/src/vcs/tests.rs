@@ -1171,3 +1171,28 @@ fn git_lock_bindings_round_trip_classify_and_decide() {
         assert_eq!(decision_value["claim_lock_removed"], json!(false));
     });
 }
+
+#[test]
+fn parked_recheck_binding_matches_core_policy() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        assert!(module.getattr("publication_parked_recheck_due").is_ok());
+        assert!(py_publication_parked_recheck_due(100.0, 90.0, 1, 2, 3600.0));
+        assert!(!py_publication_parked_recheck_due(
+            2000.0, 1000.0, 2, 2, 3600.0
+        ));
+        assert!(py_publication_parked_recheck_due(
+            1000.0, 2000.0, 2, 2, 3600.0
+        ));
+        let value = module
+            .getattr("publication_parked_recheck_due")
+            .unwrap()
+            .call1((2000.0, 1000.0, 2_u32, 2_u32, 3600.0))
+            .unwrap()
+            .extract::<bool>()
+            .unwrap();
+        assert!(!value);
+    });
+}
