@@ -138,6 +138,49 @@ pub fn active_train() -> TrainFactsWire {
     }
 }
 
+/// A fresh, unsealed tag the reader accepted as its own train: generation 0,
+/// no manifest mismatch, backed by a draft release.
+pub fn fresh_train() -> TrainFactsWire {
+    TrainFactsWire {
+        candidate_id: format!("unsealed:v0.19.0:{HEAD}"),
+        version: "0.19.0".to_string(),
+        tag: "v0.19.0".to_string(),
+        sha: HEAD.to_string(),
+        generation: 0,
+        confirmed: false,
+        abandoned: false,
+        pre_train_legacy: false,
+        manifest_mismatch: false,
+        evidence_mismatch: false,
+        py_files_present: 0,
+        py_files_expected: 2,
+        py_digest_conflict: false,
+        py_extra_files: false,
+        confirmation_complete: false,
+    }
+}
+
+/// A release.yml run at the fresh tag.
+pub fn release_run(status: RunStatusWire) -> WorkflowRunFactsWire {
+    WorkflowRunFactsWire {
+        workflow: "release.yml".to_string(),
+        run_id: "release-1".to_string(),
+        attempt: 1,
+        ref_name: "v0.19.0".to_string(),
+        sha: HEAD.to_string(),
+        status,
+        conclusion: match status {
+            RunStatusWire::Completed => Some(CheckConclusionWire::Success),
+            _ => None,
+        },
+        jobs: Vec::new(),
+        started_at: Some(NOON.to_string()),
+        updated_at: Some(NOON.to_string()),
+        event: Some("workflow_dispatch".to_string()),
+        url: "https://example.test/release-1".to_string(),
+    }
+}
+
 pub fn releasable_pr() -> ReleasePrFactsWire {
     ReleasePrFactsWire {
         number: 42,

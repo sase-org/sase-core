@@ -3,6 +3,7 @@ mod escalation;
 mod fixtures;
 mod merge_checks;
 mod states;
+mod train_start;
 
 use super::release_steward_decide;
 use super::wire::{

@@ -470,22 +470,43 @@ fn handle_active_train(
             &train.sha,
         );
         let in_flight = matching.is_some_and(|run| run.status.is_in_flight());
+        // A sealed generation already stashed its manifest, so a second
+        // `mode=release` run would hit the stash refusal; resume it
+        // instead. Generation 0 never carries a publishable eval.
+        let resume = train.generation > 0;
+        let mode = if resume { "resume" } else { "release" };
         let action = proposed_action(
             TrainActionKindWire::DispatchRelease {
                 tag: train.tag.clone(),
                 sha: train.sha.clone(),
-                mode: "release".to_string(),
+                mode: mode.to_string(),
                 generation: train.generation,
             },
             ActionDispositionWire::Proposed,
-            vec!["tag/draft ready".to_string(), "no PyPI files".to_string()],
-            "initial release.yml run at the tag",
+            vec![
+                "publishable retained candidate".to_string(),
+                "no PyPI files".to_string(),
+            ],
+            if resume {
+                "resume release.yml for the sealed publishable generation"
+            } else {
+                "initial release.yml run at the tag"
+            },
         );
         return Draft::new(
             PrimaryStateWire::Waiting {
-                reason: "tag ready for initial release.yml run".to_string(),
+                reason: if resume {
+                    "sealed publishable generation has no PyPI files; resume release.yml"
+                        .to_string()
+                } else {
+                    "tag ready for initial release.yml run".to_string()
+                },
             },
-            "dispatch release.yml --ref <tag> -f mode=release",
+            if resume {
+                "dispatch release.yml --ref <tag> -f mode=resume"
+            } else {
+                "dispatch release.yml --ref <tag> -f mode=release"
+            },
         )
         .action(suppress_if_in_flight(
             action,
@@ -499,6 +520,103 @@ fn handle_active_train(
         },
         "selected train has no publication action this tick",
     )
+}
+
+/// A fresh, unsealed tag the reader accepted as its own train: backed by a
+/// draft release, newer than any confirmed release, matching the merged PR
+/// head, with no sealed manifest and no PyPI files. There is no candidate
+/// evaluator result for it, so dispatch and burn decisions read only the
+/// release.yml run history at the tag.
+fn handle_fresh_train(
+    train: &TrainFactsWire,
+    snapshot: &ReleaseStewardSnapshotWire,
+) -> Draft {
+    let workflows = snapshot.workflows.as_ready().expect("workflows required");
+    if version_has_pypi_files(train) {
+        return Draft::new(
+            PrimaryStateWire::Waiting {
+                reason: format!(
+                    "fresh tag {} already has public PyPI files; steward takes no train action",
+                    train.tag
+                ),
+            },
+            "fresh tag with public files is not a clean start",
+        );
+    }
+    let matching =
+        matching_release_run(&workflows.release_yml, &train.tag, &train.sha);
+    match matching {
+        Some(run) if run.status.is_in_flight() => Draft::new(
+            PrimaryStateWire::Waiting {
+                reason: "release.yml already in flight at the fresh tag"
+                    .to_string(),
+            },
+            "initial release.yml run is already in flight",
+        )
+        .action(suppress_if_in_flight(
+            proposed_action(
+                TrainActionKindWire::DispatchRelease {
+                    tag: train.tag.clone(),
+                    sha: train.sha.clone(),
+                    mode: "release".to_string(),
+                    generation: 0,
+                },
+                ActionDispositionWire::Proposed,
+                vec![
+                    "fresh unsealed tag backed by a draft release".to_string(),
+                    "no PyPI files".to_string(),
+                ],
+                "initial release.yml run at the tag",
+            ),
+            true,
+            "release.yml already in flight",
+        )),
+        Some(run) if run.status == RunStatusWire::Completed => Draft::new(
+            PrimaryStateWire::Waiting {
+                reason: format!(
+                    "release.yml run {} completed without stashing a manifest at {}; version burned",
+                    run.run_id, train.tag
+                ),
+            },
+            "release.yml completed without stashing a manifest; the workflow is broken at that tag",
+        )
+        .action(proposed_action(
+            TrainActionKindWire::AbandonCandidate {
+                candidate_id: train.candidate_id.clone(),
+                generation: 0,
+                observation_asset: observation_asset(
+                    &train.candidate_id,
+                    0,
+                ),
+            },
+            ActionDispositionWire::Proposed,
+            vec![
+                "release.yml completed without stashing a manifest".to_string(),
+                "zero PyPI files".to_string(),
+            ],
+            "burn version with broken workflow at tag",
+        )),
+        _ => Draft::new(
+            PrimaryStateWire::Waiting {
+                reason: "tag ready for initial release.yml run".to_string(),
+            },
+            "dispatch release.yml --ref <tag> -f mode=release",
+        )
+        .action(proposed_action(
+            TrainActionKindWire::DispatchRelease {
+                tag: train.tag.clone(),
+                sha: train.sha.clone(),
+                mode: "release".to_string(),
+                generation: 0,
+            },
+            ActionDispositionWire::Proposed,
+            vec![
+                "fresh unsealed tag backed by a draft release".to_string(),
+                "no PyPI files".to_string(),
+            ],
+            "initial release.yml run at the tag",
+        )),
+    }
 }
 
 /// UTC calendar day (`YYYY-MM-DD`) of an RFC 3339 timestamp, or `None`
@@ -1083,6 +1201,25 @@ pub fn release_steward_decide(
         None => None,
     };
     if let Some(train) = selection.selected.as_ref() {
+        if train.is_fresh_unsealed() {
+            // A fresh tag carries no candidate evaluator result; an
+            // unreadable candidate fact still forbids authorizing an action.
+            if let Some((source, message, remedy)) =
+                snapshot.candidate.unreadable_break()
+            {
+                return Ok(finish(
+                    request,
+                    observed_at,
+                    broken(source, message, remedy),
+                ));
+            }
+            let draft = handle_fresh_train(train, snapshot);
+            return Ok(finish(
+                request,
+                observed_at,
+                attach_install(draft, findings),
+            ));
+        }
         if let Some((source, message, remedy)) =
             snapshot.candidate.unreadable_break()
         {

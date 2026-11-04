@@ -90,3 +90,18 @@ pub fn select_trains(trains: &[TrainFactsWire]) -> TrainSelection {
 pub fn version_has_pypi_files(train: &TrainFactsWire) -> bool {
     train.py_files_present > 0
 }
+
+impl TrainFactsWire {
+    /// A fresh, unsealed tag the reader accepted as its own train. Sealed
+    /// trains always carry generation 1 or higher, and fully published
+    /// historical tags carry `pre_train_legacy`. Only a fresh train reaches
+    /// the policy with generation 0, no mismatch, and neither confirmed
+    /// nor abandoned.
+    pub fn is_fresh_unsealed(&self) -> bool {
+        self.generation == 0
+            && !self.pre_train_legacy
+            && !self.manifest_mismatch
+            && !self.confirmed
+            && !self.abandoned
+    }
+}

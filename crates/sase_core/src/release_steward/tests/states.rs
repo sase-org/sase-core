@@ -916,7 +916,9 @@ fn known_red_canary_is_not_watcher_broken() {
 }
 
 #[test]
-fn initial_tag_proposes_release_mode() {
+fn sealed_publishable_train_without_pypi_resumes() {
+    // A sealed generation already stashed its manifest, so a second
+    // `mode=release` run would hit the stash refusal; resume it instead.
     let mut request = releasable_request();
     let train = active_train();
     request.snapshot.trains = FactRead::ready(vec![train.clone()]);
@@ -929,7 +931,7 @@ fn initial_tag_proposes_release_mode() {
         .action
     {
         TrainActionKindWire::DispatchRelease { mode, .. } => {
-            assert_eq!(mode, "release");
+            assert_eq!(mode, "resume");
         }
         other => panic!("{other:?}"),
     }
