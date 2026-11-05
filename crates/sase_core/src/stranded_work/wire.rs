@@ -95,6 +95,15 @@ pub struct StrandedWorkMemberFactsWire {
     pub staged_handoff: Option<String>,
     #[serde(default)]
     pub staged_receipt_outcome: Option<String>,
+    /// True when a staged handoff's adopted receipt is matched and its
+    /// successor effect is delivered: non-successor kinds (or successor
+    /// kinds without a `successor_artifacts_dir` ref) need only the adopted
+    /// receipt, while `pipe`/`plan`/`questions` stages with that ref need
+    /// `observe_destination` to report `owned` or `terminal`. Delivered
+    /// stages no longer own the bead; the successor owns through its own
+    /// member facts when live.
+    #[serde(default)]
+    pub staged_delivered: bool,
     #[serde(default)]
     pub handoff_inflight: bool,
     #[serde(default)]

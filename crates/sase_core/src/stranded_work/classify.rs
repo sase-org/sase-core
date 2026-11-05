@@ -125,13 +125,22 @@ fn owner_kind(member: &StrandedWorkMemberFactsWire) -> Option<String> {
     if handoff.is_some() || member.handoff_inflight {
         return Some("handoff".to_string());
     }
-    // Staged handoffs are never legacy markers, but unresolved staging owns
-    // the bead like a handoff so the later reconciler (not the healer) owns
-    // it. Malformed staged state also owns: it must never be discarded as an
-    // ordinary abandoned run. A held `handoff_not_adopted` receipt owns for
-    // the same reason; a successful `adopted` receipt does not.
+    // A staged record means a handoff is in flight and owns the bead like
+    // a handoff until the stage is delivered. A delivered stage (a matching
+    // `adopted` receipt plus no further delivery work, as reported by the
+    // collector's `staged_delivered` fact) no longer owns: the successor
+    // owns through its own member facts when live, and the normal
+    // settle-grace and stranded-cause rules apply otherwise. Malformed
+    // staged state also owns: it must never be discarded as an ordinary
+    // abandoned run. A held `handoff_not_adopted` receipt owns for the same
+    // reason; a lone `adopted` receipt without a staged record does not.
     if normalize_optional(&member.staged_handoff).is_some() {
-        return Some("handoff".to_string());
+        let delivered = member.staged_delivered
+            && normalize_optional(&member.staged_receipt_outcome).as_deref()
+                == Some("adopted");
+        if !delivered {
+            return Some("handoff".to_string());
+        }
     }
     if let Some(outcome) = normalize_optional(&member.staged_receipt_outcome) {
         if outcome != "adopted" {

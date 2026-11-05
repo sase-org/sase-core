@@ -328,22 +328,47 @@ fn owned_staged_handoff_and_held_receipt() {
     );
     assert_eq!(verdict.state, "owned");
     assert_eq!(verdict.reason.as_deref(), Some("handoff"));
-    let adopted = StrandedWorkMemberFactsWire {
+    let adopted_undelivered = StrandedWorkMemberFactsWire {
         staged_handoff: Some("plan".to_string()),
         staged_receipt_outcome: Some("adopted".to_string()),
         ..agent("w--1")
     };
     let verdict = reduce(
         StrandedWorkBeadFactsWire {
-            members: vec![adopted],
+            members: vec![adopted_undelivered],
             ..bead("w", "phase")
         },
         Vec::new(),
     );
-    // A staged record still owns even when a success receipt is present:
-    // the stage is unresolved until the later reconciler clears it.
+    // A staged record with an adopted receipt still owns until the
+    // collector proves the stage delivered (`staged_delivered`).
     assert_eq!(verdict.state, "owned");
     assert_eq!(verdict.reason.as_deref(), Some("handoff"));
+    let adopted_delivered = StrandedWorkMemberFactsWire {
+        staged_handoff: Some("plan".to_string()),
+        staged_receipt_outcome: Some("adopted".to_string()),
+        staged_delivered: true,
+        ..agent("w--1")
+    };
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![adopted_delivered.clone()],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    // Delivered stages no longer own: cold members strand.
+    assert_eq!(verdict.state, "stranded");
+    let mut recent = adopted_delivered;
+    recent.ended_at = Some(NOW - 10.0);
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![recent],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "settling");
     let receipt_only_adopted = StrandedWorkMemberFactsWire {
         staged_receipt_outcome: Some("adopted".to_string()),
         ..agent("w--1")
@@ -356,6 +381,133 @@ fn owned_staged_handoff_and_held_receipt() {
         Vec::new(),
     );
     assert_eq!(verdict.state, "stranded");
+}
+
+#[test]
+fn delivered_staged_handoffs_stop_owning_bob_cli_h4_4_shape() {
+    fn delivered_agent(
+        name: &str,
+        ended_at: f64,
+    ) -> StrandedWorkMemberFactsWire {
+        StrandedWorkMemberFactsWire {
+            staged_handoff: Some("monitor".to_string()),
+            staged_receipt_outcome: Some("adopted".to_string()),
+            staged_delivered: true,
+            ended_at: Some(ended_at),
+            ..agent(name)
+        }
+    }
+    fn launched_monitor(
+        name: &str,
+        ended_at: f64,
+        followup_agent: &str,
+    ) -> StrandedWorkMemberFactsWire {
+        StrandedWorkMemberFactsWire {
+            followup_outcome: Some("launched".to_string()),
+            followup_agent: Some(followup_agent.to_string()),
+            ended_at: Some(ended_at),
+            ..monitor(name)
+        }
+    }
+    let mut members = vec![
+        delivered_agent("bob-cli-h4.4--plan", OLD),
+        launched_monitor("bob-cli-h4.4--mon", OLD + 10.0, "bob-cli-h4.4--1"),
+        delivered_agent("bob-cli-h4.4--1", OLD + 20.0),
+        launched_monitor("bob-cli-h4.4--mon-0", OLD + 30.0, "bob-cli-h4.4--2"),
+        delivered_agent("bob-cli-h4.4--2", OLD + 40.0),
+        delivered_agent("bob-cli-h4.4--3", OLD + 60.0),
+        delivered_agent("bob-cli-h4.4--4", OLD + 80.0),
+    ];
+    let mut last = agent("bob-cli-h4.4--5");
+    last.ended_at = Some(OLD + 100.0);
+    members.push(last);
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members,
+            ..bead("bob-cli-h4.4", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "stranded");
+    assert_eq!(verdict.reason.as_deref(), Some("unclosed"));
+}
+
+#[test]
+fn delivered_staged_handoffs_keep_variant_reports_kept() {
+    fn delivered_agent(
+        name: &str,
+        ended_at: f64,
+    ) -> StrandedWorkMemberFactsWire {
+        StrandedWorkMemberFactsWire {
+            staged_handoff: Some("monitor".to_string()),
+            staged_receipt_outcome: Some("adopted".to_string()),
+            staged_delivered: true,
+            ended_at: Some(ended_at),
+            ..agent(name)
+        }
+    }
+    let mut last = agent("bob-cli-h4.4--5");
+    last.ended_at = Some(OLD + 100.0);
+    last.declared_bead_action = Some("keep".to_string());
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![
+                delivered_agent("bob-cli-h4.4--plan", OLD),
+                delivered_agent("bob-cli-h4.4--1", OLD + 20.0),
+                last,
+            ],
+            ..bead("bob-cli-h4.4", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "stranded");
+    assert_eq!(verdict.reason.as_deref(), Some("kept"));
+}
+
+#[test]
+fn delivered_stage_lets_live_successor_own() {
+    let stager = StrandedWorkMemberFactsWire {
+        staged_handoff: Some("monitor".to_string()),
+        staged_receipt_outcome: Some("adopted".to_string()),
+        staged_delivered: true,
+        ..agent("w--1")
+    };
+    let mut successor = live_agent("w--2", "running");
+    successor.started_at = Some(OLD + 100.0);
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![stager, successor],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "owned");
+    assert_eq!(verdict.owner.as_deref(), Some("w--2"));
+}
+
+#[test]
+fn staged_delivered_without_adopted_receipt_still_owns() {
+    for outcome in [
+        None,
+        Some("handoff_not_adopted".to_string()),
+        Some("held".to_string()),
+    ] {
+        let member = StrandedWorkMemberFactsWire {
+            staged_handoff: Some("plan".to_string()),
+            staged_receipt_outcome: outcome,
+            staged_delivered: true,
+            ..agent("w--1")
+        };
+        let verdict = reduce(
+            StrandedWorkBeadFactsWire {
+                members: vec![member],
+                ..bead("w", "phase")
+            },
+            Vec::new(),
+        );
+        assert_eq!(verdict.state, "owned");
+        assert_eq!(verdict.reason.as_deref(), Some("handoff"));
+    }
 }
 
 #[test]
