@@ -67,10 +67,15 @@ fn hijack_bindings_are_registered() {
         assert!(module.getattr("normalize_hijack_rung").is_ok());
         assert!(module.getattr("hijack_recovery_preview").is_ok());
         assert!(module.getattr("hijack_recovery_reconcile").is_ok());
+        assert!(module.getattr("hijack_recovery_effective_target").is_ok());
+        assert!(module.getattr("hijack_recovery_validate_execution").is_ok());
+        assert!(module.getattr("hijack_recovery_confirm").is_ok());
+        assert!(module.getattr("hijack_recovery_rollback").is_ok());
         assert_eq!(py_agent_hijack_escalation_wire_schema_version(), 1);
         assert_eq!(py_agent_hijack_continuation_wire_schema_version(), 1);
         assert_eq!(py_hijack_recovery_preview_wire_schema_version(), 1);
         assert_eq!(py_hijack_recovery_reconcile_wire_schema_version(), 1);
+        assert_eq!(py_hijack_recovery_execution_wire_schema_version(), 1);
     });
 }
 
@@ -231,5 +236,90 @@ fn preview_and_reconcile_bindings_round_trip() {
         let value = py_to_json_value(decision.bind(py)).unwrap();
         assert_eq!(value["outcome"], json!("return_to_held"));
         assert_eq!(value["code"], json!("absent"));
+    });
+}
+
+#[test]
+fn execution_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let request = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "action": "instruct",
+                "stalled_concrete": "claude/opus@high",
+                "explicit_model_override": "codex/gpt-x",
+            }),
+        );
+        let result = py_hijack_recovery_effective_target(py, &request).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["concrete_target"], json!("codex/gpt-x@high"));
+        assert_eq!(value["model_changed"], json!(true));
+
+        let record = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "state": "resolving",
+                "revision": 4,
+                "concrete_target_model": "claude/opus@high",
+                "reserved_successor_name": "agent.2",
+                "resolver_pid": 99,
+                "resolver_process_identity_token": "boot:1",
+                "launch_identity": "launch-1",
+            }),
+        );
+        let facts = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "observed_resolver_pid": 99,
+                "resolver_pid_live": true,
+                "resolver_identity_matches": true,
+                "pinned_available": true,
+                "current_target": "claude/opus@high",
+            }),
+        );
+        let decision = py_hijack_recovery_validate_execution(
+            py,
+            &record,
+            "claude/opus@high",
+            &facts,
+        )
+        .unwrap();
+        let value = py_to_json_value(decision.bind(py)).unwrap();
+        assert_eq!(value["outcome"], json!("proceed"));
+        assert_eq!(value["mode"], json!("dispatch"));
+
+        let facts = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "launch_identity_matches": true,
+                "model_matches": true,
+                "workspace_matches": true,
+                "lineage_matches": true,
+                "ack_bound": true,
+                "ack_matches": true,
+            }),
+        );
+        let decision = py_hijack_recovery_confirm(py, &record, &facts).unwrap();
+        let value = py_to_json_value(decision.bind(py)).unwrap();
+        assert_eq!(value["outcome"], json!("settle"));
+
+        let facts = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "child_state": "dead",
+                "custody": "restored",
+                "request_state": "canceled",
+            }),
+        );
+        let decision =
+            py_hijack_recovery_rollback(py, &record, &facts).unwrap();
+        let value = py_to_json_value(decision.bind(py)).unwrap();
+        assert_eq!(value["outcome"], json!("return_to_held"));
     });
 }

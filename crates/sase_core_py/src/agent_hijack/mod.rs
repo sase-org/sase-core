@@ -1,5 +1,5 @@
-//! PyO3 bindings for Agent Hijack state, eligibility, escalation, and
-//! continuation policy.
+//! PyO3 bindings for Agent Hijack state, eligibility, escalation,
+//! continuation, recovery preview, execution, and reconciliation policy.
 
 use crate::json_bridge::{py_to_json_value, serialize_to_py};
 use crate::prelude::*;
@@ -12,15 +12,22 @@ use sase_core::agent_hijack::{
     agent_hijack_escalation_target as core_escalation,
     agent_hijack_status_for_done_marker as core_done_status,
     agent_hijack_wire_schema_version as core_wire_version,
+    hijack_recovery_confirm as core_confirm,
+    hijack_recovery_effective_target as core_effective_target,
     hijack_recovery_preview as core_preview,
     hijack_recovery_reconcile as core_reconcile,
+    hijack_recovery_rollback as core_rollback,
+    hijack_recovery_validate_execution as core_validate_execution,
     normalize_hijack_rung as core_normalize_rung,
-    strip_launch_directives as core_strip, AgentHijackContinuationRequestWire,
+    strip_launch_directives as core_strip, AgentHijackConfirmationFactsWire,
+    AgentHijackContinuationRequestWire, AgentHijackEffectiveTargetRequestWire,
     AgentHijackEligibilityFactsWire, AgentHijackEscalationRequestWire,
-    AgentHijackEventWire, AgentHijackReconcileFactsWire, AgentHijackRecordWire,
-    AgentHijackRecoveryPreviewRequestWire,
+    AgentHijackEventWire, AgentHijackExecutionFactsWire,
+    AgentHijackReconcileFactsWire, AgentHijackRecordWire,
+    AgentHijackRecoveryPreviewRequestWire, AgentHijackRollbackFactsWire,
     AGENT_HIJACK_CONTINUATION_WIRE_SCHEMA_VERSION,
     AGENT_HIJACK_ESCALATION_WIRE_SCHEMA_VERSION,
+    AGENT_HIJACK_EXECUTION_WIRE_SCHEMA_VERSION,
     AGENT_HIJACK_RECONCILE_WIRE_SCHEMA_VERSION,
     AGENT_HIJACK_RECOVERY_PREVIEW_WIRE_SCHEMA_VERSION,
 };
@@ -231,6 +238,127 @@ fn py_hijack_recovery_reconcile<'py>(
     serialize_to_py(py, &decision)
 }
 
+/// Return the hijack recovery execution wire schema version.
+#[pyfunction]
+#[pyo3(name = "hijack_recovery_execution_wire_schema_version")]
+fn py_hijack_recovery_execution_wire_schema_version() -> u32 {
+    AGENT_HIJACK_EXECUTION_WIRE_SCHEMA_VERSION
+}
+
+/// Resolve the effective concrete target under the shared precedence.
+#[pyfunction]
+#[pyo3(name = "hijack_recovery_effective_target")]
+fn py_hijack_recovery_effective_target<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: AgentHijackEffectiveTargetRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid AgentHijackEffectiveTargetRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    let result = py
+        .allow_threads(|| core_effective_target(&request))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
+/// Validate the winning reservation without reopening the public menu.
+#[pyfunction]
+#[pyo3(name = "hijack_recovery_validate_execution")]
+fn py_hijack_recovery_validate_execution<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyDict>,
+    pinned_target: &str,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let record: AgentHijackRecordWire = serde_json::from_value(
+        py_to_json_value(record.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "record is not a valid AgentHijackRecordWire dict: {error}"
+        ))
+    })?;
+    let facts: AgentHijackExecutionFactsWire = serde_json::from_value(
+        py_to_json_value(facts.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "facts is not a valid AgentHijackExecutionFactsWire dict: {error}"
+        ))
+    })?;
+    let decision = py
+        .allow_threads(|| {
+            core_validate_execution(&record, pinned_target, &facts)
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &decision)
+}
+
+/// Decide whether the observed successor proves settlement.
+#[pyfunction]
+#[pyo3(name = "hijack_recovery_confirm")]
+fn py_hijack_recovery_confirm<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyDict>,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let record: AgentHijackRecordWire = serde_json::from_value(
+        py_to_json_value(record.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "record is not a valid AgentHijackRecordWire dict: {error}"
+        ))
+    })?;
+    let facts: AgentHijackConfirmationFactsWire = serde_json::from_value(
+        py_to_json_value(facts.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "facts is not a valid AgentHijackConfirmationFactsWire dict: {error}"
+        ))
+    })?;
+    let decision = py
+        .allow_threads(|| core_confirm(&record, &facts))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &decision)
+}
+
+/// Decide whether the record may safely return to held.
+#[pyfunction]
+#[pyo3(name = "hijack_recovery_rollback")]
+fn py_hijack_recovery_rollback<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyDict>,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let record: AgentHijackRecordWire = serde_json::from_value(
+        py_to_json_value(record.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "record is not a valid AgentHijackRecordWire dict: {error}"
+        ))
+    })?;
+    let facts: AgentHijackRollbackFactsWire = serde_json::from_value(
+        py_to_json_value(facts.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "facts is not a valid AgentHijackRollbackFactsWire dict: {error}"
+        ))
+    })?;
+    let decision = py
+        .allow_threads(|| core_rollback(&record, &facts))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &decision)
+}
+
 pub(crate) fn register_agent_hijack(
     module: &Bound<'_, PyModule>,
 ) -> PyResult<()> {
@@ -283,6 +411,22 @@ pub(crate) fn register_agent_hijack(
         py_hijack_recovery_reconcile,
         module
     )?)?;
+    module.add_function(wrap_pyfunction!(
+        py_hijack_recovery_execution_wire_schema_version,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        py_hijack_recovery_effective_target,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        py_hijack_recovery_validate_execution,
+        module
+    )?)?;
+    module
+        .add_function(wrap_pyfunction!(py_hijack_recovery_confirm, module)?)?;
+    module
+        .add_function(wrap_pyfunction!(py_hijack_recovery_rollback, module)?)?;
     Ok(())
 }
 
