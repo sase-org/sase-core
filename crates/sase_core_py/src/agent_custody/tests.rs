@@ -36,6 +36,114 @@ fn agent_artifact_run_retention_binding_refuses_apply_without_protection() {
 }
 
 #[test]
+fn agent_artifact_run_trash_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    let temp = tempfile::tempdir().unwrap();
+    let projects = temp.path().join("projects");
+    let trash = temp.path().join("trash");
+    let run = projects.join("demo/artifacts/ace-run/202601/01/20260101000000");
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(run.join("done.json"), b"{}\n").unwrap();
+    std::fs::write(run.join("result.txt"), b"keep me\n").unwrap();
+
+    Python::with_gil(|py| {
+        assert_eq!(py_agent_artifact_run_trash_wire_schema_version(), 1);
+        let quarantine = json!({
+            "schema_version": 1,
+            "projects_root": projects,
+            "sources_unavailable": [],
+            "protected_dirs": [],
+            "protected_timestamps": [],
+            "recent_months": [],
+            "current_timestamp": "20260102000000",
+            "items": [{
+                "artifact_dir": run,
+                "project": "demo",
+                "timestamp": "20260101000000",
+                "protected_reasons": []
+            }],
+            "trash_root": trash,
+            "batch_id": "binding-round-trip",
+            "created_at": "2026-01-02T00:00:00Z"
+        });
+        let quarantine = json_value_to_py(py, &quarantine).unwrap();
+        let quarantine = quarantine.bind(py).downcast::<PyDict>().unwrap();
+        let moved = py_quarantine_agent_artifact_runs(py, quarantine).unwrap();
+        let moved = py_to_json_value(moved.bind(py)).unwrap();
+        assert_eq!(moved["quarantined"], json!(1));
+
+        let listed = py_list_agent_artifact_run_trash(
+            py,
+            trash.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        let listed = py_to_json_value(listed.bind(py)).unwrap();
+        assert_eq!(listed["batches"][0]["run_count"], json!(1));
+
+        let restore = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "trash_root": trash,
+                "projects_root": projects,
+                "batch_id": "binding-round-trip",
+                "items": null
+            }),
+        )
+        .unwrap();
+        let restore = restore.bind(py).downcast::<PyDict>().unwrap();
+        let restored =
+            py_restore_agent_artifact_run_trash(py, restore).unwrap();
+        let restored = py_to_json_value(restored.bind(py)).unwrap();
+        assert_eq!(restored["restored"], json!(1));
+        assert_eq!(
+            std::fs::read(run.join("result.txt")).unwrap(),
+            b"keep me\n"
+        );
+
+        let quarantine = json!({
+            "schema_version": 1,
+            "projects_root": projects,
+            "sources_unavailable": [],
+            "protected_dirs": [],
+            "protected_timestamps": [],
+            "recent_months": [],
+            "current_timestamp": "20260102000000",
+            "items": [{
+                "artifact_dir": run,
+                "project": "demo",
+                "timestamp": "20260101000000",
+                "protected_reasons": []
+            }],
+            "trash_root": trash,
+            "batch_id": "binding-purge",
+            "created_at": "2026-01-02T00:00:00Z"
+        });
+        let quarantine = json_value_to_py(py, &quarantine).unwrap();
+        let quarantine = quarantine.bind(py).downcast::<PyDict>().unwrap();
+        py_quarantine_agent_artifact_runs(py, quarantine).unwrap();
+        let purge = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "trash_root": trash,
+                "projects_root": projects,
+                "before": null,
+                "purge_all": true,
+                "sources_unavailable": [],
+                "protected_dirs": [],
+                "protected_timestamps": []
+            }),
+        )
+        .unwrap();
+        let purge = purge.bind(py).downcast::<PyDict>().unwrap();
+        let purged = py_purge_agent_artifact_run_trash(py, purge).unwrap();
+        let purged = py_to_json_value(purged.bind(py)).unwrap();
+        assert_eq!(purged["purged"], json!(1));
+    });
+}
+
+#[test]
 fn agent_archive_capability_bindings_are_exported_and_preserve_shapes() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

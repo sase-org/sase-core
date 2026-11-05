@@ -9,6 +9,17 @@ use crate::json_bridge::{
 
 use crate::procs::proc_store_result_to_py;
 
+use sase_core::agent_artifact_run_trash::{
+    agent_artifact_run_trash_wire_schema_version as core_agent_artifact_run_trash_wire_schema_version,
+    list_agent_artifact_run_trash as core_list_agent_artifact_run_trash,
+    purge_agent_artifact_run_trash as core_purge_agent_artifact_run_trash,
+    quarantine_agent_artifact_runs as core_quarantine_agent_artifact_runs,
+    restore_agent_artifact_run_trash as core_restore_agent_artifact_run_trash,
+    AgentArtifactRunTrashError, AgentArtifactRunTrashPurgeRequestWire,
+    AgentArtifactRunTrashQuarantineRequestWire,
+    AgentArtifactRunTrashRestoreRequestWire,
+};
+
 use pyo3::wrap_pyfunction;
 
 use std::sync::Arc;
@@ -911,6 +922,100 @@ fn py_apply_agent_artifact_run_retention<'py>(
     )
 }
 
+fn agent_artifact_run_trash_error_to_pyerr(
+    error: AgentArtifactRunTrashError,
+) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+/// Return the ACE-run trash wire schema version.
+#[pyfunction]
+#[pyo3(name = "agent_artifact_run_trash_wire_schema_version")]
+fn py_agent_artifact_run_trash_wire_schema_version() -> u32 {
+    core_agent_artifact_run_trash_wire_schema_version()
+}
+
+/// Quarantine reviewed ACE-run directories into the journaled trash.
+#[pyfunction]
+#[pyo3(name = "quarantine_agent_artifact_runs")]
+fn py_quarantine_agent_artifact_runs<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: AgentArtifactRunTrashQuarantineRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?)
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid AgentArtifactRunTrashQuarantineRequestWire dict: {error}"
+                ))
+            })?;
+    let result =
+        py.allow_threads(|| core_quarantine_agent_artifact_runs(&request));
+    serialize_to_py(
+        py,
+        &result.map_err(agent_artifact_run_trash_error_to_pyerr)?,
+    )
+}
+
+/// List journaled and orphaned ACE-run trash entries.
+#[pyfunction]
+#[pyo3(name = "list_agent_artifact_run_trash")]
+fn py_list_agent_artifact_run_trash<'py>(
+    py: Python<'py>,
+    trash_root: &str,
+) -> PyResult<PyObject> {
+    let result =
+        py.allow_threads(|| core_list_agent_artifact_run_trash(trash_root));
+    serialize_to_py(
+        py,
+        &result.map_err(agent_artifact_run_trash_error_to_pyerr)?,
+    )
+}
+
+/// Restore an ACE-run trash batch or a selected set of its original paths.
+#[pyfunction]
+#[pyo3(name = "restore_agent_artifact_run_trash")]
+fn py_restore_agent_artifact_run_trash<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: AgentArtifactRunTrashRestoreRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?)
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid AgentArtifactRunTrashRestoreRequestWire dict: {error}"
+                ))
+            })?;
+    let result =
+        py.allow_threads(|| core_restore_agent_artifact_run_trash(&request));
+    serialize_to_py(
+        py,
+        &result.map_err(agent_artifact_run_trash_error_to_pyerr)?,
+    )
+}
+
+/// Protection-verify and permanently purge expired ACE-run trash batches.
+#[pyfunction]
+#[pyo3(name = "purge_agent_artifact_run_trash")]
+fn py_purge_agent_artifact_run_trash<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: AgentArtifactRunTrashPurgeRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?)
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid AgentArtifactRunTrashPurgeRequestWire dict: {error}"
+                ))
+            })?;
+    let result =
+        py.allow_threads(|| core_purge_agent_artifact_run_trash(&request));
+    serialize_to_py(
+        py,
+        &result.map_err(agent_artifact_run_trash_error_to_pyerr)?,
+    )
+}
+
 use sase_core::agent_archive::store::ArchiveStoreError;
 use sase_core::agent_archive::store::{
     delete_bundle_summaries_for_suffixes as core_delete_bundle_summaries_for_suffixes,
@@ -1189,6 +1294,14 @@ pub(crate) fn register_agent_custody(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_apply_agent_artifact_run_retention,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_agent_artifact_run_trash_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_quarantine_agent_artifact_runs, m)?)?;
+    m.add_function(wrap_pyfunction!(py_list_agent_artifact_run_trash, m)?)?;
+    m.add_function(wrap_pyfunction!(py_restore_agent_artifact_run_trash, m)?)?;
+    m.add_function(wrap_pyfunction!(py_purge_agent_artifact_run_trash, m)?)?;
     Ok(())
 }
 

@@ -171,46 +171,25 @@ pub fn apply_agent_artifact_run_retention(
             )
         })?;
 
-    let recent_months: BTreeSet<&str> =
-        request.recent_months.iter().map(String::as_str).collect();
+    let recent_months: BTreeSet<String> =
+        request.recent_months.iter().cloned().collect();
     let protected_dirs = canonical_protected_dirs(&request.protected_dirs);
-    let protected_timestamps: BTreeSet<&str> = request
-        .protected_timestamps
+    let protected_timestamps: BTreeSet<String> =
+        request.protected_timestamps.iter().cloned().collect();
+    let reasons_by_index: Vec<Vec<String>> = request
+        .candidates
         .iter()
-        .map(String::as_str)
+        .map(|candidate| {
+            classify_run_candidate(
+                &projects_root,
+                candidate,
+                &protected_dirs,
+                &protected_timestamps,
+                &recent_months,
+                &request.current_timestamp,
+            )
+        })
         .collect();
-
-    let mut reasons_by_index: Vec<Vec<String>> =
-        Vec::with_capacity(request.candidates.len());
-    for candidate in &request.candidates {
-        let mut reasons = candidate.protected_reasons.clone();
-        if protected_timestamps.contains(candidate.timestamp.as_str()) {
-            reasons.push("referenced_timestamp".to_string());
-        }
-        if candidate.timestamp.len() >= 6
-            && recent_months.contains(&candidate.timestamp[..6])
-        {
-            reasons.push("recent_month".to_string());
-        }
-        if !request.current_timestamp.is_empty()
-            && candidate.timestamp.as_str() > request.current_timestamp.as_str()
-        {
-            reasons.push("future_timestamp".to_string());
-        }
-        if let Some(canonical_dir) =
-            canonicalize_existing(Path::new(&candidate.artifact_dir))
-        {
-            if protected_dirs.contains(&canonical_dir) {
-                reasons.push("referenced_dir".to_string());
-            }
-        }
-        if let Some(violation) =
-            run_candidate_safety_violation(&projects_root, candidate)
-        {
-            reasons.push(violation.to_string());
-        }
-        reasons_by_index.push(dedupe(reasons));
-    }
 
     let mut eligible: Vec<usize> = (0..request.candidates.len())
         .filter(|&index| reasons_by_index[index].is_empty())
@@ -375,7 +354,7 @@ pub fn apply_agent_artifact_run_retention(
 /// runs, every subdirectory beneath it has already been removed, so the
 /// call fails closed (an `OSError`, surfaced as an `error` outcome) if
 /// anything reappeared between the read and the removal.
-fn prune_empty_tree(
+pub(crate) fn prune_empty_tree(
     workflow_root: &Path,
     dir: &Path,
     watched: &BTreeSet<PathBuf>,
@@ -493,7 +472,7 @@ fn item_skip(
 /// canonicalize under *projects_root*, have no symlink in the submitted path
 /// components, and resolve to the exact project/workflow/run location named
 /// by its wire identity.
-fn run_candidate_safety_violation(
+pub(crate) fn run_candidate_safety_violation(
     projects_root: &Path,
     candidate: &AgentArtifactRunCandidateWire,
 ) -> Option<&'static str> {
@@ -522,7 +501,7 @@ fn run_candidate_safety_violation(
     None
 }
 
-fn existing_path_safety_violation(
+pub(crate) fn existing_path_safety_violation(
     projects_root: &Path,
     path: &Path,
 ) -> Option<&'static str> {
@@ -535,7 +514,9 @@ fn existing_path_safety_violation(
     symlink_component_violation(projects_root, path)
 }
 
-fn projects_root_safety_violation(root: &Path) -> Option<&'static str> {
+pub(crate) fn projects_root_safety_violation(
+    root: &Path,
+) -> Option<&'static str> {
     let Ok(metadata) = fs::symlink_metadata(root) else {
         return None;
     };
@@ -607,14 +588,16 @@ fn absolutize_lexically(path: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
-fn canonical_protected_dirs(raw_dirs: &[String]) -> BTreeSet<PathBuf> {
+pub(crate) fn canonical_protected_dirs(
+    raw_dirs: &[String],
+) -> BTreeSet<PathBuf> {
     raw_dirs
         .iter()
         .filter_map(|path| canonicalize_existing(Path::new(path)))
         .collect()
 }
 
-fn valid_project_component(value: &str) -> bool {
+pub(crate) fn valid_project_component(value: &str) -> bool {
     !value.is_empty()
         && value != "."
         && value != ".."
@@ -622,7 +605,7 @@ fn valid_project_component(value: &str) -> bool {
         && !value.contains('\\')
 }
 
-fn valid_run_timestamp(value: &str) -> bool {
+pub(crate) fn valid_run_timestamp(value: &str) -> bool {
     value.len() == 14 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
@@ -659,7 +642,7 @@ fn is_day_shard_name(value: &str) -> bool {
     value.len() == 2 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn fresh_active_marker_reason(path: &Path) -> Option<String> {
+pub(crate) fn fresh_active_marker_reason(path: &Path) -> Option<String> {
     if !path.join("done.json").exists() {
         return Some("not_terminal".to_string());
     }
@@ -686,7 +669,7 @@ fn remove_run_dir(path: &Path) -> Result<u64, String> {
     Ok(size_bytes)
 }
 
-fn tree_size(path: &Path) -> u64 {
+pub(crate) fn tree_size(path: &Path) -> u64 {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return 0;
     };
@@ -704,7 +687,7 @@ fn tree_size(path: &Path) -> u64 {
     total
 }
 
-fn canonicalize_existing(path: &Path) -> Option<PathBuf> {
+pub(crate) fn canonicalize_existing(path: &Path) -> Option<PathBuf> {
     fs::canonicalize(path).ok()
 }
 
@@ -717,6 +700,45 @@ fn dedupe(values: Vec<String>) -> Vec<String> {
         }
     }
     out
+}
+
+/// Apply the exact protection and path-classification predicate used by the
+/// retention preview. Quarantine calls this again immediately before a move.
+pub(crate) fn classify_run_candidate(
+    projects_root: &Path,
+    candidate: &AgentArtifactRunCandidateWire,
+    protected_dirs: &BTreeSet<PathBuf>,
+    protected_timestamps: &BTreeSet<String>,
+    recent_months: &BTreeSet<String>,
+    current_timestamp: &str,
+) -> Vec<String> {
+    let mut reasons = candidate.protected_reasons.clone();
+    if protected_timestamps.contains(&candidate.timestamp) {
+        reasons.push("referenced_timestamp".to_string());
+    }
+    if candidate.timestamp.len() >= 6
+        && recent_months.contains(&candidate.timestamp[..6])
+    {
+        reasons.push("recent_month".to_string());
+    }
+    if !current_timestamp.is_empty()
+        && candidate.timestamp.as_str() > current_timestamp
+    {
+        reasons.push("future_timestamp".to_string());
+    }
+    if let Some(canonical_dir) =
+        canonicalize_existing(Path::new(&candidate.artifact_dir))
+    {
+        if protected_dirs.contains(&canonical_dir) {
+            reasons.push("referenced_dir".to_string());
+        }
+    }
+    if let Some(violation) =
+        run_candidate_safety_violation(projects_root, candidate)
+    {
+        reasons.push(violation.to_string());
+    }
+    dedupe(reasons)
 }
 
 #[cfg(test)]
