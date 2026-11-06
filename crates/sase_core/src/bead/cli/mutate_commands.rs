@@ -37,6 +37,16 @@ pub(super) fn handle_open(
     match open_issue(write_beads_dir, &args[0], None) {
         Ok(outcome) => {
             let issue = outcome.issue.as_ref().expect("open outcome has issue");
+            if !outcome.changed {
+                return Ok(success_with_mutation(
+                    format!("· Already open: {} — {}\n", issue.id, issue.title),
+                    mutation_summary(
+                        "open",
+                        &outcome,
+                        outcome.old_issues.first(),
+                    ),
+                ));
+            }
             let mut stdout =
                 format!("○ Opened: {} — {}\n", issue.id, issue.title);
             for ancestor in &outcome.issues {

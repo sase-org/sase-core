@@ -487,7 +487,7 @@ pub(crate) use sase_core::bead::{
     needs_snoozed_status_migration as core_bead_needs_snoozed_status_migration,
     needs_task_ready_migration as core_bead_needs_task_ready_migration,
     needs_task_type_migration as core_bead_needs_task_type_migration,
-    open_issue as core_bead_open_issue,
+    open_issue_with_actor as core_bead_open_issue_with_actor,
     plus_one_evidence_migration_sql as core_bead_plus_one_evidence_migration_sql,
     preclaim_epic_work_plan as core_bead_preclaim_epic_work_plan,
     prune_removed_flag_event_streams as core_bead_prune_removed_flag_event_streams,

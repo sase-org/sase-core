@@ -26,8 +26,8 @@ pub use claims::{
 };
 pub use close_remove::{
     close_issues, close_issues_with_note,
-    close_issues_with_note_and_provenance, open_issue, remove_issue,
-    remove_issues,
+    close_issues_with_note_and_provenance, open_issue, open_issue_with_actor,
+    remove_issue, remove_issues,
 };
 pub use completion_recovery::{
     recover_failed_closes, BeadFailedCloseRecoveryEntryWire,

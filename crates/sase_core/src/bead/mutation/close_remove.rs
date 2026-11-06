@@ -27,8 +27,17 @@ pub fn open_issue(
     issue_id: &str,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
+    open_issue_with_actor(beads_dir, issue_id, None, now)
+}
+
+pub fn open_issue_with_actor(
+    beads_dir: &Path,
+    issue_id: &str,
+    actor: Option<String>,
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
     run_mutation(beads_dir, "open", |view| {
-        run_open(view, issue_id, now.clone())
+        run_open(view, issue_id, actor.clone(), now.clone())
     })
 }
 
@@ -39,16 +48,38 @@ pub fn open_issue(
 /// `commit` persists both backings. A decline retries the same closure
 /// on the replay backing; errors preserve the replay oracle's kinds and
 /// messages.
+///
+/// Reopening an already-open bead is a no-op: no event, no write,
+/// `changed` false. The acting opener is recorded on every `IssueOpened`
+/// event, falling back to the store owner exactly as close does.
 fn run_open(
     view: &mut MutationView,
     issue_id: &str,
+    actor: Option<String>,
     now: Option<String>,
 ) -> Result<MutationStep<BeadMutationOutcomeWire>, BeadError> {
     let resolved = view.resolve(issue_id)?;
     let old_issue = view.get(&resolved)?;
+    if old_issue.status == StatusWire::Open {
+        let mut result = outcome("open", false, vec![old_issue.id.clone()]);
+        result.message = "issue is already open".to_string();
+        result.issue = Some(old_issue.clone());
+        result.old_issues = vec![old_issue];
+        return Ok(MutationStep::Done(result));
+    }
     let mut issue = old_issue.clone();
     let was_closed = issue.status == StatusWire::Closed;
     let now = now.unwrap_or_else(now_utc);
+    // The acting opener: trimmed non-blank value, else the store owner.
+    // A blank owner (test-only stores) leaves the envelope actor blank
+    // rather than writing a blank value `validate_for` rejects.
+    let owner = view.config()?.owner.clone();
+    let actor = actor
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&owner)
+        .to_string();
     issue.status = StatusWire::Open;
     archive_close_metadata(&mut issue, &now, BeadReopenCauseWire::Open, None);
     clear_snooze_record(&mut issue);
@@ -67,7 +98,7 @@ fn run_open(
         BeadEventOperationWire::IssueOpened,
         BeadEventPayloadWire::IssueOpened,
         &now,
-        &issue.created_by,
+        &actor,
     )?
     else {
         return Ok(MutationStep::NeedsReplay);
@@ -78,7 +109,7 @@ fn run_open(
             BeadEventOperationWire::IssueOpened,
             BeadEventPayloadWire::IssueOpened,
             &now,
-            &ancestor.created_by,
+            &actor,
         )?
         else {
             return Ok(MutationStep::NeedsReplay);

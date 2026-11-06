@@ -1018,19 +1018,25 @@ fn py_bead_preclaim_epic_work<'py>(
     )
 }
 
+/// Reopen a bead. `author` is the open actor: it is recorded on every
+/// `issue_opened` event, falling back to the store owner exactly as close
+/// does. Reopening an already-open bead is a no-op (`changed` false).
 #[pyfunction]
 #[pyo3(name = "bead_open")]
-#[pyo3(signature = (beads_dir, issue_id, now=None))]
+#[pyo3(signature = (beads_dir, issue_id, now=None, author=None))]
 fn py_bead_open<'py>(
     py: Python<'py>,
     beads_dir: &str,
     issue_id: &str,
     now: Option<String>,
+    author: Option<String>,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
     bead_result_to_py(
         py,
-        py.allow_threads(|| core_bead_open_issue(&beads_dir, issue_id, now)),
+        py.allow_threads(|| {
+            core_bead_open_issue_with_actor(&beads_dir, issue_id, author, now)
+        }),
     )
 }
 

@@ -13,6 +13,7 @@ mod links_evidence;
 mod links_projection;
 mod notes_attachments;
 mod notes_update;
+mod open;
 mod proof_bounded;
 mod publish_direct;
 mod read_model_mutations;
