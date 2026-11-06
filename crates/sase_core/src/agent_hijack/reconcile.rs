@@ -172,7 +172,10 @@ pub fn hijack_recovery_reconcile(
     }
 
     let successor = &facts.successor;
-    if successor.name_only {
+    // A proven-not-dispatched observation carries no successor evidence to
+    // mistake for a name; it must reach the return-to-held branch below.
+    if successor.name_only && successor.kind != HIJACK_SUCCESSOR_NOT_DISPATCHED
+    {
         return Ok(retain(
             "uncertain",
             "successor evidence is a name without launch or process identity; keeping custody",
@@ -229,6 +232,11 @@ pub fn hijack_recovery_reconcile(
                 Ok(return_to_held(record))
             }
         }
+        HIJACK_SUCCESSOR_NOT_DISPATCHED => Ok(return_to_held_with_code(
+            "not_dispatched",
+            "the admission journal proves the reserved request was never dispatched; return to held",
+            record,
+        )),
         other => Ok(retain(
             "uncertain",
             &format!(
@@ -345,10 +353,22 @@ fn adopt(
 fn return_to_held(
     record: &AgentHijackRecordWire,
 ) -> AgentHijackReconcileDecisionWire {
-    decision(
-        HIJACK_RECONCILE_RETURN_TO_HELD,
+    return_to_held_with_code(
         "absent",
         "the resolver is dead and no queued or executing successor exists; return to held",
+        record,
+    )
+}
+
+fn return_to_held_with_code(
+    code: &str,
+    message: &str,
+    record: &AgentHijackRecordWire,
+) -> AgentHijackReconcileDecisionWire {
+    decision(
+        HIJACK_RECONCILE_RETURN_TO_HELD,
+        code,
+        message,
         record.reserved_successor_name.clone(),
         None,
     )
@@ -552,5 +572,37 @@ mod tests {
         let decision = hijack_recovery_reconcile(&record, &facts()).unwrap();
         assert_eq!(decision.outcome, HIJACK_RECONCILE_RETAIN_WITH_ERROR);
         assert_eq!(decision.code.as_deref(), Some("uncertain"));
+    }
+
+    #[test]
+    fn not_dispatched_with_launch_evidence_returns_to_held() {
+        let mut record = resolving();
+        record.launch_identity = Some("launch-abc".to_owned());
+        record.admission_request_id = Some("req-1".to_owned());
+        let mut observed = facts();
+        observed.successor = AgentHijackSuccessorObservationWire {
+            kind: HIJACK_SUCCESSOR_NOT_DISPATCHED.to_owned(),
+            name: Some("agent.2".to_owned()),
+            ..Default::default()
+        };
+        let decision = hijack_recovery_reconcile(&record, &observed).unwrap();
+        assert_eq!(decision.outcome, HIJACK_RECONCILE_RETURN_TO_HELD);
+        assert_eq!(decision.code.as_deref(), Some("not_dispatched"));
+    }
+
+    #[test]
+    fn not_dispatched_young_resolver_still_waits() {
+        let mut record = resolving();
+        record.launch_identity = Some("launch-abc".to_owned());
+        let mut observed = facts();
+        observed.resolving_age_seconds = 5.0;
+        observed.successor = AgentHijackSuccessorObservationWire {
+            kind: HIJACK_SUCCESSOR_NOT_DISPATCHED.to_owned(),
+            name: Some("agent.2".to_owned()),
+            ..Default::default()
+        };
+        let decision = hijack_recovery_reconcile(&record, &observed).unwrap();
+        assert_eq!(decision.outcome, HIJACK_RECONCILE_KEEP_RESOLVING);
+        assert_eq!(decision.code.as_deref(), Some("too_young"));
     }
 }

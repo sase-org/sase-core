@@ -236,6 +236,38 @@ fn preview_and_reconcile_bindings_round_trip() {
         let value = py_to_json_value(decision.bind(py)).unwrap();
         assert_eq!(value["outcome"], json!("return_to_held"));
         assert_eq!(value["code"], json!("absent"));
+
+        let record = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "state": "resolving",
+                "revision": 4,
+                "reserved_successor_name": "agent.2",
+                "resolver_pid": 99,
+                "resolver_process_identity_token": "boot:1",
+                "launch_identity": "launch-abc",
+                "admission_request_id": "req-1",
+            }),
+        );
+        let facts = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "resolving_age_seconds": 90.0,
+                "min_age_seconds": 60.0,
+                "resolver": {
+                    "pid_live": false,
+                    "identity_matches": false,
+                },
+                "successor": {"kind": "not_dispatched", "name": "agent.2"},
+            }),
+        );
+        let decision =
+            py_hijack_recovery_reconcile(py, &record, &facts).unwrap();
+        let value = py_to_json_value(decision.bind(py)).unwrap();
+        assert_eq!(value["outcome"], json!("return_to_held"));
+        assert_eq!(value["code"], json!("not_dispatched"));
     });
 }
 

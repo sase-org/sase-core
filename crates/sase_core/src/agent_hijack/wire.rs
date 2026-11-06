@@ -45,6 +45,10 @@ pub const HIJACK_SUCCESSOR_LIVE: &str = "live";
 pub const HIJACK_SUCCESSOR_COMPLETED: &str = "completed";
 pub const HIJACK_SUCCESSOR_MISMATCHED: &str = "mismatched";
 pub const HIJACK_SUCCESSOR_UNCERTAIN: &str = "uncertain";
+/// The admission journal proves the reserved request was never dispatched
+/// (missing, cancelled, or terminally failed/rejected) and no ack, child
+/// metadata, or successor artifacts exist.
+pub const HIJACK_SUCCESSOR_NOT_DISPATCHED: &str = "not_dispatched";
 
 /// Reconciliation outcomes. `retain_with_error` keeps custody.
 pub const HIJACK_RECONCILE_KEEP_RESOLVING: &str = "keep_resolving";
