@@ -47,9 +47,9 @@ fn agent_artifact_run_trash_bindings_round_trip() {
     std::fs::write(run.join("result.txt"), b"keep me\n").unwrap();
 
     Python::with_gil(|py| {
-        assert_eq!(py_agent_artifact_run_trash_wire_schema_version(), 1);
+        assert_eq!(py_agent_artifact_run_trash_wire_schema_version(), 2);
         let quarantine = json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "projects_root": projects,
             "sources_unavailable": [],
             "protected_dirs": [],
@@ -83,7 +83,7 @@ fn agent_artifact_run_trash_bindings_round_trip() {
         let restore = json_value_to_py(
             py,
             &json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "trash_root": trash,
                 "projects_root": projects,
                 "batch_id": "binding-round-trip",
@@ -102,7 +102,7 @@ fn agent_artifact_run_trash_bindings_round_trip() {
         );
 
         let quarantine = json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "projects_root": projects,
             "sources_unavailable": [],
             "protected_dirs": [],
@@ -125,14 +125,17 @@ fn agent_artifact_run_trash_bindings_round_trip() {
         let purge = json_value_to_py(
             py,
             &json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "trash_root": trash,
                 "projects_root": projects,
                 "before": null,
                 "purge_all": true,
                 "sources_unavailable": [],
                 "protected_dirs": [],
-                "protected_timestamps": []
+                "protected_timestamps": [],
+                "protected_agent_names": [],
+                "non_closed_bead_ids_by_project": {},
+                "continuation_runs": []
             }),
         )
         .unwrap();

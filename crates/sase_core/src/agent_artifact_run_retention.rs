@@ -526,7 +526,7 @@ pub(crate) fn projects_root_safety_violation(
     None
 }
 
-fn symlink_component_violation(
+pub(crate) fn symlink_component_violation(
     projects_root: &Path,
     path: &Path,
 ) -> Option<&'static str> {

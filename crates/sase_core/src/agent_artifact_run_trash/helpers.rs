@@ -11,9 +11,9 @@ use super::{
     AGENT_ARTIFACT_RUN_TRASH_WIRE_SCHEMA_VERSION,
 };
 use crate::agent_artifact_run_retention::{
-    canonicalize_existing, projects_root_safety_violation, tree_size,
-    valid_project_component, valid_run_timestamp,
-    AgentArtifactRunCandidateWire,
+    canonicalize_existing, projects_root_safety_violation,
+    symlink_component_violation, tree_size, valid_project_component,
+    valid_run_timestamp, AgentArtifactRunCandidateWire,
 };
 use crate::store_lock::{acquire_store_lock, LockMode, StoreLockError};
 
@@ -287,8 +287,12 @@ pub(super) fn read_journal(batch_dir: &Path) -> JournalInfo {
 pub(super) fn collect_trash_runs(
     batch_dir: &Path,
     journal: &JournalInfo,
+    trash_root: &Path,
 ) -> Vec<TrashRun> {
     let runs_root = batch_dir.join("runs");
+    if !safe_trash_item(trash_root, &runs_root) {
+        return Vec::new();
+    }
     let Ok(project_entries) = fs::read_dir(&runs_root) else {
         return Vec::new();
     };
@@ -331,7 +335,7 @@ pub(super) fn collect_trash_runs(
                     if !valid_run_timestamp(&timestamp)
                         || !timestamp.starts_with(&month)
                         || timestamp[6..8] != day
-                        || !safe_real_dir(&run_entry.path())
+                        || !safe_trash_item(trash_root, &run_entry.path())
                     {
                         continue;
                     }
@@ -396,12 +400,18 @@ pub(super) fn ensure_safe_batch(
     let canonical_root = canonicalize_existing(root).ok_or_else(|| {
         AgentArtifactRunTrashError::UnsafeTrashRoot(root.display().to_string())
     })?;
+    if !safe_real_dir(batch)
+        || symlink_component_violation(&canonical_root, batch).is_some()
+    {
+        return Err(AgentArtifactRunTrashError::UnsafeTrashRoot(
+            batch.display().to_string(),
+        ));
+    }
     let canonical_batch = canonicalize_existing(batch).ok_or_else(|| {
         AgentArtifactRunTrashError::UnsafeTrashRoot(batch.display().to_string())
     })?;
     if canonical_batch == canonical_root
         || !canonical_batch.starts_with(&canonical_root)
-        || !path_has_no_symlink_components(&canonical_root, &canonical_batch)
     {
         return Err(AgentArtifactRunTrashError::UnsafeTrashRoot(
             batch.display().to_string(),
@@ -414,35 +424,16 @@ pub(super) fn safe_trash_item(root: &Path, item: &Path) -> bool {
     let Some(canonical_root) = canonicalize_existing(root) else {
         return false;
     };
+    if !safe_real_dir(item)
+        || symlink_component_violation(&canonical_root, item).is_some()
+    {
+        return false;
+    }
     let Some(canonical_item) = canonicalize_existing(item) else {
         return false;
     };
     canonical_item != canonical_root
         && canonical_item.starts_with(&canonical_root)
-        && path_has_no_symlink_components(&canonical_root, item)
-        && safe_real_dir(item)
-}
-
-pub(super) fn path_has_no_symlink_components(
-    root: &Path,
-    target: &Path,
-) -> bool {
-    let Some(relative) = target.strip_prefix(root).ok() else {
-        return false;
-    };
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        match component {
-            Component::Normal(part) => current.push(part),
-            _ => return false,
-        }
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return false,
-            Ok(_) => {}
-            Err(_) => return false,
-        }
-    }
-    true
 }
 
 pub(super) fn create_directories_no_symlinks(
@@ -488,13 +479,8 @@ pub(super) fn create_directories_no_symlinks(
 pub(super) fn cleanup_empty_batch(batch_dir: &Path) -> std::io::Result<()> {
     let runs = batch_dir.join("runs");
     if safe_real_dir(&runs) {
-        for entry in fs::read_dir(&runs)? {
-            let path = entry?.path();
-            if safe_real_dir(&path) {
-                remove_empty_directories(&path)?;
-            }
-        }
-        if fs::read_dir(&runs)?.next().is_none() {
+        cleanup_empty_structural_dirs(&runs)?;
+        if directory_is_empty(&runs)? {
             fs::remove_dir(&runs)?;
         }
     }
@@ -520,17 +506,53 @@ pub(super) fn cleanup_empty_batch(batch_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn remove_empty_directories(path: &Path) -> std::io::Result<()> {
-    for entry in fs::read_dir(path)? {
-        let child = entry?.path();
-        if safe_real_dir(&child) {
-            remove_empty_directories(&child)?;
+fn cleanup_empty_structural_dirs(runs_root: &Path) -> std::io::Result<()> {
+    for project_entry in fs::read_dir(runs_root)? {
+        let project_path = project_entry?.path();
+        if !safe_real_dir(&project_path) {
+            continue;
+        }
+        for month_entry in fs::read_dir(&project_path)? {
+            let month_path = month_entry?.path();
+            let month = month_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if month.len() != 6
+                || !month.bytes().all(|byte| byte.is_ascii_digit())
+                || !safe_real_dir(&month_path)
+            {
+                continue;
+            }
+            for day_entry in fs::read_dir(&month_path)? {
+                let day_path = day_entry?.path();
+                let day = day_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if day.len() != 2
+                    || !day.bytes().all(|byte| byte.is_ascii_digit())
+                    || !safe_real_dir(&day_path)
+                {
+                    continue;
+                }
+                if directory_is_empty(&day_path)? {
+                    fs::remove_dir(&day_path)?;
+                }
+            }
+            if directory_is_empty(&month_path)? {
+                fs::remove_dir(&month_path)?;
+            }
+        }
+        if directory_is_empty(&project_path)? {
+            fs::remove_dir(&project_path)?;
         }
     }
-    if fs::read_dir(path)?.next().is_none() {
-        fs::remove_dir(path)?;
-    }
     Ok(())
+}
+
+fn directory_is_empty(path: &Path) -> std::io::Result<bool> {
+    Ok(fs::read_dir(path)?.next().is_none())
 }
 
 pub(super) fn directory_modified_at(path: &Path) -> String {
@@ -623,7 +645,13 @@ pub(super) enum RestoreOneError {
 pub(super) fn restore_one(
     entry: &TrashRun,
     projects_root: &Path,
+    trash_root: &Path,
 ) -> Result<PathBuf, RestoreOneError> {
+    if !safe_trash_item(trash_root, &entry.trash_path) {
+        return Err(RestoreOneError::Unsafe(
+            "trash source left the trusted root".to_string(),
+        ));
+    }
     if !is_expected_original_path(
         &entry.original_relative_path,
         &entry.project,
@@ -658,6 +686,51 @@ pub(super) fn restore_one(
         }
     })?;
     Ok(target)
+}
+
+#[derive(Debug, Default)]
+pub(super) struct TrashRunMeta {
+    pub(super) agent_names: BTreeSet<String>,
+    pub(super) bead_ids: BTreeSet<String>,
+}
+
+pub(super) fn read_trash_run_meta(path: &Path) -> Result<TrashRunMeta, String> {
+    let mut meta = TrashRunMeta::default();
+    if let Some(value) = read_optional_json(&path.join("done.json"))? {
+        if let Some(name) = nonempty_str(&value, "name") {
+            meta.agent_names.insert(name.to_string());
+        }
+    }
+    if let Some(value) = read_optional_json(&path.join("agent_meta.json"))? {
+        for key in ["name", "artifact_agent_id"] {
+            if let Some(name) = nonempty_str(&value, key) {
+                meta.agent_names.insert(name.to_string());
+            }
+        }
+        for key in ["bead_id", "phase_bead_id", "epic_bead_id"] {
+            if let Some(id) = nonempty_str(&value, key) {
+                meta.bead_ids.insert(id.to_string());
+            }
+        }
+    }
+    Ok(meta)
+}
+
+fn read_optional_json(path: &Path) -> Result<Option<Value>, String> {
+    match fs::read_to_string(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|error| error.to_string()),
+    }
+}
+
+fn nonempty_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
 }
 
 pub(super) fn trash_item_result(

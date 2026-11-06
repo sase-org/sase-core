@@ -2,7 +2,7 @@
 
 use super::helpers::*;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 
@@ -16,8 +16,12 @@ use crate::agent_artifact_run_retention::{
     prune_empty_tree, run_candidate_safety_violation, tree_size,
     AgentArtifactEmptyShardResultWire, AgentArtifactRunCandidateWire,
 };
+use crate::continuation::{
+    plan_continuation_retention, ContinuationRetentionRequestWire,
+    ContinuationRetentionRunWire, CONTINUATION_WIRE_SCHEMA_VERSION,
+};
 
-pub const AGENT_ARTIFACT_RUN_TRASH_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_ARTIFACT_RUN_TRASH_WIRE_SCHEMA_VERSION: u32 = 2;
 
 const MAX_TRASH_ITEMS: usize = 200_000;
 
@@ -159,6 +163,9 @@ pub struct AgentArtifactRunTrashPurgeRequestWire {
     pub sources_unavailable: Vec<String>,
     pub protected_dirs: Vec<String>,
     pub protected_timestamps: Vec<String>,
+    pub protected_agent_names: Vec<String>,
+    pub non_closed_bead_ids_by_project: BTreeMap<String, Vec<String>>,
+    pub continuation_runs: Vec<ContinuationRetentionRunWire>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -608,7 +615,7 @@ pub fn list_agent_artifact_run_trash(
         if journal.unreadable {
             result.unreadable_journal_count += 1;
         }
-        let runs = collect_trash_runs(&path, &journal);
+        let runs = collect_trash_runs(&path, &journal, &canonical_root);
         let mut projects = BTreeSet::new();
         let mut orphan_items = Vec::new();
         let mut bytes = 0_u64;
@@ -679,13 +686,19 @@ pub fn restore_agent_artifact_run_trash(
     }
     ensure_safe_batch(&trash_root, &batch_dir)?;
     let journal_info = read_journal(&batch_dir);
-    let entries = collect_trash_runs(&batch_dir, &journal_info);
+    let entries = collect_trash_runs(&batch_dir, &journal_info, &trash_root);
     let selected: Option<BTreeSet<String>> = request
         .items
         .as_ref()
         .map(|items| items.iter().cloned().collect());
     let journal_path = batch_dir.join("journal.jsonl");
-    let mut journal = open_journal_append(&journal_path).ok();
+    let mut journal = match open_journal_append(&journal_path) {
+        Ok(file) => Some(file),
+        Err(_) => {
+            result.errors += 1;
+            None
+        }
+    };
     for entry in entries {
         if selected
             .as_ref()
@@ -755,6 +768,16 @@ pub fn restore_agent_artifact_run_trash(
             ));
             continue;
         }
+        if !safe_trash_item(&trash_root, &entry.trash_path) {
+            result.errors += 1;
+            result.items.push(trash_item_result(
+                &entry,
+                "error",
+                vec!["unsafe_path".to_string()],
+                Some("trash source left the trusted root".to_string()),
+            ));
+            continue;
+        }
         match fs::rename(&entry.trash_path, &target) {
             Ok(()) => {
                 result.restored += 1;
@@ -767,7 +790,7 @@ pub fn restore_agent_artifact_run_trash(
                     None,
                 ));
                 if let Some(journal) = journal.as_mut() {
-                    let _ = append_journal_line(
+                    if append_journal_line(
                         journal,
                         &json!({
                             "kind": "restore_item",
@@ -775,7 +798,11 @@ pub fn restore_agent_artifact_run_trash(
                             "project": entry.project,
                             "timestamp": entry.timestamp,
                         }),
-                    );
+                    )
+                    .is_err()
+                    {
+                        result.errors += 1;
+                    }
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -798,8 +825,8 @@ pub fn restore_agent_artifact_run_trash(
             }
         }
     }
-    if result.restored > 0 {
-        cleanup_empty_batch(&batch_dir)?;
+    if result.restored > 0 && cleanup_empty_batch(&batch_dir).is_err() {
+        result.errors += 1;
     }
     if result.conflicts > 0 || result.errors > 0 {
         result.status = "partial".to_string();
@@ -831,10 +858,40 @@ pub fn purge_agent_artifact_run_trash(
         result.blocked_reason = Some("busy".to_string());
         return Ok(result);
     };
-    let protected_dirs =
-        normalized_protected_dirs(&request.protected_dirs, &projects_root);
-    let protected_timestamps: BTreeSet<String> =
-        request.protected_timestamps.iter().cloned().collect();
+    let continuation =
+        match plan_continuation_retention(ContinuationRetentionRequestWire {
+            schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+            runs: request.continuation_runs.clone(),
+        }) {
+            Ok(plan) => plan,
+            Err(error) => {
+                result.status = "blocked".to_string();
+                result.blocked_reason = Some(format!(
+                    "protection_unavailable: continuation observations: {error}"
+                ));
+                return Ok(result);
+            }
+        };
+    let protections = PurgeProtections {
+        dirs: normalized_protected_dirs(
+            &request.protected_dirs,
+            &projects_root,
+        ),
+        timestamps: request.protected_timestamps.iter().cloned().collect(),
+        agent_names: request.protected_agent_names.iter().cloned().collect(),
+        non_closed_beads: request
+            .non_closed_bead_ids_by_project
+            .iter()
+            .map(|(project, ids)| {
+                (project.clone(), ids.iter().cloned().collect())
+            })
+            .collect(),
+        continuation_dirs: normalized_protected_dirs(
+            &continuation.protected_dirs,
+            &projects_root,
+        ),
+        continuation_reasons: continuation.reasons_by_dir,
+    };
     let batch_dirs = batch_directories(&trash_root)?;
     for (batch_id, batch_dir) in batch_dirs {
         let journal_info = read_journal(&batch_dir);
@@ -850,19 +907,36 @@ pub fn purge_agent_artifact_run_trash(
             continue;
         }
         ensure_safe_batch(&trash_root, &batch_dir)?;
-        let entries = collect_trash_runs(&batch_dir, &journal_info);
+        let entries =
+            collect_trash_runs(&batch_dir, &journal_info, &trash_root);
         let mut journal =
-            open_journal_append(&batch_dir.join("journal.jsonl")).ok();
+            match open_journal_append(&batch_dir.join("journal.jsonl")) {
+                Ok(file) => Some(file),
+                Err(_) => {
+                    result.errors += 1;
+                    None
+                }
+            };
         for entry in entries {
-            let original = projects_root.join(&entry.original_relative_path);
-            let protected = protected_timestamps.contains(&entry.timestamp)
-                || normalized_path_matches(
-                    &original,
-                    &protected_dirs,
-                    &projects_root,
-                );
-            if protected {
-                match restore_one(&entry, &projects_root) {
+            let reasons = match purge_item_reasons(
+                &entry,
+                &projects_root,
+                &protections,
+            ) {
+                Ok(reasons) => reasons,
+                Err(error) => {
+                    result.kept += 1;
+                    result.items.push(trash_item_result(
+                        &entry,
+                        "kept",
+                        vec!["metadata_unavailable".to_string()],
+                        Some(error),
+                    ));
+                    continue;
+                }
+            };
+            if !reasons.is_empty() {
+                match restore_one(&entry, &projects_root, &trash_root) {
                     Ok(target) => {
                         result.restored += 1;
                         result
@@ -886,25 +960,29 @@ pub fn purge_agent_artifact_run_trash(
                         result.items.push(trash_item_result(
                             &entry,
                             "restored_protected",
-                            Vec::new(),
+                            reasons,
                             None,
                         ));
                     }
                     Err(RestoreOneError::Conflict) => {
                         result.kept += 1;
+                        let mut kept_reasons = reasons;
+                        kept_reasons.push("conflict".to_string());
                         result.items.push(trash_item_result(
                             &entry,
                             "kept",
-                            vec!["conflict".to_string()],
+                            kept_reasons,
                             None,
                         ));
                     }
                     Err(RestoreOneError::Unsafe(error)) => {
                         result.kept += 1;
+                        let mut kept_reasons = reasons;
+                        kept_reasons.push("unsafe_path".to_string());
                         result.items.push(trash_item_result(
                             &entry,
                             "kept",
-                            vec!["unsafe_path".to_string()],
+                            kept_reasons,
                             Some(error),
                         ));
                     }
@@ -913,7 +991,7 @@ pub fn purge_agent_artifact_run_trash(
                         result.items.push(trash_item_result(
                             &entry,
                             "error",
-                            Vec::new(),
+                            reasons,
                             Some(error.to_string()),
                         ));
                     }
@@ -970,7 +1048,9 @@ pub fn purge_agent_artifact_run_trash(
                 }
             }
         }
-        cleanup_empty_batch(&batch_dir)?;
+        if cleanup_empty_batch(&batch_dir).is_err() {
+            result.errors += 1;
+        }
         if !batch_dir.exists() {
             result.purged_batches.push(batch_id);
         }
@@ -979,4 +1059,77 @@ pub fn purge_agent_artifact_run_trash(
         result.status = "partial".to_string();
     }
     Ok(result)
+}
+
+struct PurgeProtections {
+    dirs: BTreeSet<PathBuf>,
+    timestamps: BTreeSet<String>,
+    agent_names: BTreeSet<String>,
+    non_closed_beads: BTreeMap<String, BTreeSet<String>>,
+    continuation_dirs: BTreeSet<PathBuf>,
+    continuation_reasons: BTreeMap<String, Vec<String>>,
+}
+
+fn purge_item_reasons(
+    entry: &TrashRun,
+    projects_root: &Path,
+    protections: &PurgeProtections,
+) -> Result<Vec<String>, String> {
+    let mut reasons = Vec::new();
+    let original = projects_root.join(&entry.original_relative_path);
+    if protections.timestamps.contains(&entry.timestamp) {
+        reasons.push("referenced_timestamp".to_string());
+    }
+    if normalized_path_matches(&original, &protections.dirs, projects_root) {
+        reasons.push("referenced_dir".to_string());
+    }
+    if normalized_path_matches(
+        &original,
+        &protections.continuation_dirs,
+        projects_root,
+    ) {
+        let original_key = original.to_string_lossy().into_owned();
+        if let Some(values) =
+            protections.continuation_reasons.get(&original_key)
+        {
+            reasons.extend(values.iter().cloned());
+        } else {
+            reasons.push("continuation_ancestry".to_string());
+        }
+    } else {
+        for (dir, values) in &protections.continuation_reasons {
+            if normalized_path_matches(
+                Path::new(dir),
+                &BTreeSet::from([normalize_path(&original, projects_root)]),
+                projects_root,
+            ) {
+                reasons.extend(values.iter().cloned());
+                break;
+            }
+        }
+    }
+    let meta = read_trash_run_meta(&entry.trash_path)?;
+    if !meta.agent_names.is_disjoint(&protections.agent_names) {
+        reasons.push("referenced_agent".to_string());
+    }
+    if let Some(live) = protections.non_closed_beads.get(&entry.project) {
+        if !meta.bead_ids.is_disjoint(live) {
+            reasons.push("non_closed_bead".to_string());
+        }
+    }
+    if let Some(marker) = fresh_active_marker_reason(&entry.trash_path) {
+        reasons.push(marker);
+    }
+    Ok(dedupe_reasons(reasons))
+}
+
+fn dedupe_reasons(values: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        if seen.insert(value.clone()) {
+            out.push(value);
+        }
+    }
+    out
 }
