@@ -766,6 +766,26 @@ fn py_decide_replay_hood_merge<'py>(
     serialize_to_py(py, &result)
 }
 
+/// Decide whether a publication rebase conflict resolves upstream or escalates.
+#[pyfunction]
+#[pyo3(name = "decide_publication_rebase_conflict")]
+fn py_decide_publication_rebase_conflict<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PublicationRebaseConflictRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid PublicationRebaseConflictRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_decide_publication_rebase_conflict(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
 /// Admit, refuse, or report a stale-replay apply against backup and HEAD facts.
 #[pyfunction]
 #[pyo3(name = "decide_replay_apply")]
@@ -1091,6 +1111,10 @@ pub(crate) fn register_vcs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_decide_replay_byte_divergence, m)?)?;
     m.add_function(wrap_pyfunction!(py_decide_replay_hood_merge, m)?)?;
     m.add_function(wrap_pyfunction!(py_decide_replay_apply, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_decide_publication_rebase_conflict,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_vcs_log_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_log, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_commit_presence, m)?)?;

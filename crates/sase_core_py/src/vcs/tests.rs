@@ -641,6 +641,53 @@ fn replay_recovery_bindings_classify_and_admit() {
 }
 
 #[test]
+fn rebase_conflict_binding_resolves_upstream_and_escalates() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let resolved = {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "paths": ["README.md", "users/bbugyi200/README.md"],
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result =
+                py_decide_publication_rebase_conflict(py, request).unwrap();
+            py_to_json_value(result.bind(py)).unwrap()
+        };
+        assert_eq!(resolved["action"], json!("resolve_upstream"));
+        assert_eq!(
+            resolved["paths"],
+            json!(["README.md", "users/bbugyi200/README.md"])
+        );
+        assert_eq!(resolved["reasons"], json!([]));
+
+        let escalated = {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "paths": [
+                        "README.md",
+                        "agents/alice.athena.foo/chat.md",
+                    ],
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result =
+                py_decide_publication_rebase_conflict(py, request).unwrap();
+            py_to_json_value(result.bind(py)).unwrap()
+        };
+        assert_eq!(escalated["action"], json!("escalate"));
+        assert_eq!(escalated["reasons"].as_array().unwrap().len(), 1);
+    });
+}
+
+#[test]
 fn publication_recovery_bindings_select_and_complete() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

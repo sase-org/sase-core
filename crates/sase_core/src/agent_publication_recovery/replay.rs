@@ -8,11 +8,14 @@
 use crate::commit_sha::commit_shas_equivalent;
 
 use super::wire::{
-    PublicationRecoveryError, ReplayApplyDecisionRequestWire,
-    ReplayApplyDecisionResponseWire, ReplayByteDivergenceRequestWire,
-    ReplayByteDivergenceResponseWire, ReplayHoodMergeRequestWire,
-    ReplayHoodMergeResponseWire, ReplayPathClassWire,
-    ReplayPathClassifyRequestWire, ReplayPathClassifyResponseWire,
+    PublicationRebaseConflictRequestWire,
+    PublicationRebaseConflictResponseWire, PublicationRecoveryError,
+    ReplayApplyDecisionRequestWire, ReplayApplyDecisionResponseWire,
+    ReplayByteDivergenceRequestWire, ReplayByteDivergenceResponseWire,
+    ReplayHoodMergeRequestWire, ReplayHoodMergeResponseWire,
+    ReplayPathClassWire, ReplayPathClassifyRequestWire,
+    ReplayPathClassifyResponseWire, PUBLICATION_REBASE_ACTION_ESCALATE,
+    PUBLICATION_REBASE_ACTION_RESOLVE_UPSTREAM,
     PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
     REPLAY_APPLY_ACTION_ALREADY_COMPLETE, REPLAY_APPLY_ACTION_APPLY,
     REPLAY_APPLY_ACTION_REFUSE, REPLAY_APPLY_ACTION_REPORT,
@@ -237,6 +240,86 @@ pub fn decide_replay_apply(
         action: REPLAY_APPLY_ACTION_APPLY.to_string(),
         reason: "verified backup matches the expected HEAD".to_string(),
     })
+}
+
+/// Decide whether a publication rebase may take the upstream side for every
+/// conflicted path or must escalate for a human.
+///
+/// A conflict resolves upstream only when every path is a regenerable index
+/// page the next publication pass rewrites from manifests: the root
+/// `README.md`, `schema.json`, session and family pages, per-agent index
+/// pages, and per-user, per-machine, and per-hood index pages. Anything else —
+/// prompts, artifacts, owner content, archive objects, or unknown paths —
+/// escalates, because taking a side there could discard work the next pass
+/// cannot rebuild.
+pub fn decide_publication_rebase_conflict(
+    request: &PublicationRebaseConflictRequestWire,
+) -> Result<PublicationRebaseConflictResponseWire, PublicationRecoveryError> {
+    require_schema(request.schema_version)?;
+    let mut escalations: Vec<String> = Vec::new();
+    for path in &request.paths {
+        if let Some(reason) = rebase_conflict_escalation_reason(path) {
+            escalations.push(format!("{path}: {reason}"));
+        }
+    }
+    if escalations.is_empty() {
+        Ok(PublicationRebaseConflictResponseWire {
+            schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+            action: PUBLICATION_REBASE_ACTION_RESOLVE_UPSTREAM.to_string(),
+            paths: request.paths.clone(),
+            reasons: Vec::new(),
+        })
+    } else {
+        Ok(PublicationRebaseConflictResponseWire {
+            schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+            action: PUBLICATION_REBASE_ACTION_ESCALATE.to_string(),
+            paths: request.paths.clone(),
+            reasons: escalations,
+        })
+    }
+}
+
+/// Return the escalation reason for a conflicted path, or `None` when the
+/// path is a regenerable index page the next pass rewrites from manifests.
+fn rebase_conflict_escalation_reason(path: &str) -> Option<&'static str> {
+    let normalized = path.trim_start_matches("./").replace('\\', "/");
+    if normalized.is_empty() || normalized.contains('\0') {
+        return Some("unknown path cannot be auto-resolved");
+    }
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    if parts.is_empty() || parts.contains(&"..") {
+        return Some("unknown path cannot be auto-resolved");
+    }
+    match parts.as_slice() {
+        ["README.md"] | ["schema.json"] => None,
+        ["sessions", name] if name.ends_with(".md") => None,
+        ["families", name] if name.ends_with(".md") => None,
+        ["sessions", ".gitkeep"]
+        | ["families", ".gitkeep"]
+        | ["agents", ".gitkeep"] => None,
+        ["agents", _, "README.md"] => None,
+        ["users", _, "README.md"] => None,
+        ["users", _, "machines", _, "README.md"] => None,
+        ["users", _, "machines", _, "hoods", _, "README.md"] => None,
+        ["prompts", ..] | ["artifacts", ..] => {
+            Some("generated prompt/artifact content is not a regenerable index")
+        }
+        ["files", "objects", ..] => {
+            Some("archive objects must never be rewritten")
+        }
+        _ => match classify_replay_path(path) {
+            REPLAY_PATH_OWNER_CONTENT => {
+                Some("owner content must be reconciled, not overwritten")
+            }
+            REPLAY_PATH_ARCHIVE_OBJECT => {
+                Some("archive objects must never be rewritten")
+            }
+            _ => Some("unknown path cannot be auto-resolved"),
+        },
+    }
 }
 
 pub fn classify_replay_path(path: &str) -> &'static str {
@@ -549,6 +632,95 @@ mod tests {
             schema_version: 99,
             paths: vec!["README.md".to_string()],
         })
+        .unwrap_err();
+        assert_eq!(error, PublicationRecoveryError::UnsupportedSchema(99));
+    }
+
+    fn decide_conflict(
+        paths: &[&str],
+    ) -> PublicationRebaseConflictResponseWire {
+        decide_publication_rebase_conflict(
+            &PublicationRebaseConflictRequestWire {
+                schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+                paths: paths.iter().map(|path| (*path).to_string()).collect(),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rebase_conflict_resolves_regenerable_index_pages() {
+        // The exact paths conflicting on apollo today: only regenerable
+        // index pages, so the pass may take the upstream side and rewrite
+        // them from manifests.
+        let apollo =
+            decide_conflict(&["README.md", "users/bbugyi200/README.md"]);
+        assert_eq!(apollo.action, PUBLICATION_REBASE_ACTION_RESOLVE_UPSTREAM);
+        assert!(apollo.reasons.is_empty());
+        assert_eq!(
+            apollo.paths,
+            vec!["README.md", "users/bbugyi200/README.md"]
+        );
+
+        let indexes = decide_conflict(&[
+            "README.md",
+            "schema.json",
+            "sessions/alice.athena.foo.md",
+            "families/alice.athena.foo.md",
+            "agents/alice.athena.foo/README.md",
+            "users/alice/README.md",
+            "users/alice/machines/athena/README.md",
+            "users/alice/machines/athena/hoods/foo/README.md",
+        ]);
+        assert_eq!(indexes.action, PUBLICATION_REBASE_ACTION_RESOLVE_UPSTREAM);
+        assert!(indexes.reasons.is_empty());
+    }
+
+    #[test]
+    fn rebase_conflict_escalates_anything_else() {
+        for path in [
+            "prompts/stale.md",
+            "artifacts/scratch.bin",
+            "agents/alice.athena.foo/chat.md",
+            "agents/alice.athena.foo/prompt.md",
+            "users/alice/machines/athena/hoods/foo/snapshot.json",
+            "users/alice/machines/athena/manifest.json",
+            "users/alice/notes.md",
+            "files/objects/sha256/ab/abc",
+            "mystery.bin",
+            "",
+            "../escape.md",
+        ] {
+            let decision = decide_conflict(&["README.md", path]);
+            assert_eq!(
+                decision.action, PUBLICATION_REBASE_ACTION_ESCALATE,
+                "path {path:?} must escalate"
+            );
+            assert_eq!(decision.paths.len(), 2);
+            assert_eq!(decision.reasons.len(), 1);
+            assert!(
+                decision.reasons[0].contains(path),
+                "reason must name the path: {:?}",
+                decision.reasons[0]
+            );
+        }
+    }
+
+    #[test]
+    fn rebase_conflict_empty_set_resolves_upstream() {
+        let decision = decide_conflict(&[]);
+        assert_eq!(decision.action, PUBLICATION_REBASE_ACTION_RESOLVE_UPSTREAM);
+        assert!(decision.reasons.is_empty());
+    }
+
+    #[test]
+    fn rebase_conflict_rejects_unsupported_schema() {
+        let error = decide_publication_rebase_conflict(
+            &PublicationRebaseConflictRequestWire {
+                schema_version: 99,
+                paths: vec!["README.md".to_string()],
+            },
+        )
         .unwrap_err();
         assert_eq!(error, PublicationRecoveryError::UnsupportedSchema(99));
     }

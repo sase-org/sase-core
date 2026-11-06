@@ -411,3 +411,22 @@ pub struct ReplayApplyDecisionResponseWire {
     pub action: String,
     pub reason: String,
 }
+
+pub const PUBLICATION_REBASE_ACTION_RESOLVE_UPSTREAM: &str = "resolve_upstream";
+pub const PUBLICATION_REBASE_ACTION_ESCALATE: &str = "escalate";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationRebaseConflictRequestWire {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationRebaseConflictResponseWire {
+    pub schema_version: u32,
+    pub action: String,
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+}

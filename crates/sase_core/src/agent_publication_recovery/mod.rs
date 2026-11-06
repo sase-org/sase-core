@@ -35,7 +35,8 @@ pub use complete::{
 };
 pub use parked::publication_parked_recheck_due;
 pub use replay::{
-    classify_replay_path, classify_replay_paths, decide_replay_apply,
+    classify_replay_path, classify_replay_paths,
+    decide_publication_rebase_conflict, decide_replay_apply,
     decide_replay_byte_divergence, decide_replay_hood_merge,
 };
 pub use select::{select_publication_drain, select_publication_retries};
@@ -49,7 +50,8 @@ pub use wire::{
     PublicationFailureAccountingRequestWire,
     PublicationFailureAccountingResponseWire, PublicationFailureChargeWire,
     PublicationFailureRowWire, PublicationLogicalKeyWire,
-    PublicationPageObservationWire, PublicationRecoveryError,
+    PublicationPageObservationWire, PublicationRebaseConflictRequestWire,
+    PublicationRebaseConflictResponseWire, PublicationRecoveryError,
     PublicationRequestIdentityWire, PublicationRetryRowWire,
     PublicationRetrySelectedWire, PublicationRetrySelectionRequestWire,
     PublicationRetrySelectionResponseWire, PublicationRunObservationWire,
@@ -68,14 +70,15 @@ pub use wire::{
     PUBLICATION_FAILURE_SCOPE_REPOSITORY, PUBLICATION_FAILURE_SCOPE_UNKNOWN,
     PUBLICATION_KIND_RUN, PUBLICATION_KIND_SESSION,
     PUBLICATION_LIFECYCLE_ACTIVE, PUBLICATION_LIFECYCLE_QUARANTINED,
-    PUBLICATION_LIFECYCLE_RETIRED, PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
-    PUBLICATION_SCOPE_LINKED, PUBLICATION_SCOPE_REVISION,
-    REPLAY_APPLY_ACTION_ALREADY_COMPLETE, REPLAY_APPLY_ACTION_APPLY,
-    REPLAY_APPLY_ACTION_REFUSE, REPLAY_APPLY_ACTION_REPORT,
-    REPLAY_BYTES_KEEP_CURRENT, REPLAY_BYTES_KEEP_PREVIOUS, REPLAY_BYTES_REFUSE,
-    REPLAY_HOOD_ACTION_MERGE, REPLAY_HOOD_ACTION_REFUSE,
-    REPLAY_PATH_ARCHIVE_OBJECT, REPLAY_PATH_BROWSING,
-    REPLAY_PATH_OWNER_CONTENT, REPLAY_PATH_UNKNOWN, STALE_REPAIR_ACTION_LINKED,
-    STALE_REPAIR_ACTION_REPAIRED, STALE_REPAIR_ACTION_UNCHANGED,
-    STALE_REPAIR_ACTION_UNRESOLVED,
+    PUBLICATION_LIFECYCLE_RETIRED, PUBLICATION_REBASE_ACTION_ESCALATE,
+    PUBLICATION_REBASE_ACTION_RESOLVE_UPSTREAM,
+    PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION, PUBLICATION_SCOPE_LINKED,
+    PUBLICATION_SCOPE_REVISION, REPLAY_APPLY_ACTION_ALREADY_COMPLETE,
+    REPLAY_APPLY_ACTION_APPLY, REPLAY_APPLY_ACTION_REFUSE,
+    REPLAY_APPLY_ACTION_REPORT, REPLAY_BYTES_KEEP_CURRENT,
+    REPLAY_BYTES_KEEP_PREVIOUS, REPLAY_BYTES_REFUSE, REPLAY_HOOD_ACTION_MERGE,
+    REPLAY_HOOD_ACTION_REFUSE, REPLAY_PATH_ARCHIVE_OBJECT,
+    REPLAY_PATH_BROWSING, REPLAY_PATH_OWNER_CONTENT, REPLAY_PATH_UNKNOWN,
+    STALE_REPAIR_ACTION_LINKED, STALE_REPAIR_ACTION_REPAIRED,
+    STALE_REPAIR_ACTION_UNCHANGED, STALE_REPAIR_ACTION_UNRESOLVED,
 };

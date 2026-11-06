@@ -172,6 +172,7 @@ pub(crate) use sase_core::agent_publication_recovery::{
     classify_replay_paths as core_classify_replay_paths,
     classify_stale_publication_request as core_classify_stale_publication_request,
     decide_publication_failure_accounting as core_decide_publication_failure_accounting,
+    decide_publication_rebase_conflict as core_decide_publication_rebase_conflict,
     decide_publication_request_completion as core_decide_publication_request_completion,
     decide_replay_apply as core_decide_replay_apply,
     decide_replay_byte_divergence as core_decide_replay_byte_divergence,
@@ -182,9 +183,10 @@ pub(crate) use sase_core::agent_publication_recovery::{
     DeferredPromptClassifyRequestWire, PublicationCompletionRequestWire,
     PublicationDrainSelectionRequestWire, PublicationErrorClassifyRequestWire,
     PublicationFailureAccountingRequestWire,
-    PublicationRetrySelectionRequestWire, ReplayApplyDecisionRequestWire,
-    ReplayByteDivergenceRequestWire, ReplayHoodMergeRequestWire,
-    ReplayPathClassifyRequestWire, StalePublicationRepairRequestWire,
+    PublicationRebaseConflictRequestWire, PublicationRetrySelectionRequestWire,
+    ReplayApplyDecisionRequestWire, ReplayByteDivergenceRequestWire,
+    ReplayHoodMergeRequestWire, ReplayPathClassifyRequestWire,
+    StalePublicationRepairRequestWire,
     PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::agent_runtime::{
