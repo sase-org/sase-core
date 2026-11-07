@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.0](https://github.com/sase-org/sase-core/compare/v0.43.3...v0.44.0) - 2026-11-07
+
+### Added
+
+- [**breaking**] require complete protection observations for ACE-run trash purge
+- *(agent-hijack)* return proven-undispatched recoveries to held
+- *(bead)* thread opener actor through core open mutation
+- *(publication)* add core rebase-conflict policy for agent publication
+- *(agent-hijack)* add execution validation and confirmation contract
+- *(agent-artifact-run-trash)* add journaled run quarantine
+- *(sase-core)* anchor scanner rules, version blocks, add parked recheck
+- *(agent-hijack)* add recovery identity, preview, and reconcile wires
+- *(agent-hijack)* add escalation policy and continuation-prompt core with bindings
+- *(core)* add instruction handoff readout classifier
+- *(agent-hijack)* add core ledger and eligibility
+- *(agent-prompts)* add Rust-owned agent prompt selection policy
+- *(bead)* classify epic symbol freshness in Rust
+- *(stranded-work)* retain held workspace as stranded unless live successor owns
+- *(staged-handoff)* add bounded discovery and automatic recovery policy
+- *(agent-run-state)* classify raw evidence and bound hood discovery
+- *(workspace_retention)* classify stranded handoff claim settlement
+- *(staged-recovery)* add Rust-owned recovery contracts and replay decisions
+
+### Fixed
+
+- *(release-steward)* [**breaking**] separate Master Gate jobs from PR merge checks
+- *(sudo-runner)* restrict fixture lock to process spawn
+- *(git-lock)* enforce effective budget in backoff and aged-lock decisions
+
+### Other
+
+- *(staged_handoff)* rustfmt recovery and validate re-exports
+
 ## [0.43.3](https://github.com/sase-org/sase-core/compare/v0.43.2...v0.43.3) - 2026-10-31
 
 ### Added
