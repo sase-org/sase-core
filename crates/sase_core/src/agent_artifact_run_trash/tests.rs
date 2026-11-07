@@ -273,12 +273,12 @@ fn quarantine_moves_to_mirrored_layout_and_restore_is_byte_identical() {
         .exists());
     let moved = trash_run(&fixture, "success");
     assert_eq!(fs::read(moved.join("payload.txt")).unwrap(), expected);
+    // ensure_trash_root reports paths under the canonical trash root; on macOS the
+    // tempdir's /var ancestor resolves to /private/var.
+    let canonical_trash = fs::canonicalize(&fixture.trash).unwrap();
     assert_eq!(
-        result.journal_path,
-        fixture
-            .trash
-            .join("success/journal.jsonl")
-            .to_string_lossy()
+        Path::new(&result.journal_path),
+        canonical_trash.join("success/journal.jsonl")
     );
 
     let restored =
