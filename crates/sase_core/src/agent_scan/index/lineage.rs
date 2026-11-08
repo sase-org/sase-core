@@ -7,8 +7,18 @@ use crate::agent_scan::wire::{
 };
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
+
+pub(super) const PAIR_LINEAGE_COLUMNS_SQL: &str = r#"
+        SELECT artifact_dir, project_name, workflow_dir_name, timestamp,
+               agent_session, parent_timestamp, retry_of_timestamp,
+               retried_as_timestamp, retry_chain_root_timestamp
+        FROM agent_artifacts
+        WHERE project_name = ?1 AND workflow_dir_name = ?2
+        ORDER BY timestamp ASC, artifact_dir ASC
+        "#;
 
 pub(super) const MAX_RELATED_ARTIFACT_LINEAGE_TIMESTAMPS: usize = 128;
 pub(super) const MAX_RELATED_ARTIFACT_QUERY_ITERATIONS: usize = 32;
@@ -130,18 +140,334 @@ pub struct AgentSessionDismissalLineageResultWire {
 
 /// Resolve dismissed-agent-session ancestry for a bounded set of candidates.
 ///
-/// For each candidate, follows the same bounded lineage expansion as
-/// [`query_related_agent_artifact_dirs`] (`parent_timestamp`/retry pointers,
-/// capped by `MAX_RELATED_ARTIFACT_QUERY_ITERATIONS` and
+/// Candidates are grouped by `(project_name, workflow_dir_name)`. Each
+/// distinct pair loads lineage columns once (never `record_json`); each
+/// candidate's expansion then walks those in-memory maps with the same
+/// bounded semantics as [`query_related_agent_artifact_dirs`]
+/// (`parent_timestamp`/retry pointers, capped by
+/// `MAX_RELATED_ARTIFACT_QUERY_ITERATIONS` and
 /// `MAX_RELATED_ARTIFACT_LINEAGE_TIMESTAMPS`) to find the candidate's agent
-/// session root — the related record with no `parent_timestamp` — then checks
-/// whether that root's identity is a dismissed identity. A candidate flagged
-/// `seed_definitively_dead` is also dismissed when its own raw suffix is a
-/// dismissed identity, the same suffix match terminal records already get.
-/// When no root is discoverable within the bound, the candidate is reported
-/// as not dismissed: this API never manufactures a dismissal it cannot
-/// support with indexed evidence.
+/// session root — the related record with no `parent_timestamp` — then
+/// checks whether that root's identity is a dismissed identity. A candidate
+/// flagged `seed_definitively_dead` is also dismissed when its own raw
+/// suffix is a dismissed identity, the same suffix match terminal records
+/// already get. When no root is discoverable within the bound, the
+/// candidate is reported as not dismissed: this API never manufactures a
+/// dismissal it cannot support with indexed evidence.
 pub fn resolve_agent_session_dismissal_lineage(
+    index_path: &Path,
+    candidates: &[AgentSessionDismissalLineageCandidateWire],
+) -> Result<Vec<AgentSessionDismissalLineageResultWire>, String> {
+    super::reset_lineage_pair_load_queries();
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = open_index_read_only(index_path)?;
+    let mut pair_indexes: BTreeMap<(String, String), PairLineageIndex> =
+        BTreeMap::new();
+    for candidate in candidates {
+        let key = (
+            candidate.project_name.clone(),
+            candidate.workflow_dir_name.clone(),
+        );
+        if let Entry::Vacant(slot) = pair_indexes.entry(key) {
+            slot.insert(load_pair_lineage_index(
+                &conn,
+                &candidate.project_name,
+                &candidate.workflow_dir_name,
+            )?);
+        }
+    }
+    let mut root_verdict: BTreeMap<String, bool> = BTreeMap::new();
+    let mut results = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let key = (
+            candidate.project_name.clone(),
+            candidate.workflow_dir_name.clone(),
+        );
+        let Some(pair) = pair_indexes.get(&key) else {
+            return Err(format!(
+                "missing lineage pair index for {} / {}",
+                candidate.project_name, candidate.workflow_dir_name
+            ));
+        };
+        let agent_session_root_dismissed =
+            agent_session_root_dismissed_from_pair(
+                &conn,
+                candidate,
+                pair,
+                &mut root_verdict,
+            )?;
+        results.push(AgentSessionDismissalLineageResultWire {
+            identity: candidate.identity.clone(),
+            agent_session_root_dismissed,
+        });
+    }
+    Ok(results)
+}
+
+/// In-memory lineage columns for one `(project, workflow dir)` pair.
+struct PairLineageIndex {
+    rows: Vec<IndexedLineageRow>,
+    by_timestamp: HashMap<String, Vec<usize>>,
+    by_parent_timestamp: HashMap<String, Vec<usize>>,
+    by_retry_of_timestamp: HashMap<String, Vec<usize>>,
+    by_retried_as_timestamp: HashMap<String, Vec<usize>>,
+    by_retry_chain_root_timestamp: HashMap<String, Vec<usize>>,
+    agent_session_root: HashMap<String, usize>,
+}
+
+impl PairLineageIndex {
+    fn from_rows(rows: Vec<IndexedLineageRow>) -> Self {
+        let mut by_timestamp: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_parent_timestamp: HashMap<String, Vec<usize>> =
+            HashMap::new();
+        let mut by_retry_of_timestamp: HashMap<String, Vec<usize>> =
+            HashMap::new();
+        let mut by_retried_as_timestamp: HashMap<String, Vec<usize>> =
+            HashMap::new();
+        let mut by_retry_chain_root_timestamp: HashMap<String, Vec<usize>> =
+            HashMap::new();
+        let mut agent_session_root: HashMap<String, usize> = HashMap::new();
+        for (index, row) in rows.iter().enumerate() {
+            by_timestamp
+                .entry(row.timestamp.clone())
+                .or_default()
+                .push(index);
+            push_relation_index(
+                &mut by_parent_timestamp,
+                row.parent_timestamp.as_deref(),
+                index,
+            );
+            push_relation_index(
+                &mut by_retry_of_timestamp,
+                row.retry_of_timestamp.as_deref(),
+                index,
+            );
+            push_relation_index(
+                &mut by_retried_as_timestamp,
+                row.retried_as_timestamp.as_deref(),
+                index,
+            );
+            push_relation_index(
+                &mut by_retry_chain_root_timestamp,
+                row.retry_chain_root_timestamp.as_deref(),
+                index,
+            );
+            if row.parent_timestamp.is_none() {
+                if let Some(session) = row
+                    .agent_session
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                {
+                    agent_session_root
+                        .entry(session.to_string())
+                        .or_insert(index);
+                }
+            }
+        }
+        Self {
+            rows,
+            by_timestamp,
+            by_parent_timestamp,
+            by_retry_of_timestamp,
+            by_retried_as_timestamp,
+            by_retry_chain_root_timestamp,
+            agent_session_root,
+        }
+    }
+
+    fn row_by_timestamp(&self, timestamp: &str) -> Option<&IndexedLineageRow> {
+        self.by_timestamp
+            .get(timestamp)
+            .and_then(|indexes| indexes.first())
+            .map(|&index| &self.rows[index])
+    }
+
+    fn agent_session_root(
+        &self,
+        agent_session: Option<&str>,
+    ) -> Option<&IndexedLineageRow> {
+        let agent_session = agent_session.filter(|value| !value.is_empty())?;
+        self.agent_session_root
+            .get(agent_session)
+            .map(|&index| &self.rows[index])
+    }
+
+    fn rows_matching(
+        &self,
+        timestamps: &BTreeSet<String>,
+    ) -> Vec<IndexedLineageRow> {
+        if timestamps.is_empty() {
+            return Vec::new();
+        }
+        let mut seen: BTreeSet<usize> = BTreeSet::new();
+        let mut matched = Vec::new();
+        for timestamp in timestamps {
+            extend_matching_rows(
+                &self.rows,
+                &self.by_timestamp,
+                timestamp,
+                &mut seen,
+                &mut matched,
+            );
+            extend_matching_rows(
+                &self.rows,
+                &self.by_parent_timestamp,
+                timestamp,
+                &mut seen,
+                &mut matched,
+            );
+            extend_matching_rows(
+                &self.rows,
+                &self.by_retry_of_timestamp,
+                timestamp,
+                &mut seen,
+                &mut matched,
+            );
+            extend_matching_rows(
+                &self.rows,
+                &self.by_retried_as_timestamp,
+                timestamp,
+                &mut seen,
+                &mut matched,
+            );
+            extend_matching_rows(
+                &self.rows,
+                &self.by_retry_chain_root_timestamp,
+                timestamp,
+                &mut seen,
+                &mut matched,
+            );
+        }
+        matched.sort_by(|left, right| {
+            (left.timestamp.as_str(), left.artifact_dir.as_str())
+                .cmp(&(right.timestamp.as_str(), right.artifact_dir.as_str()))
+        });
+        matched
+    }
+}
+
+fn push_relation_index(
+    map: &mut HashMap<String, Vec<usize>>,
+    value: Option<&str>,
+    index: usize,
+) {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return;
+    };
+    map.entry(value.to_string()).or_default().push(index);
+}
+
+fn extend_matching_rows(
+    rows: &[IndexedLineageRow],
+    map: &HashMap<String, Vec<usize>>,
+    timestamp: &str,
+    seen: &mut BTreeSet<usize>,
+    matched: &mut Vec<IndexedLineageRow>,
+) {
+    let Some(indexes) = map.get(timestamp) else {
+        return;
+    };
+    for &index in indexes {
+        if seen.insert(index) {
+            matched.push(rows[index].clone());
+        }
+    }
+}
+
+fn load_pair_lineage_index(
+    conn: &Connection,
+    project_name: &str,
+    workflow_dir_name: &str,
+) -> Result<PairLineageIndex, String> {
+    super::record_lineage_pair_load_query();
+    let mut stmt = conn
+        .prepare(PAIR_LINEAGE_COLUMNS_SQL)
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query(params![project_name, workflow_dir_name])
+        .map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        result.push(lineage_row_from_sql(row).map_err(|e| e.to_string())?);
+    }
+    Ok(PairLineageIndex::from_rows(result))
+}
+
+fn agent_session_root_dismissed_from_pair(
+    conn: &Connection,
+    candidate: &AgentSessionDismissalLineageCandidateWire,
+    pair: &PairLineageIndex,
+    root_verdict: &mut BTreeMap<String, bool>,
+) -> Result<bool, String> {
+    let Some(seed) = pair.row_by_timestamp(&candidate.timestamp) else {
+        return Ok(false);
+    };
+    if dismissed_parent_suffix_for_seed(conn, seed)? {
+        return Ok(true);
+    }
+    if candidate.seed_definitively_dead
+        && dismissed_raw_suffix_exists(conn, &seed.timestamp)?
+    {
+        return Ok(true);
+    }
+    let mut timestamps: BTreeSet<String> = BTreeSet::new();
+    insert_lineage_timestamp(&mut timestamps, &seed.timestamp);
+    seed.add_related_timestamps(&mut timestamps);
+    let mut by_timestamp: BTreeMap<String, IndexedLineageRow> = BTreeMap::new();
+    by_timestamp.insert(seed.timestamp.clone(), seed.clone());
+
+    for _ in 0..MAX_RELATED_ARTIFACT_QUERY_ITERATIONS {
+        let rows = pair.rows_matching(&timestamps);
+        let mut changed = false;
+        for row in rows {
+            changed |= row.add_related_timestamps(&mut timestamps);
+            if !by_timestamp.contains_key(&row.timestamp) {
+                changed = true;
+            }
+            by_timestamp.insert(row.timestamp.clone(), row);
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let root = if let Some(root) = by_timestamp
+        .values()
+        .find(|row| row.parent_timestamp.is_none())
+        .cloned()
+    {
+        root
+    } else {
+        let Some(root) = pair
+            .agent_session_root(seed.agent_session.as_deref())
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        root
+    };
+    if let Some(verdict) = root_verdict.get(&root.artifact_dir) {
+        return Ok(*verdict);
+    }
+    let dismissed = match load_record_by_artifact_dir(conn, &root.artifact_dir)?
+    {
+        Some(record) => {
+            let summary = RecordSummary::from_record(&record);
+            record_is_dismissed(conn, &record, &summary)?
+        }
+        None => false,
+    };
+    root_verdict.insert(root.artifact_dir.clone(), dismissed);
+    Ok(dismissed)
+}
+
+/// Per-candidate SQL walk kept as the test-only oracle for the batched
+/// resolver. Production callers go through
+/// [`resolve_agent_session_dismissal_lineage`].
+#[cfg(test)]
+pub(super) fn resolve_agent_session_dismissal_lineage_per_candidate(
     index_path: &Path,
     candidates: &[AgentSessionDismissalLineageCandidateWire],
 ) -> Result<Vec<AgentSessionDismissalLineageResultWire>, String> {
@@ -161,6 +487,7 @@ pub fn resolve_agent_session_dismissal_lineage(
     Ok(results)
 }
 
+#[cfg(test)]
 pub(super) fn agent_session_root_dismissed_for_candidate(
     conn: &Connection,
     candidate: &AgentSessionDismissalLineageCandidateWire,
@@ -253,6 +580,7 @@ pub(super) fn dismissed_parent_suffix_for_seed(
     Ok(false)
 }
 
+#[cfg(test)]
 pub(super) fn select_lineage_row_by_timestamp(
     conn: &Connection,
     project_name: &str,
@@ -406,6 +734,7 @@ pub(super) fn select_lineage_rows(
     Ok(result)
 }
 
+#[cfg(test)]
 pub(super) fn agent_session_root_by_agent_session(
     conn: &Connection,
     project_name: &str,

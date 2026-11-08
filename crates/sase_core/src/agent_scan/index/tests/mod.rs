@@ -4,6 +4,7 @@ mod checkpoint;
 mod clan_context;
 mod history;
 mod lineage;
+mod lineage_batch;
 mod machine_projection;
 mod readers;
 mod self_heal;

@@ -131,6 +131,32 @@ fn last_gate_turn_lookup_records_decoded() -> u64 {
     LAST_GATE_TURN_LOOKUP_RECORDS_DECODED.with(|cell| cell.get())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Lineage-column pair loads issued by the last
+    /// [`resolve_agent_session_dismissal_lineage`] call. The production
+    /// resolver must issue one such query per distinct
+    /// `(project_name, workflow_dir_name)` pair, not one walk per
+    /// candidate.
+    static LAST_LINEAGE_PAIR_LOAD_QUERIES: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+fn reset_lineage_pair_load_queries() {
+    #[cfg(test)]
+    LAST_LINEAGE_PAIR_LOAD_QUERIES.with(|cell| cell.set(0));
+}
+
+fn record_lineage_pair_load_query() {
+    #[cfg(test)]
+    LAST_LINEAGE_PAIR_LOAD_QUERIES.with(|cell| cell.set(cell.get() + 1));
+}
+
+#[cfg(test)]
+fn last_lineage_pair_load_queries() -> u64 {
+    LAST_LINEAGE_PAIR_LOAD_QUERIES.with(|cell| cell.get())
+}
+
 fn placeholders(len: usize) -> String {
     std::iter::repeat_n("?", len).collect::<Vec<_>>().join(", ")
 }
