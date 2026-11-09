@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.2](https://github.com/sase-org/sase-core/compare/v0.44.1...v0.44.2) - 2026-11-09
+
+### Added
+
+- *(agent-archive)* filter dismissed-bundle summaries by exact run identity
+
 ## [0.44.1](https://github.com/sase-org/sase-core/compare/v0.44.0...v0.44.1) - 2026-11-08
 
 ### Other
