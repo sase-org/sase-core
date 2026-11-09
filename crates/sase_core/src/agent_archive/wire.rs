@@ -222,6 +222,10 @@ pub struct DismissedBundleIndexQueryWire {
     #[serde(default)]
     pub suffixes: Option<Vec<String>>,
     #[serde(default)]
+    pub agent_names: Option<Vec<String>>,
+    #[serde(default)]
+    pub source_run_ids: Option<Vec<String>>,
+    #[serde(default)]
     pub cl_name: Option<String>,
     #[serde(default)]
     pub project_name: Option<String>,

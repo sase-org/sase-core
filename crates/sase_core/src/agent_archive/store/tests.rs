@@ -134,6 +134,201 @@ fn store_upsert_query_signature_and_delete_round_trip() {
     delete_bundle_summaries_for_suffixes(root, &[]).unwrap();
 }
 
+fn upsert_custom_bundle(
+    root: &Path,
+    filename: &str,
+    suffix: &str,
+    customize: impl FnOnce(&mut JsonValue),
+) {
+    let mut bundle = sample_bundle(suffix);
+    customize(&mut bundle);
+    let path = write_bundle(root, filename, &bundle);
+    upsert_bundle_summary(root, &path, &read_bundle(&path).unwrap()).unwrap();
+}
+
+fn query_suffixes(
+    root: &Path,
+    request: DismissedBundleIndexQueryWire,
+) -> Vec<String> {
+    let mut suffixes: Vec<String> = query_summaries(root, request)
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .map(|row| row.raw_suffix)
+        .collect();
+    suffixes.sort();
+    suffixes
+}
+
+#[test]
+fn store_query_filters_by_exact_run_identity() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    for i in 0..70 {
+        upsert_custom_bundle(
+            root,
+            &format!("u{i:02}.json"),
+            &format!("unrelated-{i:02}"),
+            |bundle| {
+                bundle["agent_name"] = json!(format!("other-{i:02}"));
+                bundle["source_run_id"] = json!(format!("other-run-{i:02}"));
+            },
+        );
+    }
+    upsert_custom_bundle(root, "by-name.json", "by-name", |bundle| {
+        bundle["agent_name"] = json!("wanted-agent");
+        bundle["source_run_id"] = json!("name-only-run");
+    });
+    upsert_custom_bundle(root, "by-run.json", "by-run", |bundle| {
+        bundle["agent_name"] = json!("run-only-agent");
+        bundle["source_run_id"] = json!("wanted-run");
+    });
+    upsert_custom_bundle(
+        root,
+        "other-project.json",
+        "other-project",
+        |bundle| {
+            bundle["agent_name"] = json!("wanted-agent");
+            bundle["source_run_id"] = json!("wanted-run");
+            bundle["project_file"] = json!("/home/alice/work/other/agent.json");
+        },
+    );
+    upsert_custom_bundle(root, "visible.json", "visible-target", |bundle| {
+        bundle["agent_name"] = json!("wanted-agent");
+        bundle["source_run_id"] = json!("visible-run");
+    });
+
+    let by_name = query_suffixes(
+        root,
+        DismissedBundleIndexQueryWire {
+            agent_names: Some(vec!["wanted-agent".to_string()]),
+            ..Default::default()
+        },
+    );
+    assert_eq!(by_name, vec!["by-name", "other-project", "visible-target"]);
+
+    let by_run = query_suffixes(
+        root,
+        DismissedBundleIndexQueryWire {
+            source_run_ids: Some(vec!["wanted-run".to_string()]),
+            ..Default::default()
+        },
+    );
+    assert_eq!(by_run, vec!["by-run", "other-project"]);
+
+    let or_both = query_suffixes(
+        root,
+        DismissedBundleIndexQueryWire {
+            agent_names: Some(vec!["wanted-agent".to_string()]),
+            source_run_ids: Some(vec!["wanted-run".to_string()]),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        or_both,
+        vec!["by-name", "by-run", "other-project", "visible-target"]
+    );
+
+    let with_project = query_suffixes(
+        root,
+        DismissedBundleIndexQueryWire {
+            agent_names: Some(vec!["wanted-agent".to_string()]),
+            source_run_ids: Some(vec!["wanted-run".to_string()]),
+            project_name: Some("proj".to_string()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(with_project, vec!["by-name", "by-run", "visible-target"]);
+
+    let empty_names = query_suffixes(
+        root,
+        DismissedBundleIndexQueryWire {
+            agent_names: Some(Vec::new()),
+            ..Default::default()
+        },
+    );
+    assert!(empty_names.is_empty());
+
+    let empty_name_with_run = query_suffixes(
+        root,
+        DismissedBundleIndexQueryWire {
+            agent_names: Some(Vec::new()),
+            source_run_ids: Some(vec!["wanted-run".to_string()]),
+            ..Default::default()
+        },
+    );
+    assert_eq!(empty_name_with_run, vec!["by-run", "other-project"]);
+
+    set_visibility_for_suffixes(
+        root,
+        &["visible-target".to_string()],
+        "visible",
+        Some("2026-05-12T13:00:00"),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let hidden = query_suffixes(
+        root,
+        DismissedBundleIndexQueryWire {
+            agent_names: Some(vec!["wanted-agent".to_string()]),
+            source_run_ids: Some(vec!["wanted-run".to_string()]),
+            project_name: Some("proj".to_string()),
+            visibility: Some("hidden".to_string()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(hidden, vec!["by-name", "by-run"]);
+
+    let conn = open_archive_store_writable(root).unwrap();
+    conn.execute_batch("ANALYZE").unwrap();
+    let request = DismissedBundleIndexQueryWire {
+        agent_names: Some(vec!["wanted-agent".to_string()]),
+        source_run_ids: Some(vec!["wanted-run".to_string()]),
+        project_name: Some("proj".to_string()),
+        visibility: Some("hidden".to_string()),
+        limit: Some(65),
+        ..Default::default()
+    };
+    let (sql, params) = build_summary_query(&request);
+    let explain_sql = format!("EXPLAIN QUERY PLAN {sql}");
+    let mut stmt = conn.prepare(&explain_sql).unwrap();
+    let plan = stmt
+        .query_map(params_from_iter(params.iter()), |row| {
+            row.get::<_, String>(3)
+        })
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        plan.contains("idx_dismissed_bundle_agent_name"),
+        "plan missing agent_name index:\n{plan}"
+    );
+    assert!(
+        plan.contains("idx_dismissed_bundle_source_run_id"),
+        "plan missing source_run_id index:\n{plan}"
+    );
+    assert!(
+        !plan.lines().any(
+            |line| line.contains("SCAN s") || line.contains("SCAN TABLE s")
+        ),
+        "plan scanned summaries alias s:\n{plan}"
+    );
+}
+
+#[test]
+fn query_wire_omitted_identity_fields_deserialize_to_none() {
+    let parsed: DismissedBundleIndexQueryWire = serde_json::from_value(json!({
+        "suffixes": ["a"],
+        "visibility": "hidden",
+    }))
+    .unwrap();
+    assert_eq!(parsed.agent_names, None);
+    assert_eq!(parsed.source_run_ids, None);
+}
+
 #[test]
 fn store_set_visibility_merges_projection_and_summaries() {
     let tmp = tempfile::TempDir::new().unwrap();

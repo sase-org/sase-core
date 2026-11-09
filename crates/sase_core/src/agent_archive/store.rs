@@ -130,6 +130,10 @@ const INDEX_DDLS: &[&str] = &[
      source_run_id)",
     "CREATE INDEX IF NOT EXISTS idx_dismissed_bundle_visibility \
      ON dismissed_bundle_summaries(archive_visibility)",
+    "CREATE INDEX IF NOT EXISTS idx_dismissed_bundle_agent_name \
+     ON dismissed_bundle_summaries(agent_name)",
+    "CREATE INDEX IF NOT EXISTS idx_dismissed_bundle_source_run_id \
+     ON dismissed_bundle_summaries(source_run_id)",
 ];
 
 /// Python `_schema_compatible` required columns.
@@ -1170,34 +1174,70 @@ fn open_queryable_archive_store(root: &Path) -> Option<Connection> {
     }
 }
 
-/// Query summaries with the Python `query_summaries` filters and ordering.
-/// Returns `None` when no usable index exists, matching Python.
-pub fn query_summaries(
-    root: &Path,
-    request: DismissedBundleIndexQueryWire,
-) -> Result<Option<Vec<DismissedBundleSummaryWire>>, ArchiveStoreError> {
-    if !index_path_for_root(root).is_file() {
-        return Ok(None);
+fn identity_filters_are_vacuous(
+    request: &DismissedBundleIndexQueryWire,
+) -> bool {
+    let either_present =
+        request.agent_names.is_some() || request.source_run_ids.is_some();
+    let names_empty = request.agent_names.as_ref().is_none_or(Vec::is_empty);
+    let runs_empty = request.source_run_ids.as_ref().is_none_or(Vec::is_empty);
+    either_present && names_empty && runs_empty
+}
+
+fn nonempty_sorted(values: Option<&Vec<String>>) -> Option<Vec<String>> {
+    let values = values?;
+    if values.is_empty() {
+        return None;
     }
-    if request.suffixes.as_ref().is_some_and(Vec::is_empty) {
-        return Ok(Some(Vec::new()));
+    let mut ordered = values.clone();
+    ordered.sort();
+    Some(ordered)
+}
+
+fn in_clause(
+    column: &str,
+    values: &[String],
+    params: &mut Vec<rusqlite::types::Value>,
+) -> String {
+    let placeholders = values.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    for value in values {
+        params.push(rusqlite::types::Value::Text(value.clone()));
     }
-    let conn = match open_queryable_archive_store(root) {
-        Some(conn) => conn,
-        None => return Ok(None),
-    };
-    let mut clauses: Vec<String> = Vec::new();
-    let mut params: Vec<rusqlite::types::Value> = Vec::new();
-    if let Some(suffixes) = &request.suffixes {
-        let mut ordered = suffixes.clone();
-        ordered.sort();
-        let placeholders =
-            ordered.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        clauses.push(format!("s.raw_suffix IN ({placeholders})"));
-        for suffix in &ordered {
-            params.push(rusqlite::types::Value::Text(suffix.clone()));
+    format!("{column} IN ({placeholders})")
+}
+
+fn push_identity_clause(
+    request: &DismissedBundleIndexQueryWire,
+    clauses: &mut Vec<String>,
+    params: &mut Vec<rusqlite::types::Value>,
+) {
+    let names = nonempty_sorted(request.agent_names.as_ref());
+    let runs = nonempty_sorted(request.source_run_ids.as_ref());
+    match (names.as_deref(), runs.as_deref()) {
+        (None, None) => {}
+        (Some(names), None) => {
+            clauses.push(in_clause("s.agent_name", names, params));
+        }
+        (None, Some(runs)) => {
+            clauses.push(in_clause("s.source_run_id", runs, params));
+        }
+        (Some(names), Some(runs)) => {
+            let names_clause = in_clause("s.agent_name", names, params);
+            let runs_clause = in_clause("s.source_run_id", runs, params);
+            clauses.push(format!("({names_clause} OR {runs_clause})"));
         }
     }
+}
+
+fn build_summary_query(
+    request: &DismissedBundleIndexQueryWire,
+) -> (String, Vec<rusqlite::types::Value>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+    if let Some(suffixes) = nonempty_sorted(request.suffixes.as_ref()) {
+        clauses.push(in_clause("s.raw_suffix", &suffixes, &mut params));
+    }
+    push_identity_clause(request, &mut clauses, &mut params);
     if let Some(cl_name) = &request.cl_name {
         clauses.push("(s.cl_name = ? OR s.meta_patch = ?)".to_string());
         params.push(rusqlite::types::Value::Text(cl_name.clone()));
@@ -1236,6 +1276,29 @@ pub fn query_summaries(
         sql.push_str(" OFFSET ?");
         params.push(rusqlite::types::Value::Integer(offset.max(0)));
     }
+    (sql, params)
+}
+
+/// Query summaries with the Python `query_summaries` filters and ordering.
+/// Returns `None` when no usable index exists, matching Python.
+pub fn query_summaries(
+    root: &Path,
+    request: DismissedBundleIndexQueryWire,
+) -> Result<Option<Vec<DismissedBundleSummaryWire>>, ArchiveStoreError> {
+    if !index_path_for_root(root).is_file() {
+        return Ok(None);
+    }
+    if request.suffixes.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(Some(Vec::new()));
+    }
+    if identity_filters_are_vacuous(&request) {
+        return Ok(Some(Vec::new()));
+    }
+    let conn = match open_queryable_archive_store(root) {
+        Some(conn) => conn,
+        None => return Ok(None),
+    };
+    let (sql, params) = build_summary_query(&request);
     let mut stmt = match conn.prepare(&sql) {
         Ok(stmt) => stmt,
         Err(_) => return Ok(None),
