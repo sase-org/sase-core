@@ -777,6 +777,102 @@ fn py_decide_local_command_trust<'py>(
     json_value_to_py(py, &json)
 }
 
+fn local_command_trust_store_error_to_pyerr(
+    err: sase_core::config::LocalCommandTrustStoreError,
+) -> PyErr {
+    let message = err.to_string();
+    match err {
+        sase_core::config::LocalCommandTrustStoreError::Invalid { .. } => {
+            PyValueError::new_err(message)
+        }
+        sase_core::config::LocalCommandTrustStoreError::Lock {
+            timeout: true,
+            ..
+        } => PyTimeoutError::new_err(message),
+        sase_core::config::LocalCommandTrustStoreError::Lock { .. } => {
+            PyRuntimeError::new_err(message)
+        }
+        sase_core::config::LocalCommandTrustStoreError::Io { .. } => {
+            PyRuntimeError::new_err(message)
+        }
+    }
+}
+
+fn local_command_trust_store_wire_to_py<'py, T: serde::Serialize>(
+    py: Python<'py>,
+    value: &T,
+) -> PyResult<PyObject> {
+    let json = serde_json::to_value(value).map_err(|error| {
+        PyRuntimeError::new_err(format!(
+            "internal local-command trust store serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+#[pyfunction]
+#[pyo3(name = "local_command_trust_store_wire_schema_version")]
+fn py_local_command_trust_store_wire_schema_version() -> u32 {
+    sase_core::config::LOCAL_COMMAND_TRUST_STORE_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "local_command_trust_store_get")]
+fn py_local_command_trust_store_get<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    identity: &str,
+) -> PyResult<PyObject> {
+    let home = PathBuf::from(sase_home);
+    let snapshot = py
+        .allow_threads(|| {
+            sase_core::config::local_command_trust_store_get(&home, identity)
+        })
+        .map_err(local_command_trust_store_error_to_pyerr)?;
+    local_command_trust_store_wire_to_py(py, &snapshot)
+}
+
+#[pyfunction]
+#[pyo3(name = "local_command_trust_store_allow")]
+fn py_local_command_trust_store_allow<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    identity: &str,
+    digest: &str,
+    policy_version: u32,
+    acknowledged_by: &str,
+) -> PyResult<PyObject> {
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| {
+            sase_core::config::local_command_trust_store_allow(
+                &home,
+                identity,
+                digest,
+                policy_version,
+                acknowledged_by,
+            )
+        })
+        .map_err(local_command_trust_store_error_to_pyerr)?;
+    local_command_trust_store_wire_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "local_command_trust_store_revoke")]
+fn py_local_command_trust_store_revoke<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    identity: &str,
+) -> PyResult<PyObject> {
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| {
+            sase_core::config::local_command_trust_store_revoke(&home, identity)
+        })
+        .map_err(local_command_trust_store_error_to_pyerr)?;
+    local_command_trust_store_wire_to_py(py, &outcome)
+}
+
 fn feature_flag_state_error_to_pyerr(
     err: FeatureFlagStateDomainError,
 ) -> PyErr {
@@ -904,6 +1000,13 @@ pub(crate) fn register_config(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_digest_local_commands, m)?)?;
     m.add_function(wrap_pyfunction!(py_filter_trusted_local_layer, m)?)?;
     m.add_function(wrap_pyfunction!(py_decide_local_command_trust, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_local_command_trust_store_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_local_command_trust_store_get, m)?)?;
+    m.add_function(wrap_pyfunction!(py_local_command_trust_store_allow, m)?)?;
+    m.add_function(wrap_pyfunction!(py_local_command_trust_store_revoke, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_config_compose, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_config_plan_entry, m)?)?;
     m.add_function(wrap_pyfunction!(py_service_config_compose, m)?)?;

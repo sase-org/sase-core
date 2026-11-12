@@ -22,6 +22,7 @@ pub mod plan;
 pub mod provenance;
 pub mod schema;
 pub mod trust;
+pub mod trust_store;
 pub mod validate;
 pub mod wire;
 
@@ -48,6 +49,14 @@ pub use trust::{
     LocalTrustFilterRequestWire, LocalTrustFilterWire,
     LOCAL_COMMAND_DIGEST_DOMAIN, LOCAL_COMMAND_TRUST_POLICY_VERSION,
     LOCAL_COMMAND_TRUST_WIRE_SCHEMA_VERSION,
+};
+pub use trust_store::{
+    local_command_trust_store_allow, local_command_trust_store_get,
+    local_command_trust_store_path, local_command_trust_store_revoke,
+    LocalCommandTrustRecordWire, LocalCommandTrustStoreError,
+    LocalCommandTrustStoreMutationWire, LocalCommandTrustStoreSnapshotWire,
+    LOCAL_COMMAND_TRUST_STORE_FILENAME, LOCAL_COMMAND_TRUST_STORE_VERSION,
+    LOCAL_COMMAND_TRUST_STORE_WIRE_SCHEMA_VERSION,
 };
 pub use wire::{
     ConfigConstraintsWire, ConfigContributionWire, ConfigDiagnosticWire,

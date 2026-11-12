@@ -46,6 +46,9 @@ pub struct LocalCommandProjectionRequestWire {
     pub lower_workflows: Value,
     #[serde(default)]
     pub source: String,
+    /// Logical selected config location, included in the digest when supplied.
+    #[serde(default)]
+    pub config_path: Option<String>,
 }
 
 /// Normalized command-bearing projection plus digest and blocked paths.
@@ -58,6 +61,8 @@ pub struct LocalCommandProjectionWire {
     pub diagnostics: Vec<ConfigDiagnosticWire>,
     pub digest: String,
     pub canonical_json: String,
+    #[serde(default)]
+    pub config_path: Option<String>,
 }
 
 /// Digest request: hash one already-projected value.
@@ -85,6 +90,9 @@ pub struct LocalTrustFilterRequestWire {
     pub lower_workflows: Value,
     #[serde(default)]
     pub source: String,
+    /// Logical selected config location, used by the trust digest.
+    #[serde(default)]
+    pub config_path: Option<String>,
 }
 
 /// Filter output: the effective local contribution survivors keep.
@@ -347,7 +355,19 @@ pub fn project_local_commands(
     });
 
     let projection_value = Value::Object(projection);
-    let canonical_json = canonical_json_for_projection(&projection_value);
+    let canonical_json = match &request.config_path {
+        Some(config_path) => {
+            let mut digest_input = Map::new();
+            digest_input.insert(
+                "config_path".to_string(),
+                Value::String(config_path.clone()),
+            );
+            digest_input
+                .insert("commands".to_string(), projection_value.clone());
+            canonical_json_for_projection(&Value::Object(digest_input))
+        }
+        None => canonical_json_for_projection(&projection_value),
+    };
     let digest = digest_canonical_json(&canonical_json);
     Ok(LocalCommandProjectionWire {
         schema_version: LOCAL_COMMAND_TRUST_WIRE_SCHEMA_VERSION,
@@ -357,6 +377,7 @@ pub fn project_local_commands(
         diagnostics,
         digest,
         canonical_json,
+        config_path: request.config_path.clone(),
     })
 }
 
@@ -370,6 +391,7 @@ pub fn filter_trusted_local_layer(
             lower_macros: request.lower_macros.clone(),
             lower_workflows: request.lower_workflows.clone(),
             source: request.source.clone(),
+            config_path: request.config_path.clone(),
         })?;
     let normalized =
         normalize_macro_config_layer(&MacroLayerNormalizeRequestWire {
@@ -569,10 +591,10 @@ fn is_executable_macro_definition(def: &Value) -> bool {
                         // Unknown macro keys fail closed: a future
                         // executable field must not slip through as
                         // prompt-only.
-                        if value.is_object() || value.is_array() {
-                            if contains_executable_key(value) {
-                                return true;
-                            }
+                        if (value.is_object() || value.is_array())
+                            && contains_executable_key(value)
+                        {
+                            return true;
                         }
                         return true;
                     }
@@ -644,10 +666,10 @@ fn is_executable_workflow_definition(def: &Value) -> bool {
             | "description" | "hidden" | "wraps_all" | "skill_name"
             | "memory_type" | "macros" | "xprompts" => continue,
             _ => {
-                if value.is_object() || value.is_array() {
-                    if contains_executable_key(value) {
-                        return true;
-                    }
+                if (value.is_object() || value.is_array())
+                    && contains_executable_key(value)
+                {
+                    return true;
                 }
                 return true;
             }
@@ -698,10 +720,10 @@ fn is_executable_step_value(step: &Value) -> bool {
                 | "artifact" | "on_error" | "tags" | "description"
                 | "environment" | "macros" | "xprompts" => continue,
                 _ => {
-                    if value.is_object() || value.is_array() {
-                        if contains_executable_key(value) {
-                            return true;
-                        }
+                    if (value.is_object() || value.is_array())
+                        && contains_executable_key(value)
+                    {
+                        return true;
                     }
                     return true;
                 }
@@ -726,6 +748,7 @@ mod tests {
             lower_macros: Value::Object(Map::new()),
             lower_workflows: Value::Object(Map::new()),
             source: "test".to_string(),
+            config_path: None,
         }
     }
 
@@ -837,6 +860,7 @@ mod tests {
             lower_macros: json!({"tool": {"content": "hi", "bash": "echo hi"}}),
             lower_workflows: json!({}),
             source: "test".to_string(),
+            config_path: None,
         };
         let out = project_local_commands(&request).unwrap();
         assert!(out.blocked_paths.contains(&"macros.tool".to_string()));
@@ -858,6 +882,22 @@ mod tests {
     }
 
     #[test]
+    fn selected_config_path_is_part_of_the_digest() {
+        let mut first_request = projection_request(json!({
+            "commit_hooks": {"before": "just fix"},
+        }));
+        first_request.config_path = Some("sase/sase.yml".to_string());
+        let mut second_request = first_request.clone();
+        second_request.config_path = Some("sase.yml".to_string());
+
+        let first = project_local_commands(&first_request).unwrap();
+        let second = project_local_commands(&second_request).unwrap();
+        assert_ne!(first.digest, second.digest);
+        assert_eq!(first.projection, second.projection);
+        assert!(first.canonical_json.contains("config_path"));
+    }
+
+    #[test]
     fn filter_keeps_non_command_keys_and_removes_blocked() {
         let out = filter_trusted_local_layer(&LocalTrustFilterRequestWire {
             layer: json!({
@@ -869,6 +909,7 @@ mod tests {
             lower_macros: json!({}),
             lower_workflows: json!({}),
             source: "test".to_string(),
+            config_path: None,
         })
         .unwrap();
         assert_eq!(

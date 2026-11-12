@@ -1262,6 +1262,10 @@ fn local_command_trust_bindings_round_trip_wire_shapes() {
             "digest_local_commands",
             "filter_trusted_local_layer",
             "decide_local_command_trust",
+            "local_command_trust_store_wire_schema_version",
+            "local_command_trust_store_get",
+            "local_command_trust_store_allow",
+            "local_command_trust_store_revoke",
         ] {
             assert!(module.getattr(name).is_ok(), "missing {name}");
         }
@@ -1361,5 +1365,51 @@ fn local_command_trust_bindings_round_trip_wire_shapes() {
             py_decide_local_command_trust(py, decide_request).unwrap();
         let decision = py_to_json_value(decision.bind(py)).unwrap();
         assert_eq!(decision["status"], json!("trusted"));
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy().to_string();
+        let store_version: u32 = module
+            .getattr("local_command_trust_store_wire_schema_version")
+            .unwrap()
+            .call0()
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(
+            store_version,
+            sase_core::config::LOCAL_COMMAND_TRUST_STORE_WIRE_SCHEMA_VERSION
+        );
+        let missing =
+            py_local_command_trust_store_get(py, &home, "checkout:v1:/repo")
+                .unwrap();
+        let missing = py_to_json_value(missing.bind(py)).unwrap();
+        assert_eq!(missing["schema_version"], json!(store_version));
+        assert_eq!(missing["status"], json!("available"));
+        assert!(missing["record"].is_null());
+
+        let allowed = py_local_command_trust_store_allow(
+            py,
+            &home,
+            "checkout:v1:/repo",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            1,
+            "human",
+        )
+        .unwrap();
+        let allowed = py_to_json_value(allowed.bind(py)).unwrap();
+        assert_eq!(allowed["schema_version"], json!(store_version));
+        assert_eq!(allowed["changed"], json!(true));
+        assert_eq!(allowed["record"]["acknowledged_by"], json!("human"));
+
+        let revoked =
+            py_local_command_trust_store_revoke(py, &home, "checkout:v1:/repo")
+                .unwrap();
+        let revoked = py_to_json_value(revoked.bind(py)).unwrap();
+        assert_eq!(revoked["changed"], json!(true));
+        let empty =
+            py_local_command_trust_store_get(py, &home, "checkout:v1:/repo")
+                .unwrap();
+        let empty = py_to_json_value(empty.bind(py)).unwrap();
+        assert!(empty["record"].is_null());
     });
 }
