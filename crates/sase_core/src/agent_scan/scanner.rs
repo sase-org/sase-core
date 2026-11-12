@@ -1779,6 +1779,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         .unwrap_or_default(),
         output_path: coerce_str(data.get("output_path")),
         pid: coerce_int(data.get("pid")),
+        process_identity: coerce_str(data.get("process_identity")),
         model: coerce_str(data.get("model")),
         llm_provider: coerce_str(data.get("llm_provider")),
         reasoning_effort: coerce_str(data.get("reasoning_effort")),
@@ -2193,6 +2194,7 @@ fn coerce_recovery(value: Option<&Value>) -> Option<AgentRecoveryWire> {
 fn running_marker_from_object(data: &Map<String, Value>) -> RunningMarkerWire {
     RunningMarkerWire {
         pid: coerce_int(data.get("pid")),
+        process_identity: coerce_str(data.get("process_identity")),
         cl_name: coerce_str(data.get("cl_name")),
         model: coerce_str(data.get("model")),
         llm_provider: coerce_str(data.get("llm_provider")),
@@ -2651,6 +2653,45 @@ mod tests {
         let turn = meta.agent_session_turn.as_ref().unwrap();
         assert_eq!(turn.kind, "monitor");
         assert_eq!(turn.id.as_deref(), Some("m9"));
+    }
+
+    #[test]
+    fn scanner_projects_process_identity_from_metadata_and_running_marker() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260822120112");
+        write_json(
+            &artifact.join("agent_meta.json"),
+            json!({"name": "identity", "process_identity": "boot:99"}),
+        );
+        write_json(
+            &artifact.join("running.json"),
+            json!({"pid": 99, "process_identity": "boot:100"}),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        assert_eq!(snapshot.records.len(), 1);
+        let record = &snapshot.records[0];
+        assert_eq!(
+            record
+                .agent_meta
+                .as_ref()
+                .unwrap()
+                .process_identity
+                .as_deref(),
+            Some("boot:99")
+        );
+        assert_eq!(
+            record.running.as_ref().unwrap().process_identity.as_deref(),
+            Some("boot:100")
+        );
     }
 
     #[test]

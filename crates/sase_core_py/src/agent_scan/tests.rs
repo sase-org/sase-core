@@ -41,6 +41,39 @@ fn scan_agent_artifacts_binding_preserves_canonical_and_legacy_capacity() {
     });
 }
 
+#[test]
+fn scan_agent_artifacts_binding_round_trips_process_identity() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        let dir = root
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260913030100");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("agent_meta.json"),
+            r#"{"name":"identity","pid":99,"process_identity":"boot:99"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("running.json"),
+            r#"{"pid":99,"process_identity":"boot:100"}"#,
+        )
+        .unwrap();
+
+        let snapshot =
+            py_scan_agent_artifacts(py, root.to_string_lossy().as_ref(), None)
+                .unwrap();
+        let snapshot = py_to_json_value(snapshot.bind(py)).unwrap();
+        let record = &snapshot["records"][0];
+        assert_eq!(record["agent_meta"]["process_identity"], json!("boot:99"));
+        assert_eq!(record["running"]["process_identity"], json!("boot:100"));
+    });
+}
+
 fn temp_agent_stats_root() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("sase-core-py-agent-stats-")

@@ -838,3 +838,84 @@ fn schema_v33_index_migrates_to_current() {
     );
     assert_eq!(count_sql(&index, "SELECT COUNT(*) FROM agent_artifacts"), 1);
 }
+
+#[test]
+fn schema_v37_revalidates_process_identity_projections() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let dir = artifact(&projects, "20260827090100");
+    write_json(
+        &dir.join("agent_meta.json"),
+        json!({"name": "identity", "pid": 99, "process_identity": "boot:99"}),
+    );
+    write_json(
+        &dir.join("running.json"),
+        json!({"pid": 99, "process_identity": "boot:100"}),
+    );
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    // Model a v36 row written before the new marker fields were projected.
+    let conn = Connection::open(&index).unwrap();
+    let record_json: String = conn
+        .query_row(
+            "SELECT record_json FROM agent_artifacts WHERE artifact_dir = ?1",
+            [dir.to_string_lossy().as_ref()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut record: serde_json::Value =
+        serde_json::from_str(&record_json).unwrap();
+    record["agent_meta"]
+        .as_object_mut()
+        .unwrap()
+        .remove("process_identity");
+    record["running"]
+        .as_object_mut()
+        .unwrap()
+        .remove("process_identity");
+    conn.execute(
+        "UPDATE agent_artifacts SET record_json = ?1 WHERE artifact_dir = ?2",
+        params![record.to_string(), dir.to_string_lossy().as_ref()],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE meta SET value = '36' WHERE key = 'schema_version'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    drop(open_index(&index).unwrap());
+    let refreshed = query_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactIndexQueryWire::default(),
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    assert_eq!(refreshed.stats.rows_repaired, 1);
+    assert_eq!(
+        refreshed.records[0]
+            .agent_meta
+            .as_ref()
+            .unwrap()
+            .process_identity
+            .as_deref(),
+        Some("boot:99")
+    );
+    assert_eq!(
+        refreshed.records[0]
+            .running
+            .as_ref()
+            .unwrap()
+            .process_identity
+            .as_deref(),
+        Some("boot:100")
+    );
+}

@@ -594,6 +594,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub pid: Option<i64>,
     #[serde(default)]
+    pub process_identity: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub llm_provider: Option<String>,
@@ -1079,6 +1081,8 @@ pub struct AgentSessionTurnWire {
 pub struct RunningMarkerWire {
     #[serde(default)]
     pub pid: Option<i64>,
+    #[serde(default)]
+    pub process_identity: Option<String>,
     #[serde(default)]
     pub cl_name: Option<String>,
     #[serde(default)]

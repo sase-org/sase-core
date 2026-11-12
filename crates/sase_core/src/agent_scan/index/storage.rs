@@ -310,6 +310,9 @@ pub(super) fn open_index_with_busy_timeout(
     if prior_version.is_none_or(|v| v < 36) {
         migrate_macros_sig_column_v36(&mut conn)?;
     }
+    if prior_version.is_none_or(|v| v < 37) {
+        migrate_process_identity_projection_v37(&mut conn)?;
+    }
     conn.execute_batch(&format!(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_session \
          ON agent_artifacts(agent_session, timestamp); \
@@ -920,6 +923,19 @@ pub(super) fn migrate_macros_sig_column_v36(
     conn: &mut Connection,
 ) -> Result<(), String> {
     rename_legacy_agent_artifacts_column(conn, "xprompts_sig", "macros_sig")
+}
+
+/// v37 invalidates cached agent and RUNNING marker projections so the next
+/// revalidated index query rescans their new `process_identity` fields.
+pub(super) fn migrate_process_identity_projection_v37(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE agent_artifacts SET agent_meta_sig = NULL, running_sig = NULL",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// v35 renames the legacy `gate_shell_id` column to `gate_turn_id` in
