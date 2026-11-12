@@ -3,7 +3,10 @@
 //! Yesterday's symbol is gone today, so the catalog matches error
 //! families scoped to a managed origin. A family matches only when the
 //! module or symbol has a managed origin: its path resolves under a
-//! managed root and never under the agent's workspace directory.
+//! managed root. Managed-root precedence applies: a managed root nested
+//! inside the agent's workspace directory (self-hosted editable
+//! installs) still counts as managed. Only files under the workspace
+//! that resolve under no managed root count as workspace origin.
 
 use super::wire::{AgentFailureFactsWire, AutoRestartContextWire};
 
@@ -141,7 +144,15 @@ pub fn never_restart_reason(
             return Some("killed_or_stopped");
         }
     }
-    let haystack = combined_text(context);
+    // Marker scope is exception-first: when the row carries exception
+    // evidence, scan the marker lists over the exception text only, so
+    // an incidental string in the runner log tail cannot veto recovery.
+    // Log-only rows keep the full-tail scan.
+    let haystack = if has_exception_evidence(facts, context) {
+        exception_text(context).to_ascii_lowercase()
+    } else {
+        combined_text(context)
+    };
     if facts.map(|f| f.skew_suspect).unwrap_or(false) {
         // Structured facts still defer to the marker lists for the
         // never-restart classes; a skew-suspect ImportError from a
@@ -182,13 +193,36 @@ fn looks_like_managed_module(value: &str) -> bool {
         || value == "sase_core_rs"
 }
 
+/// True when the row carries exception evidence: structured facts
+/// with an import/attribute error or a non-empty exception chain, or a
+/// non-empty `error_text` / `traceback_text`.
+fn has_exception_evidence(
+    facts: Option<&AgentFailureFactsWire>,
+    context: &AutoRestartContextWire,
+) -> bool {
+    if let Some(facts) = facts {
+        if facts.import_error.is_some() || facts.attribute_error.is_some() {
+            return true;
+        }
+        if !facts.exception_chain.is_empty() {
+            return true;
+        }
+    }
+    !context.error_text.trim().is_empty()
+        || !context.traceback_text.trim().is_empty()
+}
+
 /// Check the managed-origin scope: the origin module must resolve under
-/// a managed root and never under the workspace directory.
+/// a managed root. Managed-root precedence applies: a managed root
+/// nested inside the agent's workspace directory (self-hosted editable
+/// installs) still counts as managed; only files under the workspace
+/// that resolve under no managed root veto managed origin.
 ///
 /// The classifier only sees module names and file paths, not a live
 /// filesystem, so it applies a conservative name-and-path rule: a
-/// `sase.*` / `sase_core*` module is managed unless any concrete file
-/// path on record sits under the workspace directory.
+/// `sase.*` / `sase_core*` module is managed unless a concrete file
+/// path on record sits under the workspace directory under no managed
+/// root.
 pub fn origin_is_managed(
     origin_module: Option<&str>,
     candidate_files: &[String],
@@ -198,7 +232,7 @@ pub fn origin_is_managed(
     if !looks_like_managed_module(module) {
         return false;
     }
-    if origin_is_workspace(candidate_files, context) {
+    if origin_is_workspace_only(candidate_files, context) {
         return false;
     }
     if candidate_files.is_empty() {
@@ -221,6 +255,9 @@ pub fn origin_is_managed(
 ///
 /// Trailing slashes on either side are stripped, and the comparison is
 /// whole path components so `/opt/sase` does not match `/opt/sase-other`.
+/// This is raw workspace membership, not workspace origin: prefer
+/// `origin_is_workspace_only`, which gives managed roots precedence for
+/// self-hosted editable installs nested inside the workspace.
 pub fn origin_is_workspace(
     candidate_files: &[String],
     context: &AutoRestartContextWire,
@@ -235,6 +272,31 @@ pub fn origin_is_workspace(
     candidate_files.iter().any(|file| {
         let file = normalize_path(file);
         path_is_under(&file, &workspace)
+    })
+}
+
+/// True when any candidate file sits under `context.workspace_dir`
+/// while resolving under no managed root.
+///
+/// Trailing slashes on either side are stripped, and the comparison is
+/// whole path components so `/opt/sase` does not match `/opt/sase-other`.
+/// A file under both the workspace and a managed root (self-hosted
+/// editable installs) does not count: managed roots take precedence.
+pub fn origin_is_workspace_only(
+    candidate_files: &[String],
+    context: &AutoRestartContextWire,
+) -> bool {
+    let Some(workspace) = context.workspace_dir.as_deref() else {
+        return false;
+    };
+    let workspace = normalize_path(workspace);
+    if workspace.is_empty() {
+        return false;
+    }
+    candidate_files.iter().any(|file| {
+        let file = normalize_path(file);
+        path_is_under(&file, &workspace)
+            && !is_under_managed_root(&file, context)
     })
 }
 

@@ -7,8 +7,8 @@
 
 use super::catalog::{
     candidate_files, combined_text, looks_like_import_or_attribute_error,
-    match_family, never_restart_reason, origin_is_workspace, TIER_DATA_FORMAT,
-    TIER_REAL_BUG, TIER_RUST_BINDING, TIER_TORN_PYTHON,
+    match_family, never_restart_reason, origin_is_workspace_only,
+    TIER_DATA_FORMAT, TIER_REAL_BUG, TIER_RUST_BINDING, TIER_TORN_PYTHON,
 };
 use super::episode::derive_auto_restart_episode;
 use super::wire::{
@@ -73,8 +73,11 @@ pub fn classify_agent_failure(
         Some(matched) => matched,
         None => {
             let files = candidate_files(facts, context);
+            // Managed-root precedence: files under both the workspace
+            // and a managed root (self-hosted editable installs) are
+            // managed origin, so only workspace-only files decline here.
             if looks_like_import_or_attribute_error(facts, context)
-                && origin_is_workspace(&files, context)
+                && origin_is_workspace_only(&files, context)
             {
                 return decline(
                     "",

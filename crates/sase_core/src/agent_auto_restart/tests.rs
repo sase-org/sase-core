@@ -130,13 +130,14 @@ fn same_import_error_with_no_witness_declines() {
 
 #[test]
 fn workspace_origin_import_error_never_matches() {
+    // Genuine workspace origin: the frame sits under the workspace
+    // directory under no managed root.
     let mut context = managed_context();
-    context.workspace_dir = Some("/opt/sase".to_string());
     context.error_text =
         "ImportError: cannot import name 'helper' from 'sase.monitor.continuation_delivery'"
             .to_string();
     context.traceback_text = format!(
-        "Traceback (most recent call last):\n  File \"/opt/sase/src/sase/monitor/continuation_delivery.py\", line 3, in <module>\n{}",
+        "Traceback (most recent call last):\n  File \"/home/user/work/project/src/sase/monitor/continuation_delivery.py\", line 3, in <module>\n{}",
         context.error_text
     );
     let witnesses = AutoRestartWitnessesWire {
@@ -413,13 +414,14 @@ fn waiter_incident_relaunch_extracts_missing_symbol_from_error_line() {
 
 #[test]
 fn workspace_origin_with_trailing_slash_declines_even_with_witnesses() {
+    // Genuine workspace origin with a trailing-slash workspace dir.
     let mut context = managed_context();
-    context.workspace_dir = Some("/opt/sase/".to_string());
+    context.workspace_dir = Some("/home/user/work/project/".to_string());
     context.error_text =
         "ImportError: cannot import name 'helper' from 'sase.monitor.continuation_delivery'"
             .to_string();
     context.traceback_text = format!(
-        "Traceback (most recent call last):\n  File \"/opt/sase/src/sase/monitor/continuation_delivery.py\", line 3, in <module>\n{}",
+        "Traceback (most recent call last):\n  File \"/home/user/work/project/src/sase/monitor/continuation_delivery.py\", line 3, in <module>\n{}",
         context.error_text
     );
     let verdict = classify_agent_failure(None, &context, &strong_witnesses());
@@ -429,13 +431,14 @@ fn workspace_origin_with_trailing_slash_declines_even_with_witnesses() {
 
 #[test]
 fn workspace_origin_without_trailing_slash_declines() {
+    // Genuine workspace origin without a trailing-slash workspace dir.
     let mut context = managed_context();
-    context.workspace_dir = Some("/opt/sase".to_string());
+    context.workspace_dir = Some("/home/user/work/project".to_string());
     context.error_text =
         "ImportError: cannot import name 'helper' from 'sase.monitor.continuation_delivery'"
             .to_string();
     context.traceback_text = format!(
-        "Traceback (most recent call last):\n  File \"/opt/sase/src/sase/monitor/continuation_delivery.py\", line 3, in <module>\n{}",
+        "Traceback (most recent call last):\n  File \"/home/user/work/project/src/sase/monitor/continuation_delivery.py\", line 3, in <module>\n{}",
         context.error_text
     );
     let verdict = classify_agent_failure(None, &context, &strong_witnesses());
@@ -536,4 +539,148 @@ fn episode_falls_back_to_identity_revisions_before_refresh_log() {
     assert_eq!(episode.id, "sase@9c5000f-9fd8a08");
     assert_eq!(episode.from_rev.as_deref(), Some("9c5000f"));
     assert_eq!(episode.to_rev.as_deref(), Some("9fd8a08"));
+}
+
+const SELF_HOSTED_ROOT: &str = "/home/bryan/projects/github/sase-org/sase";
+
+fn self_hosted_context(workspace: &str) -> AutoRestartContextWire {
+    let mut context = managed_context();
+    context.managed_roots = vec![super::wire::AutoRestartManagedRootWire {
+        name: "sase".to_string(),
+        root: SELF_HOSTED_ROOT.to_string(),
+    }];
+    context.workspace_dir = Some(workspace.to_string());
+    context.lifecycle_phase = Some("booting".to_string());
+    context.error_text = "ImportError: cannot import name 'is_valid_git_revision_name' from 'sase.vcs_provider.plugins._git_revision_ops'".to_string();
+    context.traceback_text = format!(
+        "Traceback (most recent call last):\n  File \"{SELF_HOSTED_ROOT}/src/sase/vcs_provider/plugins/_git_revision_ops.py\", line 3, in <module>\n{}",
+        context.error_text
+    );
+    context.log_tail =
+        "Refreshing sase runner code after dependency wait".to_string();
+    context
+}
+
+fn self_hosted_facts() -> super::wire::AgentFailureFactsWire {
+    super::wire::AgentFailureFactsWire {
+        schema_version: 1,
+        lifecycle_phase: Some("booting".to_string()),
+        import_error: Some(super::wire::AgentFailureImportErrorWire {
+            name: Some(
+                "sase.vcs_provider.plugins._git_revision_ops".to_string(),
+            ),
+            path: Some(format!(
+                "{SELF_HOSTED_ROOT}/src/sase/vcs_provider/plugins/_git_revision_ops.py"
+            )),
+            missing_symbol: Some("is_valid_git_revision_name".to_string()),
+        }),
+        frames: vec![super::wire::AgentFailureFrameWire {
+            file: format!(
+                "{SELF_HOSTED_ROOT}/src/sase/vcs_provider/plugins/_git_revision_ops.py"
+            ),
+            function: "extract_directives_and_write_meta".to_string(),
+            line: Some(42),
+        }],
+        ..Default::default()
+    }
+}
+
+fn journal_only_witnesses() -> AutoRestartWitnessesWire {
+    AutoRestartWitnessesWire {
+        schema_version: 1,
+        journal_updates: vec!["ea4121387f".to_string()],
+        probe: Some(AutoRestartProbeWire {
+            ok: true,
+            failures: Vec::new(),
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn self_hosted_overlap_relaunches_with_structured_facts() {
+    // Editable install nested inside the agent workspace: the managed
+    // root and the workspace overlap (equal, or workspace a parent of
+    // the root), and managed roots take precedence.
+    for workspace in [SELF_HOSTED_ROOT, "/home/bryan/projects/github/sase-org"]
+    {
+        let context = self_hosted_context(workspace);
+        let facts = self_hosted_facts();
+        let verdict = classify_agent_failure(
+            Some(&facts),
+            &context,
+            &journal_only_witnesses(),
+        );
+        assert_eq!(verdict.mode, MODE_RELAUNCH, "for {workspace}");
+        assert_eq!(verdict.tier, "tier1_torn_python", "for {workspace}");
+        assert_eq!(verdict.family, "cannot_import_name", "for {workspace}");
+        assert_eq!(
+            verdict.missing_symbol.as_deref(),
+            Some("is_valid_git_revision_name"),
+            "for {workspace}"
+        );
+        assert_eq!(verdict.phase_class, PHASE_PRE_PROVIDER, "for {workspace}");
+    }
+}
+
+#[test]
+fn mixed_managed_and_workspace_only_frames_still_block() {
+    // One workspace-only frame vetoes managed origin even when the
+    // other frames sit under a managed root.
+    let mut context = managed_context();
+    context.error_text =
+        "ImportError: cannot import name 'helper' from 'sase.monitor.continuation_delivery'"
+            .to_string();
+    context.traceback_text = format!(
+        "Traceback (most recent call last):\n  File \"/opt/sase/src/sase/monitor/continuation_delivery.py\", line 3, in <module>\n  File \"/home/user/work/project/agent_code.py\", line 9, in <module>\n{}",
+        context.error_text
+    );
+    let verdict = classify_agent_failure(None, &context, &strong_witnesses());
+    assert_eq!(verdict.mode, MODE_DECLINE);
+    assert_eq!(verdict.reason, "workspace_origin");
+}
+
+#[test]
+fn incident_log_tail_permission_denied_does_not_veto_exception() {
+    // 2026-11-12 row 20261112052959: the torn import is exception
+    // evidence, so the unrelated procfs "Permission denied" JSON line in
+    // the log tail must not veto recovery.
+    let mut context = managed_context();
+    context.error_text = "ImportError: cannot import name 'is_valid_git_revision_name' from 'sase.vcs_provider.plugins._git_revision_ops'".to_string();
+    context.traceback_text = format!(
+        "Traceback (most recent call last):\n  File \"/opt/sase/src/sase/vcs_provider/plugins/_git_revision_ops.py\", line 3, in <module>\n{}",
+        context.error_text
+    );
+    context.log_tail = r#"{"ts":"2026-11-12T05:29:59","event":"launch_scratch_cleanup","detail":"environ unreadable: Permission denied (os error 13)"}"#
+        .to_string();
+    let verdict = classify_agent_failure(None, &context, &strong_witnesses());
+    assert_eq!(verdict.mode, MODE_RELAUNCH);
+    assert_eq!(verdict.tier, "tier1_torn_python");
+    assert_eq!(verdict.family, "cannot_import_name");
+}
+
+#[test]
+fn log_only_row_keeps_full_tail_marker_scan() {
+    // No exception evidence: markers still scan the log tail.
+    let mut context = managed_context();
+    context.error_text = String::new();
+    context.traceback_text = String::new();
+    context.log_tail =
+        "worker ran out of memory during dependency wait".to_string();
+    let verdict = classify_agent_failure(None, &context, &strong_witnesses());
+    assert_eq!(verdict.mode, MODE_DECLINE);
+    assert_eq!(verdict.reason, "resource_exhausted");
+}
+
+#[test]
+fn error_text_429_still_provider_error() {
+    // Exception evidence scopes the scan to the exception text, which
+    // still carries the 429 marker here.
+    let mut context = managed_context();
+    context.error_text = "ProviderError: 429 rate limit exceeded".to_string();
+    context.traceback_text = context.error_text.clone();
+    context.log_tail = String::new();
+    let verdict = classify_agent_failure(None, &context, &strong_witnesses());
+    assert_eq!(verdict.mode, MODE_DECLINE);
+    assert_eq!(verdict.reason, "provider_error");
 }
