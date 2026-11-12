@@ -34,7 +34,8 @@ fn is_non_terminal_lifecycle(lifecycle: &str) -> bool {
 }
 
 /// Follow-up outcomes that leave nothing to resume: the follow-up errored,
-/// launched degraded, or settled lost/stopped without launching a follow-up.
+/// launched degraded, could not launch, or settled lost/stopped without a
+/// successor.
 fn is_failed_followup_outcome(outcome: &str) -> bool {
     matches!(
         outcome,
@@ -43,6 +44,7 @@ fn is_failed_followup_outcome(outcome: &str) -> bool {
             | "failed"
             | "degraded"
             | "launched_degraded"
+            | "not_launchable"
             | "lost"
             | "stopped"
     )
@@ -104,14 +106,19 @@ fn newest_agent_member(
 
 /// Owner kind for one member, or `None` when it owns nothing.
 ///
-/// First match wins: `finalizing`, `handoff`, `recovery`, the monitor/gate
-/// turn states and pending follow-ups, then the lifecycle rule. `starting`
-/// and `unknown` lifecycles report as `running`: both mean execution in
-/// flight, and the owner vocabulary has no finer word for them.
+/// First match wins: `finalizing`, `handoff`, `recovery`, a *live*
+/// monitor/gate (active turn state or in-flight follow-up), then the
+/// lifecycle rule. `starting` and `unknown` lifecycles report as `running`:
+/// both mean execution in flight, and the owner vocabulary has no finer word
+/// for them.
 ///
 /// A monitor or gate whose follow-up launched needs no special case here: a
 /// live successor owns the bead through this same rule, which is exactly what
-/// "passes ownership to `followup_agent`" means.
+/// "passes ownership to `followup_agent`" means. A done member that still
+/// reports `followup_pending` does not own once its process is gone: that
+/// stale `next_action` is an abandoned follow-up, and settlement grace plus
+/// stranded causes take over. A queued successor owns through its own member
+/// facts.
 fn owner_kind(member: &StrandedWorkMemberFactsWire) -> Option<String> {
     // A terminal hold is recovery evidence, not an active handoff. A real
     // successor has its own member facts and still wins through `bead_owner`.
@@ -152,13 +159,21 @@ fn owner_kind(member: &StrandedWorkMemberFactsWire) -> Option<String> {
     }
     let turn_kind = normalize_field(&member.turn_kind);
     if turn_kind == "monitor" || turn_kind == "gate" {
-        let turn_state = normalize_optional(&member.turn_state);
-        if matches!(
-            turn_state.as_deref(),
-            Some("running") | Some("pending") | Some("settling")
-        ) || member.followup_pending
-        {
-            return Some(turn_kind);
+        // Bound ownership to delivery/recovery facts: a live process (or
+        // remote member) with an active turn state or in-flight follow-up
+        // still owns. A dead member with a stale turn_state or abandoned
+        // `followup_pending` does not; classify_bead then applies settle
+        // grace and stranded causes.
+        let live = member.process_live || member.remote;
+        if live {
+            let turn_state = normalize_optional(&member.turn_state);
+            if matches!(
+                turn_state.as_deref(),
+                Some("running") | Some("pending") | Some("settling")
+            ) || member.followup_pending
+            {
+                return Some(turn_kind);
+            }
         }
     }
     let lifecycle = normalize_field(&member.lifecycle);
@@ -286,6 +301,10 @@ fn stranded_cause(
                 if is_failed_followup_outcome(&outcome) {
                     return STRANDED_CAUSE_FOLLOWUP_FAILED;
                 }
+            } else if newest.followup_pending {
+                // Stale next_action, never recorded an outcome: the
+                // follow-up was abandoned rather than launched.
+                return STRANDED_CAUSE_FOLLOWUP_FAILED;
             }
         }
     }

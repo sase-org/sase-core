@@ -569,6 +569,10 @@ fn owned_monitor_and_gate_turn_states() {
     ] {
         let member = StrandedWorkMemberFactsWire {
             turn_kind: turn_kind.to_string(),
+            lifecycle: "running".to_string(),
+            process_live: true,
+            ended_at: None,
+            started_at: Some(OLD),
             turn_state: Some(turn_state.to_string()),
             ..monitor("w--mon")
         };
@@ -588,8 +592,47 @@ fn owned_monitor_and_gate_turn_states() {
 }
 
 #[test]
-fn owned_monitor_followup_pending() {
+fn dead_monitor_stale_turn_state_does_not_own() {
     let member = StrandedWorkMemberFactsWire {
+        turn_state: Some("running".to_string()),
+        ..monitor("w--mon")
+    };
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![member],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "stranded");
+    assert_eq!(verdict.reason.as_deref(), Some("unclosed"));
+}
+
+#[test]
+fn stranded_dead_monitor_abandoned_followup() {
+    let member = StrandedWorkMemberFactsWire {
+        followup_pending: true,
+        ..monitor("w--mon")
+    };
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![member],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "stranded");
+    assert_eq!(verdict.reason.as_deref(), Some("followup_failed"));
+    assert_eq!(verdict.owner, None);
+}
+
+#[test]
+fn owned_live_monitor_followup_pending() {
+    let member = StrandedWorkMemberFactsWire {
+        lifecycle: "running".to_string(),
+        process_live: true,
+        ended_at: None,
+        started_at: Some(OLD),
         followup_pending: true,
         ..monitor("w--mon")
     };
@@ -603,6 +646,43 @@ fn owned_monitor_followup_pending() {
     assert_eq!(verdict.state, "owned");
     assert_eq!(verdict.reason.as_deref(), Some("monitor"));
     assert_eq!(verdict.owner.as_deref(), Some("w--mon"));
+}
+
+#[test]
+fn owned_queued_successor_beats_dead_monitor_pending() {
+    let abandoned = StrandedWorkMemberFactsWire {
+        followup_pending: true,
+        ..monitor("w--mon")
+    };
+    let successor = live_agent("w--2", "queued");
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![abandoned, successor],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "owned");
+    assert_eq!(verdict.reason.as_deref(), Some("queued"));
+    assert_eq!(verdict.owner.as_deref(), Some("w--2"));
+}
+
+#[test]
+fn settling_recent_dead_monitor_abandoned_followup() {
+    let member = StrandedWorkMemberFactsWire {
+        followup_pending: true,
+        ended_at: Some(NOW - 10.0),
+        ..monitor("w--mon")
+    };
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![member],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "settling");
+    assert_eq!(verdict.reason, None);
 }
 
 #[test]
@@ -724,7 +804,13 @@ fn delegation_needs_launched_child_epic() {
 
 #[test]
 fn cause_followup_failed_variants() {
-    for outcome in ["error", "launched-degraded", "lost", "stopped"] {
+    for outcome in [
+        "error",
+        "launched-degraded",
+        "lost",
+        "stopped",
+        "not-launchable",
+    ] {
         let mut newest = monitor("w--mon");
         newest.ended_at = Some(OLD + 200.0);
         newest.followup_outcome = Some(outcome.to_string());
