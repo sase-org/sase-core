@@ -9,6 +9,7 @@ pub mod completion;
 pub mod completion_eval;
 pub mod delivery;
 pub mod evidence;
+pub mod fingerprint_diagnostics;
 pub mod policy;
 pub mod prepared_coverage;
 pub mod prepared_reservation;
@@ -58,6 +59,9 @@ pub use evidence::{
     ContinuationEvidenceLimitsWire, ContinuationEvidencePolicyWire,
     ContinuationEvidenceSelectionRequestWire,
     ContinuationEvidenceSelectionWire,
+};
+pub use fingerprint_diagnostics::{
+    FingerprintDifferenceWire, FingerprintDifferencesWire,
 };
 pub use policy::{
     freeze_continuation_policy, resolve_continuation_policy,

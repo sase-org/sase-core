@@ -348,6 +348,77 @@ fn seal_binding_round_trips_stage_source_and_prior_refusals() {
         }]);
         let allowed = seal(other_tree).unwrap();
         assert_eq!(allowed["status"], json!("prepared"));
+
+        let bind_request = json!({
+            "schema_version": 1,
+            "intent": intent,
+            "monitor_id": "monitor-1",
+            "command": ["just", "check-full"],
+            "request_fingerprint": "sha256:abc"
+        });
+        let bind_obj = json_value_to_py(py, &bind_request).unwrap();
+        let bind_dict = bind_obj.bind(py).downcast::<PyDict>().unwrap();
+        let bound =
+            py_continuation_bind_conditional_completion(py, bind_dict).unwrap();
+        let bound = py_to_json_value(bound.bind(py)).unwrap();
+        let evaluate_request = json!({
+            "schema_version": 1,
+            "intent": bound,
+            "outcome": "completed",
+            "exit_code": 0,
+            "command": ["just", "check-full"],
+            "observations": [{
+                "repo_id": "repo-main",
+                "kind": "main",
+                "name": "main",
+                "head": head,
+                "head_tree": head_tree,
+                "index_tree": index_tree,
+                "paths": [{
+                    "path": "src/app.py",
+                    "xy": "M",
+                    "content_hash": content,
+                    "mode": "100644",
+                    "kind": "file",
+                    "protected": true,
+                    "foreign": false
+                }],
+                "complete": true
+            }],
+            "stages": [],
+            "executors": [{
+                "instance_id": "commit",
+                "provider_ref": "builtin@commit",
+                "headless": true,
+                "durable_replay": true,
+                "requires_model": false
+            }],
+            "workspace_identity": "/ws/0",
+            "original_workspace_identity": "/ws/0",
+            "degraded_workspace": false,
+            "current_plan_digest": plan,
+            "current_obligation_ids": ["repo-main"],
+            "substitutions": {}
+        });
+        let evaluate_obj = json_value_to_py(py, &evaluate_request).unwrap();
+        let evaluate_dict = evaluate_obj.bind(py).downcast::<PyDict>().unwrap();
+        let decision =
+            py_continuation_evaluate_conditional_completion(py, evaluate_dict)
+                .unwrap();
+        let decision = py_to_json_value(decision.bind(py)).unwrap();
+        assert_eq!(decision["eligible"], json!(false));
+        assert_eq!(
+            decision["fingerprint_differences"]["items"][0]["component"],
+            json!("protected")
+        );
+        assert_eq!(
+            decision["fingerprint_differences"]["items"][0]["expected"],
+            json!("false")
+        );
+        assert_eq!(
+            decision["fingerprint_differences"]["items"][0]["observed"],
+            json!("true")
+        );
     });
 }
 

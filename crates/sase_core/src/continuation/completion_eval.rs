@@ -11,6 +11,9 @@ use super::completion::{
     ConditionalCompletionStatusWire, ExecutorCapabilityWire,
     RepositoryObservationWire, FIRST_PARTY_PROVIDERS,
 };
+use super::fingerprint_diagnostics::{
+    compare_fingerprint_observations, FingerprintDifferencesWire,
+};
 use super::schema::{
     validate_command_part, validate_non_empty_text, validate_schema,
     validate_sha256, ContinuationError, DiagnosticStageStatusWire,
@@ -53,6 +56,8 @@ pub struct ConditionalCompletionDecisionWire {
     pub reasons: Vec<String>,
     #[serde(default)]
     pub rendered_message: Option<String>,
+    #[serde(default)]
+    pub fingerprint_differences: FingerprintDifferencesWire,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +176,18 @@ pub fn evaluate_conditional_completion(
         &request.observations,
         &intent.repository_decisions,
     )?;
+    let fingerprint_differences =
+        if current_fingerprint != intent.seal.worktree_fingerprint {
+            compare_fingerprint_observations(
+                &intent.observations,
+                &request.observations,
+                &intent.repository_decisions,
+                &intent.seal.worktree_fingerprint,
+                &current_fingerprint,
+            )
+        } else {
+            FingerprintDifferencesWire::default()
+        };
     if current_fingerprint != intent.seal.worktree_fingerprint {
         reasons.push("stale_worktree_fingerprint".to_string());
     }
@@ -216,6 +233,7 @@ pub fn evaluate_conditional_completion(
             reason: None,
             reasons: vec![],
             rendered_message: Some(rendered),
+            fingerprint_differences,
         })
     } else {
         Ok(ConditionalCompletionDecisionWire {
@@ -225,6 +243,7 @@ pub fn evaluate_conditional_completion(
             reason: reasons.first().cloned(),
             reasons,
             rendered_message: None,
+            fingerprint_differences,
         })
     }
 }
@@ -267,6 +286,7 @@ pub fn render_conditional_completion_message_request(
         reason: None,
         reasons: vec![],
         rendered_message: Some(rendered),
+        fingerprint_differences: FingerprintDifferencesWire::default(),
     })
 }
 
@@ -527,6 +547,24 @@ mod tests {
             bound_intent().verification.level,
             VerificationLevelWire::CheckFull
         );
+        assert_eq!(decision.fingerprint_differences.total_count, 0);
+    }
+
+    #[test]
+    fn older_serialized_decisions_default_to_empty_fingerprint_differences() {
+        let legacy: ConditionalCompletionDecisionWire =
+            serde_json::from_value(json!({
+                "schema_version": 1,
+                "eligible": false,
+                "action": "recover",
+                "reason": "stale_worktree_fingerprint",
+                "reasons": ["stale_worktree_fingerprint"],
+                "rendered_message": null
+            }))
+            .unwrap();
+        assert_eq!(legacy.fingerprint_differences.total_count, 0);
+        assert_eq!(legacy.fingerprint_differences.omitted_count, 0);
+        assert!(legacy.fingerprint_differences.items.is_empty());
     }
 
     #[test]
@@ -565,6 +603,12 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason == "stale_worktree_fingerprint"));
+        assert!(decision.fingerprint_differences.items.iter().any(|item| {
+            item.component == "head"
+                && item.expected.as_deref() == Some(digest64("head").as_str())
+                && item.observed.as_deref()
+                    == Some(digest64("other-head").as_str())
+        }));
 
         let mut obligations = evaluate_request();
         obligations
@@ -715,6 +759,7 @@ mod tests {
             decision.reasons
         );
         assert!(decision.eligible);
+        assert_eq!(decision.fingerprint_differences.total_count, 0);
     }
 
     #[test]
@@ -726,6 +771,215 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason == "stale_worktree_fingerprint"));
+        assert_eq!(decision.fingerprint_differences.items[0].component, "head");
+    }
+
+    #[test]
+    fn decided_observation_reordering_preserves_the_fingerprint() {
+        let mut request = two_repo_evaluate_request();
+        request.observations.reverse();
+        let decision = evaluate_conditional_completion(request).unwrap();
+        assert!(decision.eligible, "reasons: {:?}", decision.reasons);
+        assert_eq!(decision.fingerprint_differences.total_count, 0);
+    }
+
+    #[test]
+    fn fingerprint_diagnostics_cover_repository_and_path_components() {
+        type Mutator =
+            Box<dyn Fn(&mut ConditionalCompletionEvaluateRequestWire)>;
+        let cases: Vec<(&str, Mutator)> = vec![
+            (
+                "head",
+                Box::new(|r: &mut ConditionalCompletionEvaluateRequestWire| {
+                    r.observations[0].head = digest64("new-head")
+                }),
+            ),
+            (
+                "head_tree",
+                Box::new(|r| {
+                    r.observations[0].head_tree = digest64("new-tree")
+                }),
+            ),
+            (
+                "index_tree",
+                Box::new(|r| {
+                    r.observations[0].index_tree = digest64("new-index")
+                }),
+            ),
+            ("complete", Box::new(|r| r.observations[0].complete = false)),
+            (
+                "name",
+                Box::new(|r| r.observations[0].name = "renamed".to_string()),
+            ),
+            (
+                "kind",
+                Box::new(|r| r.observations[0].kind = "linked".to_string()),
+            ),
+            (
+                "content_hash",
+                Box::new(|r| {
+                    r.observations[0].paths[0].content_hash =
+                        Some(digest64("new-bytes"));
+                }),
+            ),
+            (
+                "xy",
+                Box::new(|r| {
+                    r.observations[0].paths[0].xy = Some("??".to_string())
+                }),
+            ),
+            (
+                "mode",
+                Box::new(|r| {
+                    r.observations[0].paths[0].mode =
+                        Some("100755".to_string());
+                }),
+            ),
+            (
+                "path_kind",
+                Box::new(|r| {
+                    r.observations[0].paths[0].kind =
+                        ObservedPathKindWire::Symlink;
+                }),
+            ),
+            (
+                "protected",
+                Box::new(|r| r.observations[0].paths[0].protected = true),
+            ),
+            (
+                "foreign",
+                Box::new(|r| r.observations[0].paths[0].foreign = true),
+            ),
+            (
+                "path_added",
+                Box::new(|r| {
+                    let mut path = r.observations[0].paths[0].clone();
+                    path.path = "src/new.py".to_string();
+                    r.observations[0].paths.push(path);
+                }),
+            ),
+            (
+                "path_removed",
+                Box::new(|r| r.observations[0].paths.clear()),
+            ),
+        ];
+
+        for (component, mutate) in cases {
+            let mut request = evaluate_request();
+            mutate(&mut request);
+            let decision = evaluate_conditional_completion(request).unwrap();
+            assert!(!decision.eligible, "{component} unexpectedly eligible");
+            assert!(
+                decision
+                    .reasons
+                    .iter()
+                    .any(|reason| reason == "stale_worktree_fingerprint"),
+                "{component} did not preserve the fingerprint refusal: {:?}",
+                decision.reasons
+            );
+            assert!(
+                decision
+                    .fingerprint_differences
+                    .items
+                    .iter()
+                    .any(|item| item.component == component),
+                "{component} missing from {:?}",
+                decision.fingerprint_differences
+            );
+        }
+    }
+
+    #[test]
+    fn path_order_only_change_is_explained_without_digest_fallback() {
+        let mut prepare = prepare_request();
+        let mut second = observation().paths[0].clone();
+        second.path = "src/second.py".to_string();
+        second.content_hash = Some(digest64("second"));
+        prepare.observations[0].paths.push(second);
+        let prepared = seal_conditional_completion(prepare).unwrap();
+        let intent =
+            bind_conditional_completion(ConditionalCompletionBindRequestWire {
+                schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+                intent: prepared,
+                monitor_id: "monitor-1".to_string(),
+                command: vec!["just".to_string(), "check-full".to_string()],
+                request_fingerprint: "sha256:abc".to_string(),
+            })
+            .unwrap();
+        let mut request = evaluate_request();
+        request.observations = intent.observations.clone();
+        request.observations[0].paths.reverse();
+        request.intent = intent;
+
+        let decision = evaluate_conditional_completion(request).unwrap();
+        assert!(!decision.eligible);
+        assert_eq!(decision.fingerprint_differences.total_count, 1);
+        assert_eq!(
+            decision.fingerprint_differences.items[0].component,
+            "path_order"
+        );
+        assert_ne!(
+            decision.fingerprint_differences.items[0].component,
+            "digest_mismatch"
+        );
+    }
+
+    #[test]
+    fn duplicate_observations_and_missing_decided_repositories_are_explained() {
+        let mut duplicate = evaluate_request();
+        duplicate.observations.push(observation());
+        let decision = evaluate_conditional_completion(duplicate).unwrap();
+        assert!(decision.fingerprint_differences.items.iter().any(|item| {
+            item.component == "repository_observation_count"
+                && item.repo_id == "repo-main"
+        }));
+
+        let mut missing = evaluate_request();
+        missing.observations.clear();
+        let decision = evaluate_conditional_completion(missing).unwrap();
+        assert!(decision.fingerprint_differences.items.iter().any(|item| {
+            item.component == "repository_observation_missing"
+                && item.repo_id == "repo-main"
+        }));
+    }
+
+    #[test]
+    fn fingerprint_diagnostic_detail_is_bounded_and_counted() {
+        let mut prepare = prepare_request();
+        for index in 0..600 {
+            let mut path = observation().paths[0].clone();
+            path.path = format!("src/file-{index:04}.py");
+            path.content_hash = Some(digest64(&format!("expected-{index}")));
+            prepare.observations[0].paths.push(path);
+        }
+        let prepared = seal_conditional_completion(prepare).unwrap();
+        let intent =
+            bind_conditional_completion(ConditionalCompletionBindRequestWire {
+                schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+                intent: prepared,
+                monitor_id: "monitor-1".to_string(),
+                command: vec!["just".to_string(), "check-full".to_string()],
+                request_fingerprint: "sha256:abc".to_string(),
+            })
+            .unwrap();
+        let mut request = evaluate_request();
+        request.observations = intent.observations.clone();
+        request.intent = intent;
+        for (index, path) in
+            request.observations[0].paths.iter_mut().enumerate()
+        {
+            path.content_hash = Some(digest64(&format!("observed-{index}")));
+        }
+
+        let decision = evaluate_conditional_completion(request).unwrap();
+        assert_eq!(decision.fingerprint_differences.total_count, 601);
+        assert_eq!(decision.fingerprint_differences.items.len(), 512);
+        assert_eq!(decision.fingerprint_differences.omitted_count, 89);
+        assert!(decision
+            .fingerprint_differences
+            .items
+            .iter()
+            .any(|item| item.repo_id == "repo-main"));
     }
 
     #[test]
@@ -788,5 +1042,9 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason == "stale_worktree_fingerprint"));
+        assert!(decision.fingerprint_differences.items.iter().any(|item| {
+            item.component == "repository_observation_missing"
+                && item.repo_id == "repo-main"
+        }));
     }
 }
