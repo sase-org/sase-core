@@ -557,10 +557,17 @@ pub(crate) use sase_core::config::{
     config_inventory as core_config_inventory,
     config_plan_edit as core_config_plan_edit,
     config_validate as core_config_validate,
+    decide_local_command_trust as core_decide_local_command_trust,
+    digest_local_command_projection as core_digest_local_command_projection,
+    filter_trusted_local_layer as core_filter_trusted_local_layer,
     plan_axe_entry_mutation as core_plan_axe_entry_mutation,
+    project_local_commands as core_project_local_commands,
     AxeConfigComposeRequestWire, AxeEntryMutationRequestWire,
     ConfigEditRequestWire, ConfigError as ConfigDomainError,
     ConfigInventoryRequestWire, ConfigValidateRequestWire,
+    LocalCommandDigestRequestWire, LocalCommandProjectionRequestWire,
+    LocalTrustDecisionRequestWire, LocalTrustFilterRequestWire,
+    LOCAL_COMMAND_TRUST_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::content_layout::{
     memory_note_issue as core_memory_note_issue,

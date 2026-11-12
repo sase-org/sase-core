@@ -680,6 +680,103 @@ fn py_normalize_macro_config_layer<'py>(
     json_value_to_py(py, &json)
 }
 
+/// Wire schema version for the local-command trust contract.
+#[pyfunction]
+#[pyo3(name = "local_command_trust_wire_schema_version")]
+fn py_local_command_trust_wire_schema_version() -> u32 {
+    LOCAL_COMMAND_TRUST_WIRE_SCHEMA_VERSION
+}
+
+/// Project the command-bearing subset of one decoded local layer.
+///
+/// *request* is a `LocalCommandProjectionRequestWire`-shape dict: `layer`,
+/// optional `lower_macros` / `lower_workflows` override context, and
+/// optional `source`.
+#[pyfunction]
+#[pyo3(name = "project_local_commands")]
+fn py_project_local_commands<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: LocalCommandProjectionRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid local command projection request: {e}"
+            ))
+        })?;
+    let result =
+        core_project_local_commands(&req).map_err(config_error_to_pyerr)?;
+    let json = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+/// Hash one already-projected command-bearing value.
+#[pyfunction]
+#[pyo3(name = "digest_local_commands")]
+fn py_digest_local_commands<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: LocalCommandDigestRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid local command digest request: {e}"
+            ))
+        })?;
+    let result = core_digest_local_command_projection(&req);
+    let json = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+/// Apply one trust verdict to one decoded local layer.
+#[pyfunction]
+#[pyo3(name = "filter_trusted_local_layer")]
+fn py_filter_trusted_local_layer<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: LocalTrustFilterRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid trusted local filter request: {e}"
+            ))
+        })?;
+    let result =
+        core_filter_trusted_local_layer(&req).map_err(config_error_to_pyerr)?;
+    let json = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+/// Decide trust from the current and acknowledged digests.
+#[pyfunction]
+#[pyo3(name = "decide_local_command_trust")]
+fn py_decide_local_command_trust<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: LocalTrustDecisionRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid local trust decision request: {e}"
+            ))
+        })?;
+    let result = core_decide_local_command_trust(&req);
+    let json = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
 fn feature_flag_state_error_to_pyerr(
     err: FeatureFlagStateDomainError,
 ) -> PyErr {
@@ -799,6 +896,14 @@ pub(crate) fn register_config(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_config_plan_edit, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_validate, m)?)?;
     m.add_function(wrap_pyfunction!(py_normalize_macro_config_layer, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_local_command_trust_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_project_local_commands, m)?)?;
+    m.add_function(wrap_pyfunction!(py_digest_local_commands, m)?)?;
+    m.add_function(wrap_pyfunction!(py_filter_trusted_local_layer, m)?)?;
+    m.add_function(wrap_pyfunction!(py_decide_local_command_trust, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_config_compose, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_config_plan_entry, m)?)?;
     m.add_function(wrap_pyfunction!(py_service_config_compose, m)?)?;

@@ -21,6 +21,7 @@ pub mod merge;
 pub mod plan;
 pub mod provenance;
 pub mod schema;
+pub mod trust;
 pub mod validate;
 pub mod wire;
 
@@ -36,6 +37,17 @@ pub use axe::{
 pub use macro_syntax::{
     normalize_macro_config_layer, MacroLayerNormalizeRequestWire,
     MacroLayerNormalizeWire, MacroSyntaxDiagnosticWire,
+};
+pub use trust::{
+    canonical_json_for_projection, decide_local_command_trust,
+    digest_canonical_json, digest_local_command_projection,
+    filter_trusted_local_layer, project_local_commands,
+    LocalCommandDigestRequestWire, LocalCommandDigestWire,
+    LocalCommandProjectionRequestWire, LocalCommandProjectionWire,
+    LocalTrustDecisionRequestWire, LocalTrustDecisionWire,
+    LocalTrustFilterRequestWire, LocalTrustFilterWire,
+    LOCAL_COMMAND_DIGEST_DOMAIN, LOCAL_COMMAND_TRUST_POLICY_VERSION,
+    LOCAL_COMMAND_TRUST_WIRE_SCHEMA_VERSION,
 };
 pub use wire::{
     ConfigConstraintsWire, ConfigContributionWire, ConfigDiagnosticWire,

@@ -1249,3 +1249,117 @@ fn macro_layer_normalize_binding_round_trips_python_dicts() {
         }
     });
 }
+
+#[test]
+fn local_command_trust_bindings_round_trip_wire_shapes() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        for name in [
+            "local_command_trust_wire_schema_version",
+            "project_local_commands",
+            "digest_local_commands",
+            "filter_trusted_local_layer",
+            "decide_local_command_trust",
+        ] {
+            assert!(module.getattr(name).is_ok(), "missing {name}");
+        }
+        let version: u32 = module
+            .getattr("local_command_trust_wire_schema_version")
+            .unwrap()
+            .call0()
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(version, LOCAL_COMMAND_TRUST_WIRE_SCHEMA_VERSION);
+
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "layer": {
+                    "timezone": "UTC",
+                    "commit_hooks": {"before": "just fix"},
+                    "file_hooks": [{"use": "builtin@fmt", "name": "fmt"}],
+                    "xprompts": {"hello": "world", "legacy_exec": {
+                        "content": "hi",
+                        "steps": [{"bash": "echo hi"}],
+                    }},
+                },
+                "lower_macros": {},
+                "lower_workflows": {},
+                "source": "local",
+            }),
+        )
+        .unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_project_local_commands(py, request).unwrap();
+        let result = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(result["schema_version"], json!(version));
+        assert!(result["projection"]["commit_hooks"].is_object());
+        assert_eq!(
+            result["projection"]["file_hooks"].as_array().unwrap().len(),
+            1
+        );
+        assert!(result["projection"]["macros"]["legacy_exec"].is_object());
+        assert!(result["projection"]["macros"].get("hello").is_none());
+        assert!(result["blocked_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "commit_hooks"));
+        assert_eq!(result["digest"].as_str().unwrap().len(), 64);
+
+        let digest_request =
+            json_value_to_py(py, &json!({"projection": result["projection"]}))
+                .unwrap();
+        let digest_request =
+            digest_request.bind(py).downcast::<PyDict>().unwrap();
+        let digest = py_digest_local_commands(py, digest_request).unwrap();
+        let digest = py_to_json_value(digest.bind(py)).unwrap();
+        assert_eq!(digest["digest"], result["digest"]);
+
+        let filter_request = json_value_to_py(
+            py,
+            &json!({
+                "layer": {
+                    "timezone": "UTC",
+                    "commit_hooks": {"before": "just fix"},
+                    "macros": {"hello": "world"},
+                },
+                "trusted": false,
+                "lower_macros": {},
+                "lower_workflows": {},
+                "source": "local",
+            }),
+        )
+        .unwrap();
+        let filter_request =
+            filter_request.bind(py).downcast::<PyDict>().unwrap();
+        let filtered =
+            py_filter_trusted_local_layer(py, filter_request).unwrap();
+        let filtered = py_to_json_value(filtered.bind(py)).unwrap();
+        assert_eq!(
+            filtered["effective_layer"],
+            json!({"macros": {"hello": "world"}, "timezone": "UTC"})
+        );
+        assert_eq!(filtered["status"], json!("untrusted-filtered"));
+
+        let decide_request = json_value_to_py(
+            py,
+            &json!({
+                "current_digest": result["digest"],
+                "acknowledged_digest": result["digest"],
+                "current_policy_version": 1,
+                "acknowledged_policy_version": 1,
+            }),
+        )
+        .unwrap();
+        let decide_request =
+            decide_request.bind(py).downcast::<PyDict>().unwrap();
+        let decision =
+            py_decide_local_command_trust(py, decide_request).unwrap();
+        let decision = py_to_json_value(decision.bind(py)).unwrap();
+        assert_eq!(decision["status"], json!("trusted"));
+    });
+}
