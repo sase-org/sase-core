@@ -370,3 +370,30 @@ fn prepared_starter_coverage_binding_is_registered() {
         assert!(error.is_instance_of::<pyo3::exceptions::PyValueError>(py));
     });
 }
+
+#[test]
+fn agent_delta_binding_reports_authored_request_byte_limit() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let request = "x".repeat(256 * 1024 + 1);
+        let bad = json!({
+            "schema_version": 1,
+            "node_id": "delta-size-boundary",
+            "authored_local_request": request,
+            "materialized_local_prompt_segments": [],
+            "final_response_ref": null,
+            "handoff_checkpoint_ref": null,
+            "source_refs": [],
+            "status": "interrupted"
+        });
+        let obj = json_value_to_py(py, &bad).unwrap();
+        let dict = obj.bind(py).downcast::<PyDict>().unwrap();
+        let error = py_continuation_validate_agent_delta(py, dict).unwrap_err();
+
+        assert!(error.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+        assert!(error
+            .to_string()
+            .contains("authored_local_request is too large"));
+        assert!(error.to_string().contains("262145 UTF-8 bytes"));
+    });
+}

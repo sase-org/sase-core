@@ -572,7 +572,18 @@ pub fn validate_agent_delta(
 ) -> Result<AgentDeltaWire, ContinuationError> {
     validate_schema(delta.schema_version, "AgentDeltaWire")?;
     validate_identifier(&delta.node_id, "node_id")?;
-    validate_non_empty_text(
+    if delta.authored_local_request.trim().is_empty() {
+        return Err(ContinuationError::validation(
+            "authored_local_request must be non-empty",
+        ));
+    }
+    let authored_request_bytes = delta.authored_local_request.len();
+    if authored_request_bytes > MAX_TEXT_BYTES {
+        return Err(ContinuationError::validation(format!(
+            "authored_local_request is too large: {authored_request_bytes} UTF-8 bytes exceeds allowed limit of {MAX_TEXT_BYTES} bytes"
+        )));
+    }
+    validate_text(
         &delta.authored_local_request,
         "authored_local_request",
         MAX_TEXT_BYTES,
@@ -1240,6 +1251,52 @@ mod tests {
 
         assert_eq!(err.kind, "validation");
         assert!(err.message.contains("injected parent content"));
+    }
+
+    fn agent_delta(authored_local_request: String) -> AgentDeltaWire {
+        AgentDeltaWire {
+            schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+            node_id: "delta-size-boundary".to_string(),
+            authored_local_request,
+            materialized_local_prompt_segments: vec![],
+            final_response_ref: None,
+            handoff_checkpoint_ref: None,
+            source_refs: vec![],
+            status: AgentDeltaStatusWire::Interrupted,
+        }
+    }
+
+    #[test]
+    fn agent_delta_accepts_authored_request_at_utf8_byte_limit() {
+        let request = "x".repeat(MAX_TEXT_BYTES);
+
+        let validated =
+            validate_agent_delta(agent_delta(request.clone())).unwrap();
+
+        assert_eq!(validated.authored_local_request, request);
+    }
+
+    #[test]
+    fn agent_delta_reports_authored_request_one_byte_over_limit() {
+        let err =
+            validate_agent_delta(agent_delta("x".repeat(MAX_TEXT_BYTES + 1)))
+                .unwrap_err();
+
+        assert_eq!(err.kind, "validation");
+        assert!(err.message.contains("authored_local_request is too large"));
+        assert!(err.message.contains("262145 UTF-8 bytes"));
+        assert!(err.message.contains("allowed limit of 262144 bytes"));
+    }
+
+    #[test]
+    fn agent_delta_counts_multibyte_authored_request_as_utf8_bytes() {
+        let request = "é".repeat(MAX_TEXT_BYTES / 2 + 1);
+
+        let err = validate_agent_delta(agent_delta(request)).unwrap_err();
+
+        assert_eq!(err.kind, "validation");
+        assert!(err.message.contains("262146 UTF-8 bytes"));
+        assert!(err.message.contains("allowed limit of 262144 bytes"));
     }
 
     #[test]
