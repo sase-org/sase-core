@@ -12,6 +12,7 @@
 //! Phase 3B reproduces here.
 
 pub(crate) mod capacity;
+pub(crate) mod capacity_cache;
 pub(crate) mod context;
 pub mod index;
 pub mod layout;

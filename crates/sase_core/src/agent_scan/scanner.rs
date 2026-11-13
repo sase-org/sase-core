@@ -26,6 +26,11 @@ use super::capacity::{
     markerless_projection_is_never_live_with, parse_capacity_meta,
     retain_capacity_projections, CapacityProjection,
 };
+use super::capacity_cache::{
+    cached_capacity_meta, capacity_cache_entry, capacity_cache_key,
+    is_full_capacity_enumeration, load_capacity_cache, read_meta_bytes_stable,
+    store_capacity_cache, DirSig, MetaSig,
+};
 use super::context::{resolve_clan_context, resolve_clan_context_from_records};
 use super::layout::{
     collect_workflow_artifact_candidates, parse_agent_artifact_path,
@@ -158,11 +163,14 @@ where
                 }
                 capacity_candidates.push(candidate);
             }
+            let allow_prune = is_full_capacity_enumeration(&options);
             (records, clan_context) = scan_capacity_candidates(
+                projects_root,
                 capacity_candidates,
                 &options,
                 &mut stats,
                 process_is_missing,
+                allow_prune,
             );
         } else {
             let mut completed_records = 0u32;
@@ -229,15 +237,28 @@ struct CapacityScanCandidate {
 
 /// Classify markerless candidates from compact metadata, retain the closure
 /// required by capacity and clan consumers, then hydrate only selected rows.
+///
+/// Terminal stopped classifications are served from the persistent
+/// verdict cache when their directory and metadata signatures still
+/// validate. PID-only verdicts are never cached: a PID reuse or host
+/// reboot can flip them without any file mutation.
 fn scan_capacity_candidates<F>(
+    projects_root: &Path,
     candidates: Vec<ArtifactCandidate>,
     options: &AgentArtifactScanOptionsWire,
     stats: &mut AgentArtifactScanStatsWire,
     process_is_missing: F,
+    allow_prune: bool,
 ) -> (Vec<AgentArtifactRecordWire>, Vec<AgentClanContextWire>)
 where
     F: Fn(i32) -> bool + Copy,
 {
+    let cache = load_capacity_cache(projects_root);
+    let mut staged: BTreeMap<
+        String,
+        super::capacity_cache::CapacityCacheEntryWire,
+    > = BTreeMap::new();
+    let mut visited: BTreeSet<String> = BTreeSet::new();
     let mut items = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let mut item = CapacityScanCandidate {
@@ -255,6 +276,13 @@ where
             initially_live: true,
         };
 
+        let cache_key =
+            capacity_cache_key(projects_root, &item.candidate.artifact_dir);
+        if let Some(key) = cache_key.as_deref() {
+            visited.insert(key.to_string());
+        }
+        let meta_path = item.candidate.artifact_dir.join("agent_meta.json");
+
         let markerless = !capacity_marker_may_exist(
             &item.candidate.artifact_dir.join("running.json"),
         ) && !capacity_marker_may_exist(
@@ -263,38 +291,101 @@ where
             &item.candidate.artifact_dir.join("pending_question.json"),
         );
 
+        // Every scan checks for possible live markers before using a
+        // negative verdict. A cached entry is only consulted for
+        // conclusively markerless candidates and re-validates the marker
+        // state before use.
+        let mut served_from_cache = false;
         if markerless {
-            if let Some(meta) = load_capacity_meta_projection(
-                &item.candidate.artifact_dir.join("agent_meta.json"),
-                stats,
-            ) {
-                item.projection.meta = Some(meta);
-                // Recheck after metadata I/O so a marker created during the
-                // read takes the full, conservative parser path.
-                let still_markerless = !capacity_marker_may_exist(
-                    &item.candidate.artifact_dir.join("running.json"),
-                ) && !capacity_marker_may_exist(
-                    &item.candidate.artifact_dir.join("waiting.json"),
-                ) && !capacity_marker_may_exist(
-                    &item.candidate.artifact_dir.join("pending_question.json"),
-                );
-                if still_markerless {
-                    item.initially_live =
-                        !markerless_projection_is_never_live_with(
-                            &item.projection,
+            if let (Some(cache), Some(key)) =
+                (cache.as_ref(), cache_key.as_deref())
+            {
+                if let Some(meta) = cached_capacity_meta(
+                    cache,
+                    key,
+                    &item.candidate.artifact_dir,
+                    &meta_path,
+                ) {
+                    let still_markerless = !capacity_marker_may_exist(
+                        &item.candidate.artifact_dir.join("running.json"),
+                    ) && !capacity_marker_may_exist(
+                        &item.candidate.artifact_dir.join("waiting.json"),
+                    ) && !capacity_marker_may_exist(
+                        &item
+                            .candidate
+                            .artifact_dir
+                            .join("pending_question.json"),
+                    );
+                    if still_markerless {
+                        item.projection.meta = Some(meta);
+                        item.initially_live = false;
+                        served_from_cache = true;
+                    }
+                }
+            }
+        }
+
+        if !served_from_cache {
+            if markerless {
+                match load_capacity_meta_projection_stable(
+                    &item.candidate.artifact_dir,
+                    &meta_path,
+                    stats,
+                ) {
+                    Some((meta, stable_sigs)) => {
+                        item.projection.meta = Some(meta.clone());
+                        // Recheck after metadata I/O so a marker created
+                        // during the read takes the full, conservative
+                        // parser path.
+                        let still_markerless = !capacity_marker_may_exist(
+                            &item.candidate.artifact_dir.join("running.json"),
+                        ) && !capacity_marker_may_exist(
+                            &item.candidate.artifact_dir.join("waiting.json"),
+                        ) && !capacity_marker_may_exist(
+                            &item
+                                .candidate
+                                .artifact_dir
+                                .join("pending_question.json"),
+                        );
+                        if still_markerless {
+                            item.initially_live =
+                                !markerless_projection_is_never_live_with(
+                                    &item.projection,
+                                    process_is_missing,
+                                );
+                            if !item.initially_live {
+                                if let (Some(key), Some((dir_sig, meta_sig))) =
+                                    (cache_key.as_deref(), stable_sigs)
+                                {
+                                    if let Some(entry) = capacity_cache_entry(
+                                        &meta, dir_sig, meta_sig,
+                                    ) {
+                                        staged.insert(key.to_string(), entry);
+                                    }
+                                }
+                            }
+                        } else {
+                            hydrate_capacity_candidate(
+                                &mut item,
+                                options,
+                                stats,
+                                process_is_missing,
+                            );
+                        }
+                    }
+                    None => {
+                        // Missing, unstable, or malformed metadata is
+                        // conservative. The full parser owns its
+                        // established soft-error diagnostics.
+                        hydrate_capacity_candidate(
+                            &mut item,
+                            options,
+                            stats,
                             process_is_missing,
                         );
-                } else {
-                    hydrate_capacity_candidate(
-                        &mut item,
-                        options,
-                        stats,
-                        process_is_missing,
-                    );
+                    }
                 }
             } else {
-                // Missing or malformed metadata is conservative. The full
-                // parser owns its established soft-error diagnostics.
                 hydrate_capacity_candidate(
                     &mut item,
                     options,
@@ -302,13 +393,6 @@ where
                     process_is_missing,
                 );
             }
-        } else {
-            hydrate_capacity_candidate(
-                &mut item,
-                options,
-                stats,
-                process_is_missing,
-            );
         }
         items.push(item);
     }
@@ -344,6 +428,8 @@ where
             continue;
         }
         if item.record.is_none() {
+            // Closure can always re-admit an unchanged cached negative
+            // candidate; the retained row is then fully parsed.
             hydrate_capacity_candidate(
                 &mut item,
                 options,
@@ -355,6 +441,15 @@ where
             records.push(record);
         }
     }
+    let had_os_errors = stats.os_errors != 0;
+    store_capacity_cache(
+        projects_root,
+        cache,
+        staged,
+        &visited,
+        allow_prune,
+        had_os_errors,
+    );
     (records, clan_context)
 }
 
@@ -386,23 +481,48 @@ fn hydrate_capacity_candidate<F>(
 /// `None` means the compact path cannot safely classify the metadata and the
 /// caller must fall back to the full parser. NotFound remains a soft miss,
 /// matching `load_marker_object` diagnostics.
-fn load_capacity_meta_projection(
+///
+/// The returned signatures bracket the metadata read. `None` signatures
+/// mean the bytes were parsed from a best-effort fresh read (symlinked or
+/// unstable observation): the caller may classify from them exactly as
+/// before, but must not publish a reusable cache entry.
+fn load_capacity_meta_projection_stable(
+    artifact_dir: &Path,
     path: &Path,
     stats: &mut AgentArtifactScanStatsWire,
-) -> Option<AgentMetaWire> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
+) -> Option<(AgentMetaWire, Option<(DirSig, MetaSig)>)> {
+    if let Some((bytes, dir_sig, meta_sig)) =
+        read_meta_bytes_stable(artifact_dir, path)
+    {
+        return match parse_capacity_meta(&bytes) {
+            Ok(meta) => {
+                stats.marker_files_parsed += 1;
+                Some((meta, Some((dir_sig, meta_sig))))
+            }
+            Err(_) => {
+                stats.json_decode_errors += 1;
+                None
+            }
+        };
+    }
+    // No stable observation: preserve the established soft-error
+    // diagnostics (missing is a silent miss, other errors count), then
+    // attempt a best-effort compact parse so classification behavior stays
+    // identical to the pre-cache path. No cache entry is published.
+    match fs::read(path) {
+        Ok(_) => {}
         Err(error) => {
             if error.kind() != io::ErrorKind::NotFound {
                 stats.os_errors += 1;
             }
             return None;
         }
-    };
+    }
+    let bytes = fs::read(path).ok()?;
     match parse_capacity_meta(&bytes) {
         Ok(meta) => {
             stats.marker_files_parsed += 1;
-            Some(meta)
+            Some((meta, None))
         }
         Err(_) => {
             stats.json_decode_errors += 1;
@@ -664,11 +784,15 @@ where
     }
 
     if options.capacity_only {
+        // Exact-directory scans add cache hits but never prune entries for
+        // paths they did not visit.
         (records, clan_context) = scan_capacity_candidates(
+            projects_root,
             capacity_candidates,
             &options,
             &mut stats,
             process_is_missing,
+            false,
         );
     } else {
         sort_records(&mut records, options.newest_first);
@@ -5224,3 +5348,7 @@ mod tests {
 #[cfg(test)]
 #[path = "scanner_capacity_tests.rs"]
 mod capacity_parity_tests;
+
+#[cfg(test)]
+#[path = "capacity_cache_tests.rs"]
+mod capacity_cache_tests;
