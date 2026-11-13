@@ -1,4 +1,5 @@
 use std::fs;
+use std::sync::Barrier;
 
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -6,7 +7,8 @@ use tempfile::tempdir;
 use super::tests::{capacity_artifact_dir, write_capacity_meta, write_json};
 use super::*;
 use crate::agent_scan::capacity_cache::{
-    capacity_cache_path, CAPACITY_CACHE_FILENAME, CAPACITY_CACHE_VERSION,
+    capacity_cache_path, load_capacity_cache, CAPACITY_CACHE_FILENAME,
+    CAPACITY_CACHE_VERSION,
 };
 
 const DEAD_PID: i64 = 1_700_000_000;
@@ -170,25 +172,39 @@ fn cold_warm_and_corrupt_cache_agree() {
     );
     assert_scan_data_equal(&wrong_version, &cold);
 
-    // A root-mismatched cache with a plausible entry is ignored.
+    // Change only the root identity of a valid current-version cache. The
+    // modified cache still deserializes, so rejection proves root validation
+    // runs independently of version and entry-shape checks.
+    let mut wrong_root = read_cache_entries(&projects);
+    assert_eq!(
+        wrong_root.get("version").and_then(Value::as_u64),
+        Some(u64::from(CAPACITY_CACHE_VERSION))
+    );
+    let actual_root = wrong_root
+        .get("root")
+        .and_then(Value::as_str)
+        .expect("a valid cache records its root")
+        .to_owned();
+    wrong_root["root"] = json!(format!("{actual_root}-wrong"));
     fs::write(
         capacity_cache_path(&projects),
-        serde_json::to_vec(&json!({
-            "version": 1,
-            "root": "/nonexistent-root",
-            "entries": {
-                "proj/artifacts/ace-run/20260427190001": {},
-            },
-        }))
-        .unwrap(),
+        serde_json::to_vec(&wrong_root).unwrap(),
     )
     .unwrap();
+    assert!(
+        load_capacity_cache(&projects).is_none(),
+        "a valid cache with a different root identity must be rejected"
+    );
     let mismatched = scan_agent_artifacts_with_process_observation(
         &projects,
         options.clone(),
         process_missing,
     );
     assert_scan_data_equal(&mismatched, &cold);
+    assert!(
+        mismatched.stats.marker_files_parsed > 0,
+        "root rejection must force fresh classification instead of reusing entries"
+    );
 }
 
 #[test]
@@ -774,79 +790,176 @@ fn concurrent_full_and_subset_writers_stay_valid() {
             json!({
                 "name": format!("stopped-{index}"),
                 "stopped_at": "stopped",
+                "agent_clan": "proof-clan",
+                "agent_clan_generation": "g1",
             }),
         ));
     }
+    let live_timestamp = "20260427190100";
+    let live = write_capacity_meta(
+        &projects,
+        live_timestamp,
+        json!({
+            "name": "live-child",
+            "pid": std::process::id(),
+            "parent_timestamp": "20260427190000",
+            "agent_clan": "proof-clan",
+            "agent_clan_generation": "g1",
+        }),
+    );
+    dirs.push(live.clone());
 
     let options = capacity_options();
-    let process_missing = |_pid| false;
-    let expected = cold_scan(&projects, options.clone(), process_missing);
-    assert!(expected.records.is_empty());
+    let live_pid_barrier = Barrier::new(3);
+    let exact_dirs = vec![dirs[0].clone(), live.clone()];
+    let filtered_options = AgentArtifactScanOptionsWire {
+        only_projects: vec!["proj".to_owned()],
+        only_workflow_dirs: vec!["ace-run".to_owned()],
+        ..options.clone()
+    };
 
     std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for worker in 0..4 {
-            let projects = &projects;
-            let options = options.clone();
-            handles.push(scope.spawn(move || {
-                if worker % 2 == 0 {
-                    scan_agent_artifacts_with_process_observation(
-                        projects,
-                        options,
-                        process_missing,
-                    )
-                } else {
-                    let subset = vec![projects
-                        .join("proj")
-                        .join("artifacts")
-                        .join("ace-run")
-                        .join("20260427190000")];
-                    scan_agent_artifact_dirs_with_process_observation(
-                        projects,
-                        &subset,
-                        options,
-                        process_missing,
-                    )
-                }
-            }));
-        }
-        for handle in handles {
-            let scan = handle.join().expect("scanner thread panicked");
-            // Subset scans return subsets; validate each against the legacy
-            // oracle for its own shape instead of the full expectation.
-            let _ = scan;
-        }
+        let full_projects = &projects;
+        let full_options = options.clone();
+        let full_barrier = &live_pid_barrier;
+        let full = scope.spawn(move || {
+            scan_agent_artifacts_with_process_observation(
+                full_projects,
+                full_options,
+                move |_pid| {
+                    full_barrier.wait();
+                    false
+                },
+            )
+        });
+
+        let exact_projects = &projects;
+        let exact_options = options.clone();
+        let exact_dirs = exact_dirs.clone();
+        let exact_barrier = &live_pid_barrier;
+        let exact = scope.spawn(move || {
+            scan_agent_artifact_dirs_with_process_observation(
+                exact_projects,
+                &exact_dirs,
+                exact_options,
+                move |_pid| {
+                    exact_barrier.wait();
+                    false
+                },
+            )
+        });
+
+        let filtered_projects = &projects;
+        let filtered_barrier = &live_pid_barrier;
+        let filtered = scope.spawn(move || {
+            scan_agent_artifacts_with_process_observation(
+                filtered_projects,
+                filtered_options,
+                move |_pid| {
+                    filtered_barrier.wait();
+                    false
+                },
+            )
+        });
+
+        let full = full.join().expect("full scan thread panicked");
+        let exact = exact.join().expect("exact scan thread panicked");
+        let filtered = filtered.join().expect("filtered scan thread panicked");
+
+        let full_legacy = scan_agent_artifacts_legacy_capacity_for_test(
+            &projects,
+            options.clone(),
+            |_pid| false,
+        );
+        assert_scan_data_equal(&full, &full_legacy);
+        assert_eq!(
+            full.records.len(),
+            2,
+            "live row and retained ancestor are present"
+        );
+
+        let exact_legacy = scan_agent_artifact_dirs_legacy_capacity_for_test(
+            &projects,
+            &[dirs[0].clone(), live.clone()],
+            options.clone(),
+            |_pid| false,
+        );
+        assert_scan_data_equal(&exact, &exact_legacy);
+        assert_eq!(
+            exact.records.len(),
+            2,
+            "exact scan includes closure ancestor"
+        );
+
+        let filtered_legacy = scan_agent_artifacts_legacy_capacity_for_test(
+            &projects,
+            AgentArtifactScanOptionsWire {
+                only_projects: vec!["proj".to_owned()],
+                only_workflow_dirs: vec!["ace-run".to_owned()],
+                ..options.clone()
+            },
+            |_pid| false,
+        );
+        assert_scan_data_equal(&filtered, &filtered_legacy);
+        assert_eq!(
+            filtered.records.len(),
+            2,
+            "filtered scan includes closure ancestor"
+        );
     });
 
-    // After the race the cache is still valid JSON and the full scan
-    // still agrees with the legacy oracle.
-    let after = scan_agent_artifacts_with_process_observation(
-        &projects,
-        options.clone(),
-        process_missing,
-    );
-    let legacy = scan_agent_artifacts_legacy_capacity_for_test(
-        &projects,
-        options,
-        process_missing,
-    );
-    assert_scan_data_equal(&after, &legacy);
-    assert_scan_data_equal(&after, &expected);
-    let cache_value = read_cache_entries(&projects);
+    // Inspect the race output before a subsequent full scan can repair it.
+    // Every worker loaded the missing cache before its live-row probe joined
+    // the barrier, so each reached publication with a staged set.
+    let raced_cache = read_cache_entries(&projects);
     assert_eq!(
-        cache_value.get("version").unwrap().as_u64().unwrap(),
-        u64::from(CAPACITY_CACHE_VERSION)
+        raced_cache.get("version").and_then(Value::as_u64),
+        Some(u64::from(CAPACITY_CACHE_VERSION))
     );
-    // All full-enumeration survivors are present; nothing valid-looking
-    // and partial was published.
     assert!(
-        cache_value
+        !raced_cache
             .get("entries")
             .unwrap()
             .as_object()
             .unwrap()
-            .len()
-            >= 16
+            .is_empty(),
+        "a concurrent writer must have published staged entries"
+    );
+    assert!(
+        load_capacity_cache(&projects).is_some(),
+        "the raced file must parse as a complete current-root cache"
+    );
+
+    // A later full scan still agrees with its independent oracle and the
+    // valid cache provides effective warm reuse.
+    let after = scan_agent_artifacts_with_process_observation(
+        &projects,
+        options.clone(),
+        |_pid| false,
+    );
+    let legacy = scan_agent_artifacts_legacy_capacity_for_test(
+        &projects,
+        options,
+        |_pid| false,
+    );
+    assert_scan_data_equal(&after, &legacy);
+    assert_eq!(after.records.len(), 2);
+    let warm = scan_agent_artifacts_with_process_observation(
+        &projects,
+        capacity_options(),
+        |_pid| false,
+    );
+    assert_scan_data_equal(
+        &warm,
+        &scan_agent_artifacts_legacy_capacity_for_test(
+            &projects,
+            capacity_options(),
+            |_pid| false,
+        ),
+    );
+    assert!(
+        warm.stats.marker_files_parsed < 16,
+        "warm reuse must avoid reparsing most stopped history"
     );
 }
 
