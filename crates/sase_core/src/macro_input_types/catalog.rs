@@ -45,7 +45,12 @@ pub struct CatalogEntry {
 /// `effort`, `wait_target`, and `model`.
 pub fn builtin_catalog() -> Vec<CatalogEntry> {
     vec![
-        scalar("word", &[], "A single word with no whitespace."),
+        scalar(
+            "word",
+            &[],
+            "A non-empty word of ASCII letters, digits, `.`, `_`, and `-` \
+             only; use `line` for refs containing `/`.",
+        ),
         scalar("line", &[], "A single line of text with no line breaks."),
         scalar("text", &[], "Free-form text that may span multiple lines."),
         scalar(
@@ -99,9 +104,12 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             base: "agent".to_string(),
             value_role: Some("agent".to_string()),
             choices: Vec::new(),
-            description: "A non-empty agent name with no whitespace."
+            description: "A non-empty agent name of the `word` charset, with \
+                          an optional leading `@`."
                 .to_string(),
-            rule: "A non-empty agent name with no whitespace.".to_string(),
+            rule: "A non-empty agent name of the `word` charset, with an \
+                   optional leading `@`."
+                .to_string(),
             source: CatalogSource::Builtin,
             deprecated_alias_of: None,
             advertised: true,
