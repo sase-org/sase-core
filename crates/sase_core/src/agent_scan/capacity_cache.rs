@@ -7,7 +7,7 @@
 //! closure and clan-context inputs under the scanned projects root so a
 //! fresh process can skip re-reading unchanged terminal history.
 //!
-//! Cache file: `<projects_root>/.capacity_scan_cache_v1.json`. The leading
+//! Cache file: `<projects_root>/.capacity_scan_cache_v2.json`. The leading
 //! dot plus non-directory filename keeps discovery from treating it as a
 //! project (candidate collection only descends into directories). Entries
 //! are keyed by the artifact directory path relative to the projects root,
@@ -57,10 +57,65 @@ use serde::{Deserialize, Serialize};
 use super::wire::{AgentArtifactScanOptionsWire, AgentMetaWire};
 
 /// Reserved cache filename directly under the scanned projects root.
-pub(crate) const CAPACITY_CACHE_FILENAME: &str = ".capacity_scan_cache_v1.json";
+pub(crate) const CAPACITY_CACHE_FILENAME: &str = ".capacity_scan_cache_v2.json";
 
 /// Schema version stored inside the cache file.
-pub(crate) const CAPACITY_CACHE_VERSION: u32 = 1;
+pub(crate) const CAPACITY_CACHE_VERSION: u32 = 2;
+
+/// Only the metadata inputs used by capacity retention and clan context.
+/// Persisting `AgentMetaWire` here used to write every absent/default wire
+/// field for every historical row, making a warm scan deserialize a cache
+/// several times larger than the source metadata it avoided reading.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct CapacityCacheMetaWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_clan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_clan_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clan_tribe: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clan_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pid: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runner_claim_owner_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stopped_at: Option<String>,
+}
+
+impl From<&AgentMetaWire> for CapacityCacheMetaWire {
+    fn from(meta: &AgentMetaWire) -> Self {
+        Self {
+            agent_clan: meta.agent_clan.clone(),
+            agent_clan_generation: meta.agent_clan_generation.clone(),
+            clan_tribe: meta.clan_tribe.clone(),
+            clan_summary: meta.clan_summary.clone(),
+            parent_timestamp: meta.parent_timestamp.clone(),
+            pid: meta.pid,
+            runner_claim_owner_key: meta.runner_claim_owner_key.clone(),
+            stopped_at: meta.stopped_at.clone(),
+        }
+    }
+}
+
+impl From<CapacityCacheMetaWire> for AgentMetaWire {
+    fn from(meta: CapacityCacheMetaWire) -> Self {
+        Self {
+            agent_clan: meta.agent_clan,
+            agent_clan_generation: meta.agent_clan_generation,
+            clan_tribe: meta.clan_tribe,
+            clan_summary: meta.clan_summary,
+            parent_timestamp: meta.parent_timestamp,
+            pid: meta.pid,
+            runner_claim_owner_key: meta.runner_claim_owner_key,
+            stopped_at: meta.stopped_at,
+            ..Self::default()
+        }
+    }
+}
 
 /// On-disk verdict cache: one entry per validated never-live candidate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -98,7 +153,7 @@ pub(crate) struct CapacityCacheEntryWire {
     pub meta_ctime_ns: Option<i64>,
     /// Compact projection parsed at cache time. Presence in the map means
     /// never-live; the meta must still carry a non-empty `stopped_at`.
-    pub meta: AgentMetaWire,
+    pub meta: CapacityCacheMetaWire,
 }
 
 /// Directory signature used for cache validation.
@@ -285,7 +340,7 @@ pub(crate) fn cached_capacity_meta(
     if live_dir != want_dir || live_meta != want_meta {
         return None;
     }
-    Some(entry.meta.clone())
+    Some(entry.meta.clone().into())
 }
 
 /// Read metadata bytes bracketed by signature observations. Returns the
@@ -336,7 +391,7 @@ pub(crate) fn capacity_cache_entry(
         meta_len: meta_sig.len,
         meta_mtime_ns: Some(meta_sig.mtime_ns),
         meta_ctime_ns: meta_sig.ctime_ns,
-        meta: meta.clone(),
+        meta: CapacityCacheMetaWire::from(meta),
     })
 }
 
@@ -361,6 +416,7 @@ pub(crate) fn store_capacity_cache(
     let had_loaded = loaded.is_some();
     let mut entries = loaded.map(|cache| cache.entries).unwrap_or_default();
     let mut dirty = false;
+    let staged_was_empty = staged.is_empty();
     for (key, entry) in staged {
         let changed = entries.get(&key).is_none_or(|old| old != &entry);
         if changed {
@@ -369,10 +425,30 @@ pub(crate) fn store_capacity_cache(
         }
     }
     if allow_prune && !had_os_errors {
-        let before = entries.len();
-        entries.retain(|key, _| visited.contains(key));
-        if entries.len() != before {
-            dirty = true;
+        // Warm scans stage nothing: when every cached key is still
+        // visited, pruning is a no-op. The ordered merge below proves
+        // that in linear time instead of a BTree lookup per entry.
+        let prune_needed = if staged_was_empty {
+            let mut seen = visited.iter();
+            let mut current = seen.next();
+            entries.keys().any(|key| loop {
+                match current {
+                    Some(candidate) if candidate < key => {
+                        current = seen.next();
+                    }
+                    Some(candidate) if candidate == key => break false,
+                    _ => break true,
+                }
+            })
+        } else {
+            true
+        };
+        if prune_needed {
+            let before = entries.len();
+            entries.retain(|key, _| visited.contains(key));
+            if entries.len() != before {
+                dirty = true;
+            }
         }
     }
     if !dirty {

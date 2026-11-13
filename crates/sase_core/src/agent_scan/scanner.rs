@@ -282,50 +282,41 @@ where
             visited.insert(key.to_string());
         }
         let meta_path = item.candidate.artifact_dir.join("agent_meta.json");
-
-        let markerless = !capacity_marker_may_exist(
-            &item.candidate.artifact_dir.join("running.json"),
-        ) && !capacity_marker_may_exist(
-            &item.candidate.artifact_dir.join("waiting.json"),
-        ) && !capacity_marker_may_exist(
-            &item.candidate.artifact_dir.join("pending_question.json"),
-        );
+        let running_path = item.candidate.artifact_dir.join("running.json");
+        let waiting_path = item.candidate.artifact_dir.join("waiting.json");
+        let pending_path =
+            item.candidate.artifact_dir.join("pending_question.json");
 
         // Every scan checks for possible live markers before using a
-        // negative verdict. A cached entry is only consulted for
-        // conclusively markerless candidates and re-validates the marker
-        // state before use.
+        // negative verdict. The cache lookup runs first so one marker
+        // observation gates use: skipping the pre-validation probe saves
+        // three stats per cached row, and uncached rows pay at most two
+        // wasted signature stats. Marker files are still re-checked after
+        // every metadata read on the uncached path below.
         let mut served_from_cache = false;
-        if markerless {
-            if let (Some(cache), Some(key)) =
-                (cache.as_ref(), cache_key.as_deref())
-            {
-                if let Some(meta) = cached_capacity_meta(
-                    cache,
-                    key,
-                    &item.candidate.artifact_dir,
-                    &meta_path,
-                ) {
-                    let still_markerless = !capacity_marker_may_exist(
-                        &item.candidate.artifact_dir.join("running.json"),
-                    ) && !capacity_marker_may_exist(
-                        &item.candidate.artifact_dir.join("waiting.json"),
-                    ) && !capacity_marker_may_exist(
-                        &item
-                            .candidate
-                            .artifact_dir
-                            .join("pending_question.json"),
-                    );
-                    if still_markerless {
-                        item.projection.meta = Some(meta);
-                        item.initially_live = false;
-                        served_from_cache = true;
-                    }
+        if let (Some(cache), Some(key)) = (cache.as_ref(), cache_key.as_deref())
+        {
+            if let Some(meta) = cached_capacity_meta(
+                cache,
+                key,
+                &item.candidate.artifact_dir,
+                &meta_path,
+            ) {
+                if !capacity_marker_may_exist(&running_path)
+                    && !capacity_marker_may_exist(&waiting_path)
+                    && !capacity_marker_may_exist(&pending_path)
+                {
+                    item.projection.meta = Some(meta);
+                    item.initially_live = false;
+                    served_from_cache = true;
                 }
             }
         }
 
         if !served_from_cache {
+            let markerless = !capacity_marker_may_exist(&running_path)
+                && !capacity_marker_may_exist(&waiting_path)
+                && !capacity_marker_may_exist(&pending_path);
             if markerless {
                 match load_capacity_meta_projection_stable(
                     &item.candidate.artifact_dir,
@@ -337,16 +328,10 @@ where
                         // Recheck after metadata I/O so a marker created
                         // during the read takes the full, conservative
                         // parser path.
-                        let still_markerless = !capacity_marker_may_exist(
-                            &item.candidate.artifact_dir.join("running.json"),
-                        ) && !capacity_marker_may_exist(
-                            &item.candidate.artifact_dir.join("waiting.json"),
-                        ) && !capacity_marker_may_exist(
-                            &item
-                                .candidate
-                                .artifact_dir
-                                .join("pending_question.json"),
-                        );
+                        let still_markerless =
+                            !capacity_marker_may_exist(&running_path)
+                                && !capacity_marker_may_exist(&waiting_path)
+                                && !capacity_marker_may_exist(&pending_path);
                         if still_markerless {
                             item.initially_live =
                                 !markerless_projection_is_never_live_with(
@@ -397,9 +382,11 @@ where
         items.push(item);
     }
 
+    // Borrow the candidate table in place: cloning every compact meta
+    // here used to duplicate the whole archive's metadata per scan.
     let projections = items
         .iter()
-        .map(|item| item.projection.clone())
+        .map(|item| &item.projection)
         .collect::<Vec<_>>();
     let initially_live = items
         .iter()
@@ -409,6 +396,7 @@ where
 
     let clan_members = projections
         .iter()
+        .copied()
         .filter_map(super::capacity::clan_member)
         .collect::<Vec<_>>();
     let clan_keys = clan_members
@@ -5352,3 +5340,7 @@ mod capacity_parity_tests;
 #[cfg(test)]
 #[path = "capacity_cache_tests.rs"]
 mod capacity_cache_tests;
+
+#[cfg(test)]
+#[path = "capacity_benchmark_tests.rs"]
+mod capacity_benchmark_tests;

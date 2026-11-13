@@ -6,7 +6,7 @@ use tempfile::tempdir;
 use super::tests::{capacity_artifact_dir, write_capacity_meta, write_json};
 use super::*;
 use crate::agent_scan::capacity_cache::{
-    capacity_cache_path, CAPACITY_CACHE_FILENAME,
+    capacity_cache_path, CAPACITY_CACHE_FILENAME, CAPACITY_CACHE_VERSION,
 };
 
 const DEAD_PID: i64 = 1_700_000_000;
@@ -833,7 +833,10 @@ fn concurrent_full_and_subset_writers_stay_valid() {
     assert_scan_data_equal(&after, &legacy);
     assert_scan_data_equal(&after, &expected);
     let cache_value = read_cache_entries(&projects);
-    assert_eq!(cache_value.get("version").unwrap().as_u64().unwrap(), 1);
+    assert_eq!(
+        cache_value.get("version").unwrap().as_u64().unwrap(),
+        u64::from(CAPACITY_CACHE_VERSION)
+    );
     // All full-enumeration survivors are present; nothing valid-looking
     // and partial was published.
     assert!(

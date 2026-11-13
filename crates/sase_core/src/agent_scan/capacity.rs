@@ -1,5 +1,6 @@
 //! Compact classification and selection for runner-capacity scans.
 
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -128,10 +129,16 @@ where
 
 /// Apply the collection-wide capacity closure to compact projections. The
 /// order and key normalization intentionally match the legacy record pass.
-pub(crate) fn retain_capacity_projections(
-    projections: &[CapacityProjection],
+///
+/// Projections are borrowed so archive-scale scans can pass references into
+/// their candidate table instead of cloning every compact meta a second time.
+pub(crate) fn retain_capacity_projections<P>(
+    projections: &[P],
     initially_live: &[bool],
-) -> Vec<bool> {
+) -> Vec<bool>
+where
+    P: Borrow<CapacityProjection>,
+{
     debug_assert_eq!(projections.len(), initially_live.len());
     let mut keep = initially_live.to_vec();
     let mut by_project_timestamp: BTreeMap<(String, String), Vec<usize>> =
@@ -142,6 +149,7 @@ pub(crate) fn retain_capacity_projections(
         BTreeMap::new();
 
     for (index, projection) in projections.iter().enumerate() {
+        let projection: &CapacityProjection = projection.borrow();
         by_project_timestamp
             .entry((
                 projection.project_name.clone(),
@@ -182,7 +190,7 @@ pub(crate) fn retain_capacity_projections(
     while cursor < pending.len() {
         let index = pending[cursor];
         cursor += 1;
-        let projection = &projections[index];
+        let projection: &CapacityProjection = projections[index].borrow();
         let Some(meta) = projection.meta.as_ref() else {
             continue;
         };
