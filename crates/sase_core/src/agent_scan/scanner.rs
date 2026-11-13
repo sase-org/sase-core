@@ -21,7 +21,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use super::context::resolve_clan_context_from_records;
+use super::capacity::{
+    marker_may_exist as capacity_marker_may_exist,
+    markerless_projection_is_never_live_with, parse_capacity_meta,
+    retain_capacity_projections, CapacityProjection,
+};
+use super::context::{resolve_clan_context, resolve_clan_context_from_records};
 use super::layout::{
     collect_workflow_artifact_candidates, parse_agent_artifact_path,
     resolve_agent_artifact_path,
@@ -29,8 +34,8 @@ use super::layout::{
 use super::wire::{
     is_supported_workflow_dir, AgentArtifactRecordShapeWire,
     AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
-    AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentMetaWire,
-    AgentSessionTurnGateWire, AgentSessionTurnMonitorWire,
+    AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentClanContextWire,
+    AgentMetaWire, AgentSessionTurnGateWire, AgentSessionTurnMonitorWire,
     AgentSessionTurnWire, CreatedEpicWire, DoneMarkerWire,
     FinalizerStatusInstanceWire, FinalizerStatusRunnerWire,
     FinalizerStatusSummaryWire, ImportedSourceOwnerWire, OutputVariableValue,
@@ -117,8 +122,24 @@ pub fn scan_agent_artifacts(
     projects_root: &Path,
     options: AgentArtifactScanOptionsWire,
 ) -> AgentArtifactScanWire {
+    scan_agent_artifacts_with_process_observation(
+        projects_root,
+        options,
+        crate::host_liveness::process_is_provably_missing,
+    )
+}
+
+fn scan_agent_artifacts_with_process_observation<F>(
+    projects_root: &Path,
+    options: AgentArtifactScanOptionsWire,
+    process_is_missing: F,
+) -> AgentArtifactScanWire
+where
+    F: Fn(i32) -> bool + Copy,
+{
     let mut stats = AgentArtifactScanStatsWire::default();
     let mut records: Vec<AgentArtifactRecordWire> = Vec::new();
+    let mut clan_context;
 
     if projects_root.exists() {
         let project_filter = project_filter_for_scan(projects_root, &options);
@@ -128,51 +149,392 @@ pub fn scan_agent_artifacts(
             project_filter.as_ref(),
             &mut stats,
         );
-        let mut completed_records = 0u32;
-        for candidate in candidates {
-            stats.artifact_dirs_visited += 1;
-            let has_done_marker =
-                candidate.artifact_dir.join("done.json").exists();
-            if has_done_marker && options.capacity_only {
-                continue;
+        if options.capacity_only {
+            let mut capacity_candidates = Vec::new();
+            for candidate in candidates {
+                stats.artifact_dirs_visited += 1;
+                if candidate.artifact_dir.join("done.json").exists() {
+                    continue;
+                }
+                capacity_candidates.push(candidate);
             }
-            if has_done_marker
-                && options.not_before_timestamp.as_deref().is_some_and(
-                    |not_before| candidate.timestamp.as_str() < not_before,
-                )
-            {
-                continue;
-            }
-            if has_done_marker
-                && options
-                    .max_records
-                    .is_some_and(|max| completed_records >= max)
-            {
-                continue;
-            }
-
-            let record = scan_artifact_dir(
-                &candidate.project_name,
-                &candidate.project_dir,
-                &candidate.workflow_dir_name,
-                &candidate.artifact_dir,
+            (records, clan_context) = scan_capacity_candidates(
+                capacity_candidates,
                 &options,
                 &mut stats,
+                process_is_missing,
             );
-            if record.has_done_marker {
-                completed_records += 1;
+        } else {
+            let mut completed_records = 0u32;
+            for candidate in candidates {
+                stats.artifact_dirs_visited += 1;
+                let has_done_marker =
+                    candidate.artifact_dir.join("done.json").exists();
+                if has_done_marker
+                    && options.not_before_timestamp.as_deref().is_some_and(
+                        |not_before| candidate.timestamp.as_str() < not_before,
+                    )
+                {
+                    continue;
+                }
+                if has_done_marker
+                    && options
+                        .max_records
+                        .is_some_and(|max| completed_records >= max)
+                {
+                    continue;
+                }
+
+                let record = scan_artifact_dir(
+                    &candidate.project_name,
+                    &candidate.project_dir,
+                    &candidate.workflow_dir_name,
+                    &candidate.artifact_dir,
+                    &options,
+                    &mut stats,
+                );
+                if record.has_done_marker {
+                    completed_records += 1;
+                }
+                records.push(record);
             }
-            records.push(record);
+            sort_records(&mut records, options.newest_first);
+            clan_context = resolve_clan_context_from_records(&records);
         }
+    } else {
+        clan_context = Vec::new();
     }
 
     sort_records(&mut records, options.newest_first);
-    let mut clan_context = resolve_clan_context_from_records(&records);
-    if options.capacity_only {
-        retain_capacity_records_for_admission(&mut records);
-    }
     apply_clan_records(&options, &mut clan_context);
 
+    AgentArtifactScanWire {
+        schema_version: AGENT_SCAN_WIRE_SCHEMA_VERSION,
+        projects_root: projects_root.to_string_lossy().into_owned(),
+        options,
+        stats,
+        index_window: None,
+        records,
+        clan_context,
+        index_completeness: None,
+    }
+}
+
+struct CapacityScanCandidate {
+    candidate: ArtifactCandidate,
+    projection: CapacityProjection,
+    record: Option<AgentArtifactRecordWire>,
+    initially_live: bool,
+}
+
+/// Classify markerless candidates from compact metadata, retain the closure
+/// required by capacity and clan consumers, then hydrate only selected rows.
+fn scan_capacity_candidates<F>(
+    candidates: Vec<ArtifactCandidate>,
+    options: &AgentArtifactScanOptionsWire,
+    stats: &mut AgentArtifactScanStatsWire,
+    process_is_missing: F,
+) -> (Vec<AgentArtifactRecordWire>, Vec<AgentClanContextWire>)
+where
+    F: Fn(i32) -> bool + Copy,
+{
+    let mut items = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let mut item = CapacityScanCandidate {
+            projection: CapacityProjection {
+                project_name: candidate.project_name.clone(),
+                timestamp: candidate.timestamp.clone(),
+                artifact_dir: candidate
+                    .artifact_dir
+                    .to_string_lossy()
+                    .into_owned(),
+                meta: None,
+            },
+            candidate,
+            record: None,
+            initially_live: true,
+        };
+
+        let markerless = !capacity_marker_may_exist(
+            &item.candidate.artifact_dir.join("running.json"),
+        ) && !capacity_marker_may_exist(
+            &item.candidate.artifact_dir.join("waiting.json"),
+        ) && !capacity_marker_may_exist(
+            &item.candidate.artifact_dir.join("pending_question.json"),
+        );
+
+        if markerless {
+            if let Some(meta) = load_capacity_meta_projection(
+                &item.candidate.artifact_dir.join("agent_meta.json"),
+                stats,
+            ) {
+                item.projection.meta = Some(meta);
+                // Recheck after metadata I/O so a marker created during the
+                // read takes the full, conservative parser path.
+                let still_markerless = !capacity_marker_may_exist(
+                    &item.candidate.artifact_dir.join("running.json"),
+                ) && !capacity_marker_may_exist(
+                    &item.candidate.artifact_dir.join("waiting.json"),
+                ) && !capacity_marker_may_exist(
+                    &item.candidate.artifact_dir.join("pending_question.json"),
+                );
+                if still_markerless {
+                    item.initially_live =
+                        !markerless_projection_is_never_live_with(
+                            &item.projection,
+                            process_is_missing,
+                        );
+                } else {
+                    hydrate_capacity_candidate(
+                        &mut item,
+                        options,
+                        stats,
+                        process_is_missing,
+                    );
+                }
+            } else {
+                // Missing or malformed metadata is conservative. The full
+                // parser owns its established soft-error diagnostics.
+                hydrate_capacity_candidate(
+                    &mut item,
+                    options,
+                    stats,
+                    process_is_missing,
+                );
+            }
+        } else {
+            hydrate_capacity_candidate(
+                &mut item,
+                options,
+                stats,
+                process_is_missing,
+            );
+        }
+        items.push(item);
+    }
+
+    let projections = items
+        .iter()
+        .map(|item| item.projection.clone())
+        .collect::<Vec<_>>();
+    let initially_live = items
+        .iter()
+        .map(|item| item.initially_live)
+        .collect::<Vec<_>>();
+    let keep = retain_capacity_projections(&projections, &initially_live);
+
+    let clan_members = projections
+        .iter()
+        .filter_map(super::capacity::clan_member)
+        .collect::<Vec<_>>();
+    let clan_keys = clan_members
+        .iter()
+        .map(|member| {
+            (
+                member.agent_clan.clone(),
+                member.agent_clan_generation.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let clan_context = resolve_clan_context(clan_keys, clan_members);
+
+    let mut records = Vec::new();
+    for (index, mut item) in items.into_iter().enumerate() {
+        if !keep[index] {
+            continue;
+        }
+        if item.record.is_none() {
+            hydrate_capacity_candidate(
+                &mut item,
+                options,
+                stats,
+                process_is_missing,
+            );
+        }
+        if let Some(record) = item.record {
+            records.push(record);
+        }
+    }
+    (records, clan_context)
+}
+
+fn hydrate_capacity_candidate<F>(
+    item: &mut CapacityScanCandidate,
+    options: &AgentArtifactScanOptionsWire,
+    stats: &mut AgentArtifactScanStatsWire,
+    process_is_missing: F,
+) where
+    F: Fn(i32) -> bool + Copy,
+{
+    if item.record.is_some() {
+        return;
+    }
+    let record = scan_artifact_dir(
+        &item.candidate.project_name,
+        &item.candidate.project_dir,
+        &item.candidate.workflow_dir_name,
+        &item.candidate.artifact_dir,
+        options,
+        stats,
+    );
+    item.projection = CapacityProjection::from_record(&record);
+    item.initially_live =
+        !capacity_record_is_never_live_with(&record, process_is_missing);
+    item.record = Some(record);
+}
+
+/// `None` means the compact path cannot safely classify the metadata and the
+/// caller must fall back to the full parser. NotFound remains a soft miss,
+/// matching `load_marker_object` diagnostics.
+fn load_capacity_meta_projection(
+    path: &Path,
+    stats: &mut AgentArtifactScanStatsWire,
+) -> Option<AgentMetaWire> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            if error.kind() != io::ErrorKind::NotFound {
+                stats.os_errors += 1;
+            }
+            return None;
+        }
+    };
+    match parse_capacity_meta(&bytes) {
+        Ok(meta) => {
+            stats.marker_files_parsed += 1;
+            Some(meta)
+        }
+        Err(_) => {
+            stats.json_decode_errors += 1;
+            None
+        }
+    }
+}
+
+/// Preserved pre-projection capacity implementation, used only as an
+/// independent parity oracle in scanner unit tests.
+#[cfg(test)]
+fn scan_agent_artifacts_legacy_capacity_for_test<F>(
+    projects_root: &Path,
+    options: AgentArtifactScanOptionsWire,
+    process_is_missing: F,
+) -> AgentArtifactScanWire
+where
+    F: Fn(i32) -> bool + Copy,
+{
+    let mut stats = AgentArtifactScanStatsWire::default();
+    let candidates = if projects_root.exists() {
+        let project_filter = project_filter_for_scan(projects_root, &options);
+        collect_artifact_candidates(
+            projects_root,
+            &options,
+            project_filter.as_ref(),
+            &mut stats,
+        )
+    } else {
+        Vec::new()
+    };
+    let mut records = Vec::new();
+    for candidate in candidates {
+        stats.artifact_dirs_visited += 1;
+        if candidate.artifact_dir.join("done.json").exists() {
+            continue;
+        }
+        records.push(scan_artifact_dir(
+            &candidate.project_name,
+            &candidate.project_dir,
+            &candidate.workflow_dir_name,
+            &candidate.artifact_dir,
+            &options,
+            &mut stats,
+        ));
+    }
+    let newest_first = options.newest_first;
+    legacy_capacity_snapshot(
+        projects_root,
+        options,
+        stats,
+        records,
+        newest_first,
+        process_is_missing,
+    )
+}
+
+#[cfg(test)]
+fn scan_agent_artifact_dirs_legacy_capacity_for_test<F>(
+    projects_root: &Path,
+    artifact_dirs: &[PathBuf],
+    options: AgentArtifactScanOptionsWire,
+    process_is_missing: F,
+) -> AgentArtifactScanWire
+where
+    F: Fn(i32) -> bool + Copy,
+{
+    let mut stats = AgentArtifactScanStatsWire::default();
+    let mut records = Vec::new();
+    let mut seen_dirs = BTreeSet::new();
+    let mut seen_projects = BTreeSet::new();
+    for artifact_dir in artifact_dirs {
+        if !seen_dirs.insert(artifact_dir.to_string_lossy().into_owned()) {
+            continue;
+        }
+        let Some(candidate) =
+            exact_artifact_candidate(projects_root, artifact_dir, &options)
+        else {
+            continue;
+        };
+        if seen_projects.insert(candidate.project_name.clone()) {
+            stats.projects_visited += 1;
+        }
+        if candidate.artifact_dir.join("done.json").exists() {
+            continue;
+        }
+        stats.artifact_dirs_visited += 1;
+        records.push(scan_artifact_dir(
+            &candidate.project_name,
+            &candidate.project_dir,
+            &candidate.workflow_dir_name,
+            &candidate.artifact_dir,
+            &options,
+            &mut stats,
+        ));
+    }
+    let newest_first = options.newest_first;
+    legacy_capacity_snapshot(
+        projects_root,
+        options,
+        stats,
+        records,
+        newest_first,
+        process_is_missing,
+    )
+}
+
+#[cfg(test)]
+fn legacy_capacity_snapshot<F>(
+    projects_root: &Path,
+    options: AgentArtifactScanOptionsWire,
+    stats: AgentArtifactScanStatsWire,
+    mut records: Vec<AgentArtifactRecordWire>,
+    newest_first: bool,
+    process_is_missing: F,
+) -> AgentArtifactScanWire
+where
+    F: Fn(i32) -> bool + Copy,
+{
+    sort_records(&mut records, newest_first);
+    let keys = super::context::represented_clan_keys(&records);
+    let members = records
+        .iter()
+        .filter_map(super::context::clan_member_from_record)
+        .collect();
+    let mut clan_context =
+        super::context::resolve_clan_context_legacy(keys, members);
+    retain_capacity_records_for_admission_with(
+        &mut records,
+        process_is_missing,
+    );
+    apply_clan_records(&options, &mut clan_context);
     AgentArtifactScanWire {
         schema_version: AGENT_SCAN_WIRE_SCHEMA_VERSION,
         projects_root: projects_root.to_string_lossy().into_owned(),
@@ -223,11 +585,30 @@ pub fn scan_agent_artifact_dirs(
     artifact_dirs: &[PathBuf],
     options: AgentArtifactScanOptionsWire,
 ) -> AgentArtifactScanWire {
+    scan_agent_artifact_dirs_with_process_observation(
+        projects_root,
+        artifact_dirs,
+        options,
+        crate::host_liveness::process_is_provably_missing,
+    )
+}
+
+fn scan_agent_artifact_dirs_with_process_observation<F>(
+    projects_root: &Path,
+    artifact_dirs: &[PathBuf],
+    options: AgentArtifactScanOptionsWire,
+    process_is_missing: F,
+) -> AgentArtifactScanWire
+where
+    F: Fn(i32) -> bool + Copy,
+{
     let mut stats = AgentArtifactScanStatsWire::default();
     let mut records: Vec<AgentArtifactRecordWire> = Vec::new();
+    let mut clan_context;
     let mut seen_dirs: BTreeSet<String> = BTreeSet::new();
     let mut seen_projects: BTreeSet<String> = BTreeSet::new();
     let mut completed_records = 0u32;
+    let mut capacity_candidates = Vec::new();
 
     for artifact_dir in artifact_dirs {
         let dir_key = artifact_dir.to_string_lossy().into_owned();
@@ -264,6 +645,10 @@ pub fn scan_agent_artifact_dirs(
         }
 
         stats.artifact_dirs_visited += 1;
+        if options.capacity_only {
+            capacity_candidates.push(candidate);
+            continue;
+        }
         let record = scan_artifact_dir(
             &candidate.project_name,
             &candidate.project_dir,
@@ -278,11 +663,18 @@ pub fn scan_agent_artifact_dirs(
         records.push(record);
     }
 
-    sort_records(&mut records, options.newest_first);
-    let mut clan_context = resolve_clan_context_from_records(&records);
     if options.capacity_only {
-        retain_capacity_records_for_admission(&mut records);
+        (records, clan_context) = scan_capacity_candidates(
+            capacity_candidates,
+            &options,
+            &mut stats,
+            process_is_missing,
+        );
+    } else {
+        sort_records(&mut records, options.newest_first);
+        clan_context = resolve_clan_context_from_records(&records);
     }
+    sort_records(&mut records, options.newest_first);
     apply_clan_records(&options, &mut clan_context);
 
     AgentArtifactScanWire {
@@ -434,16 +826,22 @@ fn sort_records(records: &mut [AgentArtifactRecordWire], newest_first: bool) {
 /// runner-capacity and hold-identity consumers look up across records. A
 /// pruned row is retained if it is an ancestor, shares an explicit owner key,
 /// or supplies an explicit tribe for a represented clan generation.
-fn retain_capacity_records_for_admission(
+#[cfg(test)]
+fn retain_capacity_records_for_admission_with<F>(
     records: &mut Vec<AgentArtifactRecordWire>,
-) {
+    process_is_missing: F,
+) where
+    F: Fn(i32) -> bool + Copy,
+{
     if records.is_empty() {
         return;
     }
 
     let mut keep = records
         .iter()
-        .map(|record| !capacity_record_is_never_live(record))
+        .map(|record| {
+            !capacity_record_is_never_live_with(record, process_is_missing)
+        })
         .collect::<Vec<_>>();
     let mut by_project_timestamp: BTreeMap<(String, String), Vec<usize>> =
         BTreeMap::new();
@@ -526,6 +924,7 @@ fn retain_capacity_records_for_admission(
     });
 }
 
+#[cfg(test)]
 fn retain_indexed_records(
     indexes: &[usize],
     keep: &mut [bool],
@@ -539,6 +938,7 @@ fn retain_indexed_records(
     }
 }
 
+#[cfg(test)]
 fn normalized_record_key(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -546,6 +946,7 @@ fn normalized_record_key(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+#[cfg(test)]
 fn hold_clan_generation_key(
     record: &AgentArtifactRecordWire,
     meta: &AgentMetaWire,
@@ -562,7 +963,13 @@ fn hold_clan_generation_key(
     Some((clan.to_string(), generation.to_string()))
 }
 
-fn capacity_record_is_never_live(record: &AgentArtifactRecordWire) -> bool {
+fn capacity_record_is_never_live_with<F>(
+    record: &AgentArtifactRecordWire,
+    process_is_missing: F,
+) -> bool
+where
+    F: Fn(i32) -> bool,
+{
     if record.has_done_marker {
         return true;
     }
@@ -592,7 +999,7 @@ fn capacity_record_is_never_live(record: &AgentArtifactRecordWire) -> bool {
         .or_else(|| record.running.as_ref().and_then(|running| running.pid));
     pid.filter(|pid| *pid > 1)
         .and_then(|pid| i32::try_from(pid).ok())
-        .is_some_and(crate::host_liveness::process_is_provably_missing)
+        .is_some_and(process_is_missing)
 }
 
 /// Treat marker existence errors as uncertainty. A dangling symlink still
@@ -1691,7 +2098,9 @@ fn agent_tab_from_object(data: &Map<String, Value>) -> Option<String> {
         .and_then(|canonical| canonical.stored_name().map(str::to_string))
 }
 
-fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
+pub(super) fn agent_meta_from_object(
+    data: &Map<String, Value>,
+) -> AgentMetaWire {
     let legacy_parallel = coerce_bool_truthy(data.get("agent_family_parallel"));
     let raw_agent_session =
         agent_session_str(data, "agent_session", "agent_family");
@@ -2362,12 +2771,15 @@ mod tests {
 
     use super::*;
 
-    fn write_json(path: &Path, payload: Value) {
+    pub(super) fn write_json(path: &Path, payload: Value) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, serde_json::to_string(&payload).unwrap()).unwrap();
     }
 
-    fn capacity_artifact_dir(projects: &Path, timestamp: &str) -> PathBuf {
+    pub(super) fn capacity_artifact_dir(
+        projects: &Path,
+        timestamp: &str,
+    ) -> PathBuf {
         projects
             .join("proj")
             .join("artifacts")
@@ -2375,7 +2787,7 @@ mod tests {
             .join(timestamp)
     }
 
-    fn write_capacity_meta(
+    pub(super) fn write_capacity_meta(
         projects: &Path,
         timestamp: &str,
         meta: Value,
@@ -2480,7 +2892,7 @@ mod tests {
         .expect("scanner record projects into runner-capacity wire")
     }
 
-    fn rust_capacity_snapshot(
+    pub(super) fn rust_capacity_snapshot(
         records: &[AgentArtifactRecordWire],
         candidate: Option<crate::runner_capacity::RunnerCapacityRecordWire>,
     ) -> crate::runner_capacity::RunnerCapacitySnapshotWire {
@@ -4808,3 +5220,7 @@ mod tests {
         assert_eq!(bare.agent_tab_source, None);
     }
 }
+
+#[cfg(test)]
+#[path = "scanner_capacity_tests.rs"]
+mod capacity_parity_tests;

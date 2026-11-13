@@ -1,6 +1,6 @@
 //! Generation-scoped clan context for agent artifact snapshots.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::agent_clan_tribe::{
     resolve_clan_summary, resolve_clan_tribe, ClanTribeMemberWire,
@@ -52,18 +52,74 @@ pub(crate) fn clan_member_from_record(
     record: &AgentArtifactRecordWire,
 ) -> Option<ClanTribeMemberWire> {
     let meta = record.agent_meta.as_ref()?;
+    clan_member_from_meta(meta, &record.timestamp, &record.artifact_dir)
+}
+
+pub(crate) fn clan_member_from_meta(
+    meta: &AgentMetaWire,
+    timestamp: &str,
+    identity: &str,
+) -> Option<ClanTribeMemberWire> {
     let (agent_clan, agent_clan_generation) = clan_key_from_meta(meta)?;
     Some(ClanTribeMemberWire {
         agent_clan,
         agent_clan_generation,
         clan_tribe: meta.clan_tribe.clone(),
         clan_summary: meta.clan_summary.clone(),
-        launch_timestamp: record.timestamp.clone(),
-        identity: record.artifact_dir.clone(),
+        launch_timestamp: timestamp.to_string(),
+        identity: identity.to_string(),
     })
 }
 
 pub(crate) fn resolve_clan_context(
+    keys: BTreeSet<ClanGenerationKey>,
+    members: Vec<ClanTribeMemberWire>,
+) -> Vec<AgentClanContextWire> {
+    let mut members_by_key: BTreeMap<
+        ClanGenerationKey,
+        Vec<ClanTribeMemberWire>,
+    > = BTreeMap::new();
+    for member in members {
+        members_by_key
+            .entry((
+                member.agent_clan.clone(),
+                member.agent_clan_generation.clone(),
+            ))
+            .or_default()
+            .push(member);
+    }
+    keys.into_iter()
+        .map(|(agent_clan, agent_clan_generation)| {
+            let request = ClanTribeResolutionRequestWire {
+                clan_name: agent_clan.clone(),
+                generation: agent_clan_generation.clone(),
+                members: members_by_key
+                    .remove(&(
+                        agent_clan.clone(),
+                        agent_clan_generation.clone(),
+                    ))
+                    .unwrap_or_default(),
+            };
+            let tribe = resolve_clan_tribe(request.clone());
+            let summary = resolve_clan_summary(request);
+            AgentClanContextWire {
+                agent_clan,
+                agent_clan_generation,
+                clan_tribe: tribe.tribe,
+                clan_summary: summary.summary,
+                clan_tribe_source_launch_timestamp: tribe
+                    .source_launch_timestamp,
+                clan_tribe_source_identity: tribe.source_identity,
+                clan_summary_source_launch_timestamp: summary
+                    .source_launch_timestamp,
+                clan_summary_source_identity: summary.source_identity,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn resolve_clan_context_legacy(
     keys: BTreeSet<ClanGenerationKey>,
     members: Vec<ClanTribeMemberWire>,
 ) -> Vec<AgentClanContextWire> {
