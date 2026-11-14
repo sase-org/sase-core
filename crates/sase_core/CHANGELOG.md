@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.3](https://github.com/sase-org/sase-core/compare/v0.44.2...v0.44.3) - 2026-11-14
+
+### Added
+
+- *(agent-scan)* prove archive-scale scan budgets with verdict-cache warm path
+- *(agent-scan)* persist validated never-live capacity verdicts across processes
+- *(agent-scan)* add compact capacity projection and parity oracle
+- *(agent-scan)* project process identity in scans
+- *(continuation)* report fingerprint mismatch details
+- *(config)* persist digest-pinned local command trust
+- *(config)* add digest-pinned local-command trust contract and bindings
+
+### Fixed
+
+- *(continuation)* report authored request byte limits
+- *(stranded_work)* stop dead monitors with stale followup_pending from owning beads
+- *(agent_auto_restart)* managed-root precedence and exception-scoped never-restart markers
+
+### Other
+
+- match word and agent catalog copy to the charset rule
+- *(agent-scan)* prove capacity cache write safety
+
 ## [0.44.2](https://github.com/sase-org/sase-core/compare/v0.44.1...v0.44.2) - 2026-11-09
 
 ### Added

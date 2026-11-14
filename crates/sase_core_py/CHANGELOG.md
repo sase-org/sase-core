@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.3](https://github.com/sase-org/sase-core/compare/v0.44.2...v0.44.3) - 2026-11-14
+
+### Added
+
+- *(agent-scan)* project process identity in scans
+- *(continuation)* report fingerprint mismatch details
+- *(config)* persist digest-pinned local command trust
+- *(config)* add digest-pinned local-command trust contract and bindings
+
+### Fixed
+
+- *(continuation)* report authored request byte limits
+
 ## [0.44.0](https://github.com/sase-org/sase-core/compare/v0.43.3...v0.44.0) - 2026-11-07
 
 ### Added
