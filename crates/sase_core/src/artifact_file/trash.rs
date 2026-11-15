@@ -18,6 +18,8 @@ pub struct ArtifactFileTrashRequestWire {
     pub record: JsonValue,
     #[serde(default)]
     pub stored_path: Option<String>,
+    #[serde(default)]
+    pub missing_payload_ok: bool,
     pub reason: String,
     pub trashed_at: String,
 }
@@ -32,6 +34,8 @@ pub struct ArtifactFileTrashEntryWire {
     pub size_bytes: Option<u64>,
     pub stored_filename: Option<String>,
     pub stored_path: Option<String>,
+    #[serde(default)]
+    pub payload_missing: bool,
     pub record: JsonValue,
 }
 
@@ -216,7 +220,9 @@ pub fn purge_artifact_file_trash(
             let entry_dir =
                 checked_existing_child(&trash_root, &entry.entry_id)?;
             remove_entry_dir(&trash_root, &entry_dir)?;
-            freed_bytes += entry.size_bytes.unwrap_or(0);
+            if !entry.payload_missing {
+                freed_bytes += entry.size_bytes.unwrap_or(0);
+            }
             purged_entry_ids.push(entry.entry_id);
         }
     }
@@ -237,7 +243,7 @@ fn store_in_reserved_entry(
     artifact_id: String,
 ) -> Result<ArtifactFileTrashEntryWire, String> {
     ensure_within(trash_root, entry_dir)?;
-    let stored_filename = request
+    let requested_filename = request
         .stored_path
         .as_deref()
         .map(Path::new)
@@ -254,11 +260,16 @@ fn store_in_reserved_entry(
                 })
         })
         .transpose()?;
-    if let Some(filename) = stored_filename.as_deref() {
+    let mut payload_missing = false;
+    if let Some(filename) = requested_filename.as_deref() {
         validate_single_component(filename, "stored filename")?;
         let source =
             Path::new(request.stored_path.as_deref().unwrap_or_default());
-        ensure_regular_file(source, "stored artifact")?;
+        payload_missing = ensure_regular_file_or_missing(
+            source,
+            "stored artifact",
+            request.missing_payload_ok,
+        )?;
     }
 
     let entry = ArtifactFileTrashEntryWire {
@@ -268,19 +279,41 @@ fn store_in_reserved_entry(
         trashed_at: request.trashed_at.clone(),
         reason: request.reason.clone(),
         size_bytes: record_u64(&request.record, "size_bytes"),
-        stored_filename: stored_filename.clone(),
-        stored_path: request.stored_path.clone(),
+        stored_filename: if payload_missing {
+            None
+        } else {
+            requested_filename.clone()
+        },
+        stored_path: if payload_missing {
+            None
+        } else {
+            request.stored_path.clone()
+        },
+        payload_missing,
         record: request.record.clone(),
     };
     write_entry_atomically(entry_dir, &entry)?;
 
-    if let Some(filename) = stored_filename {
-        let destination = entry_dir.join(filename);
-        ensure_new_child(entry_dir, &destination)?;
-        move_file(
-            Path::new(request.stored_path.as_deref().unwrap_or_default()),
-            &destination,
-        )?;
+    if !payload_missing {
+        if let Some(filename) = requested_filename {
+            let destination = entry_dir.join(filename);
+            ensure_new_child(entry_dir, &destination)?;
+            let source =
+                Path::new(request.stored_path.as_deref().unwrap_or_default());
+            if let Err(error) = move_file(source, &destination) {
+                if request.missing_payload_ok && is_missing_file(source) {
+                    let missing_entry = ArtifactFileTrashEntryWire {
+                        stored_filename: None,
+                        stored_path: None,
+                        payload_missing: true,
+                        ..entry
+                    };
+                    replace_entry_atomically(entry_dir, &missing_entry)?;
+                    return Ok(missing_entry);
+                }
+                return Err(error);
+            }
+        }
     }
     Ok(entry)
 }
@@ -288,6 +321,21 @@ fn store_in_reserved_entry(
 fn write_entry_atomically(
     entry_dir: &Path,
     entry: &ArtifactFileTrashEntryWire,
+) -> Result<(), String> {
+    write_entry_atomically_inner(entry_dir, entry, false)
+}
+
+fn replace_entry_atomically(
+    entry_dir: &Path,
+    entry: &ArtifactFileTrashEntryWire,
+) -> Result<(), String> {
+    write_entry_atomically_inner(entry_dir, entry, true)
+}
+
+fn write_entry_atomically_inner(
+    entry_dir: &Path,
+    entry: &ArtifactFileTrashEntryWire,
+    replace: bool,
 ) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(entry)
         .map_err(|error| format!("failed to serialize trash entry: {error}"))?;
@@ -299,7 +347,11 @@ fn write_entry_atomically(
         .and_then(|_| temporary.as_file().sync_all())
         .map_err(|error| format!("failed to write trash entry: {error}"))?;
     let destination = entry_dir.join("entry.json");
-    ensure_new_child(entry_dir, &destination)?;
+    if replace {
+        ensure_regular_file(&destination, "trash entry metadata")?;
+    } else {
+        ensure_new_child(entry_dir, &destination)?;
+    }
     temporary.persist(&destination).map_err(|error| {
         format!("failed to publish trash entry: {}", error.error)
     })?;
@@ -308,6 +360,35 @@ fn write_entry_atomically(
         .map_err(|error| {
             format!("failed to sync trash entry directory: {error}")
         })
+}
+
+fn ensure_regular_file_or_missing(
+    path: &Path,
+    label: &str,
+    allow_missing: bool,
+) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(format!(
+                    "{label} is not a real file: {}",
+                    path.display()
+                ));
+            }
+            Ok(false)
+        }
+        Err(error) if allow_missing && error.kind() == ErrorKind::NotFound => {
+            Ok(true)
+        }
+        Err(error) => Err(format!("failed to inspect {label}: {error}")),
+    }
+}
+
+fn is_missing_file(path: &Path) -> bool {
+    matches!(
+        fs::symlink_metadata(path),
+        Err(error) if error.kind() == ErrorKind::NotFound
+    )
 }
 
 fn read_entry_dir(
@@ -651,6 +732,7 @@ mod tests {
             record,
             stored_path: stored_path
                 .map(|path| path.to_string_lossy().into_owned()),
+            missing_payload_ok: false,
             reason: "retention".to_string(),
             trashed_at: trashed_at.to_string(),
         }
@@ -669,13 +751,15 @@ mod tests {
             "size_bytes":7,
             "unknown":{"preserved":true}
         });
-        let entry = trash_artifact_file(&store_request(
+        let mut request = store_request(
             &root,
             record.clone(),
             Some(&stored),
             "2026-07-30T12:00:00Z",
-        ))
-        .unwrap();
+        );
+        request.missing_payload_ok = true;
+        let entry = trash_artifact_file(&request).unwrap();
+        assert!(!entry.payload_missing);
         assert!(!stored.exists());
         assert!(entry.entry_id.contains("default_abcdef"));
 
@@ -777,6 +861,107 @@ mod tests {
             .unwrap();
         assert_eq!(purged.purged_entry_ids, vec![second.entry_id]);
         assert_eq!(purged.unreadable_entries, 1);
+    }
+
+    #[test]
+    fn missing_payload_requires_opt_in_and_restores_only_the_record() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("trash");
+        let missing = temp.path().join("store/missing.png");
+        let record = json!({
+            "id":"default:missing",
+            "path":missing,
+            "size_bytes":7,
+            "unknown":{"preserved":true}
+        });
+        let request = store_request(
+            &root,
+            record.clone(),
+            Some(&missing),
+            "2026-07-30T12:00:00Z",
+        );
+        assert!(trash_artifact_file(&request)
+            .unwrap_err()
+            .contains("failed to inspect stored artifact"));
+
+        let mut request = request;
+        request.missing_payload_ok = true;
+        let entry = trash_artifact_file(&request).unwrap();
+        assert!(entry.payload_missing);
+        assert_eq!(entry.stored_filename, None);
+        assert_eq!(entry.stored_path, None);
+        assert_eq!(entry.record, record);
+        assert_eq!(
+            list_artifact_file_trash(&root).unwrap().entries,
+            vec![entry.clone()]
+        );
+
+        let restored =
+            restore_artifact_file_trash(&ArtifactFileTrashRestoreRequestWire {
+                schema_version: ARTIFACT_FILE_LIFECYCLE_WIRE_SCHEMA_VERSION,
+                trash_root: root.to_string_lossy().into_owned(),
+                entry_id: entry.entry_id,
+            })
+            .unwrap();
+        assert_eq!(restored.restored_path, None);
+        assert_eq!(restored.record, record);
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn missing_payload_wire_fields_default_for_older_records() {
+        let request: ArtifactFileTrashRequestWire =
+            serde_json::from_value(json!({
+                "schema_version":1,
+                "trash_root":"/tmp/trash",
+                "record":{"id":"old"},
+                "stored_path":null,
+                "reason":"retention",
+                "trashed_at":"2026-07-30T12:00:00Z"
+            }))
+            .unwrap();
+        assert!(!request.missing_payload_ok);
+
+        let entry: ArtifactFileTrashEntryWire = serde_json::from_value(json!({
+            "schema_version":1,
+            "entry_id":"entry",
+            "artifact_id":"old",
+            "trashed_at":"2026-07-30T12:00:00Z",
+            "reason":"retention",
+            "size_bytes":null,
+            "stored_filename":null,
+            "stored_path":null,
+            "record":{"id":"old"}
+        }))
+        .unwrap();
+        assert!(!entry.payload_missing);
+    }
+
+    #[test]
+    fn purging_missing_payload_does_not_count_recorded_size_as_freed() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("trash");
+        let missing = temp.path().join("store/missing.bin");
+        let mut request = store_request(
+            &root,
+            json!({"id":"missing","path":missing,"size_bytes":99}),
+            Some(&missing),
+            "2026-07-30T12:00:00Z",
+        );
+        request.missing_payload_ok = true;
+        let entry = trash_artifact_file(&request).unwrap();
+
+        let purged =
+            purge_artifact_file_trash(&ArtifactFileTrashPurgeRequestWire {
+                schema_version: ARTIFACT_FILE_LIFECYCLE_WIRE_SCHEMA_VERSION,
+                trash_root: root.to_string_lossy().into_owned(),
+                before: "2026-07-31T00:00:00Z".to_string(),
+                all: false,
+            })
+            .unwrap();
+
+        assert_eq!(purged.purged_entry_ids, vec![entry.entry_id]);
+        assert_eq!(purged.freed_bytes, 0);
     }
 
     #[cfg(unix)]

@@ -281,6 +281,7 @@ fn artifact_file_lifecycle_bindings_round_trip_plain_python_shapes() {
                     "size_bytes": 7
                 },
                 "stored_path": stored,
+                "missing_payload_ok": true,
                 "reason": "binding test",
                 "trashed_at": "2026-07-30T12:00:00Z"
             }),
@@ -290,6 +291,7 @@ fn artifact_file_lifecycle_bindings_round_trip_plain_python_shapes() {
         let entry = py_artifact_file_trash_store(py, store_request).unwrap();
         let entry = py_to_json_value(entry.bind(py)).unwrap();
         assert_eq!(entry["schema_version"], json!(1));
+        assert_eq!(entry["payload_missing"], json!(false));
         assert!(!stored.exists());
 
         let listing =
@@ -317,6 +319,55 @@ fn artifact_file_lifecycle_bindings_round_trip_plain_python_shapes() {
             json!("default:abcdef0123456789abcdef01")
         );
         assert_eq!(fs::read(&stored).unwrap(), b"payload");
+
+        let missing = temp.path().join("store/missing.bin");
+        let missing_store_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "trash_root": trash_root,
+                "record": {
+                    "id": "default:missing-payload",
+                    "path": missing,
+                    "size_bytes": 9
+                },
+                "stored_path": missing,
+                "missing_payload_ok": true,
+                "reason": "binding test",
+                "trashed_at": "2026-07-30T12:00:00Z"
+            }),
+        )
+        .unwrap();
+        let missing_store =
+            missing_store_obj.bind(py).downcast::<PyDict>().unwrap();
+        let missing_entry =
+            py_artifact_file_trash_store(py, missing_store).unwrap();
+        let missing_entry = py_to_json_value(missing_entry.bind(py)).unwrap();
+        assert_eq!(missing_entry["payload_missing"], json!(true));
+        assert_eq!(missing_entry["stored_filename"], json!(null));
+        assert_eq!(missing_entry["stored_path"], json!(null));
+
+        let missing_restore_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "trash_root": trash_root,
+                "entry_id": missing_entry["entry_id"]
+            }),
+        )
+        .unwrap();
+        let missing_restore =
+            missing_restore_obj.bind(py).downcast::<PyDict>().unwrap();
+        let missing_restored =
+            py_artifact_file_trash_restore(py, missing_restore).unwrap();
+        let missing_restored =
+            py_to_json_value(missing_restored.bind(py)).unwrap();
+        assert_eq!(missing_restored["restored_path"], json!(null));
+        assert_eq!(
+            missing_restored["record"]["id"],
+            json!("default:missing-payload")
+        );
+        assert!(!missing.exists());
 
         let invalid_options_obj = json_value_to_py(
             py,
