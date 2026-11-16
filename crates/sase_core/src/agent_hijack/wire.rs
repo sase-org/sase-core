@@ -66,6 +66,7 @@ pub const HIJACK_REDIRECT_SELECT_MEMBER: &str = "select_member";
 pub const HIJACK_REDIRECT_GATE_REVIEW: &str = "gate_review";
 pub const HIJACK_REDIRECT_COPY_REMOTE_COMMAND: &str = "copy_remote_command";
 pub const HIJACK_REDIRECT_SHOW_ACTIVE_HIJACK: &str = "show_active_hijack";
+pub const HIJACK_REDIRECT_KILL_AND_EDIT: &str = "kill_and_edit";
 
 pub const HIJACK_ACTION_ESCALATE: &str = "escalate";
 pub const HIJACK_ACTION_CONTINUE: &str = "continue";

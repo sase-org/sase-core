@@ -294,6 +294,38 @@ pub fn agent_hijack_continuation_prompt(
     } else {
         format!("`{snapshot}`")
     };
+    if request.context_mode.trim() == "unstarted" {
+        if request.guidance_requested {
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "**Hijack continuation.** `{name}` (`{model}`) never reached its provider, \
+so there is no transcript. You are relaunching its original task in the same \
+workspace with the original launch instructions. Existing workspace changes \
+are still here ({}; recovery snapshot: {snapshot_text}). Inspect `git status` \
+and `git diff` before acting, then continue the original task below.",
+            diff_summary(evidence),
+        ));
+        if !request.stale_lock_files.is_empty() {
+            let files: Vec<String> = request
+                .stale_lock_files
+                .iter()
+                .map(|file| format!("`{file}`"))
+                .collect();
+            out.push_str(&format!(
+                " Stale lock files remain at {} — do not delete them; work around them.",
+                files.join(", "),
+            ));
+        }
+        out.push('\n');
+        let cleaned = strip_launch_directives(&request.original_prompt);
+        if !cleaned.is_empty() {
+            out.push('\n');
+            out.push_str(&cleaned);
+            out.push('\n');
+        }
+        return out;
+    }
     out.push_str("**Hijack continuation.** ");
     out.push_str(&format!(
         "The user stopped `{name}` (`{model}`) because it stopped making progress \

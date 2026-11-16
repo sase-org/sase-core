@@ -3,13 +3,13 @@ use super::wire::{
     AgentHijackEligibilityFactsV2Wire, AgentHijackEligibilityFactsWire,
     AGENT_HIJACK_ELIGIBILITY_WIRE_SCHEMA_VERSION,
     AGENT_HIJACK_WIRE_SCHEMA_VERSION, HIJACK_ADAPTER_LLM,
-    HIJACK_DECISION_IMMEDIATE, HIJACK_DECISION_REDIRECT,
-    HIJACK_DECISION_REFUSED, HIJACK_OCCUPANT_GATE, HIJACK_OCCUPANT_LLM,
-    HIJACK_OCCUPANT_MONITOR, HIJACK_OCCUPANT_NONE, HIJACK_OCCUPANT_QUEUE,
-    HIJACK_OCCUPANT_WAIT, HIJACK_OCCUPANT_WORKFLOW_STEP,
+    HIJACK_ADAPTER_PROCESSLESS, HIJACK_DECISION_IMMEDIATE,
+    HIJACK_DECISION_REDIRECT, HIJACK_DECISION_REFUSED, HIJACK_OCCUPANT_GATE,
+    HIJACK_OCCUPANT_LLM, HIJACK_OCCUPANT_MONITOR, HIJACK_OCCUPANT_NONE,
+    HIJACK_OCCUPANT_QUEUE, HIJACK_OCCUPANT_WAIT, HIJACK_OCCUPANT_WORKFLOW_STEP,
     HIJACK_REDIRECT_COPY_REMOTE_COMMAND, HIJACK_REDIRECT_GATE_REVIEW,
-    HIJACK_REDIRECT_OPEN_RECOVERY, HIJACK_REDIRECT_SELECT_MEMBER,
-    HIJACK_REDIRECT_SHOW_ACTIVE_HIJACK,
+    HIJACK_REDIRECT_KILL_AND_EDIT, HIJACK_REDIRECT_OPEN_RECOVERY,
+    HIJACK_REDIRECT_SELECT_MEMBER, HIJACK_REDIRECT_SHOW_ACTIVE_HIJACK,
 };
 use thiserror::Error;
 
@@ -140,14 +140,81 @@ fn redirect(
     }
 }
 
+fn immediate(adapter: &str) -> AgentHijackEligibilityDecisionV2Wire {
+    AgentHijackEligibilityDecisionV2Wire {
+        schema_version: AGENT_HIJACK_ELIGIBILITY_WIRE_SCHEMA_VERSION,
+        mode: HIJACK_DECISION_IMMEDIATE.to_string(),
+        eligible: true,
+        code: None,
+        message: None,
+        next_action: None,
+        redirect_op: None,
+        adapter: Some(adapter.to_string()),
+    }
+}
+
+fn pre_provider_phase(facts: &AgentHijackEligibilityFactsV2Wire) -> bool {
+    let phase = facts
+        .turn_phase
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(phase.as_str(), "booting" | "waiting" | "preparing")
+        || (phase.is_empty()
+            && facts.status.as_deref().is_some_and(|status| {
+                matches!(
+                    status.to_ascii_uppercase().as_str(),
+                    "WAITING" | "QUEUED"
+                )
+            }))
+}
+
+fn pre_provider_status(facts: &AgentHijackEligibilityFactsV2Wire) -> bool {
+    facts.status.as_deref().is_some_and(|status| {
+        matches!(
+            status.to_ascii_uppercase().as_str(),
+            "WAITING"
+                | "QUEUED"
+                | "STARTING"
+                | "LOST"
+                | "DONE"
+                | "STOPPED"
+                | "FAILED"
+        )
+    })
+}
+
+fn pre_provider_live_decision(
+    facts: &AgentHijackEligibilityFactsV2Wire,
+) -> AgentHijackEligibilityDecisionV2Wire {
+    if facts.process_alive {
+        if !facts.has_hijack_capability {
+            return refused(
+                "missing_capability",
+                "runner did not record hijack support",
+                "use x, or wait for its next turn",
+            );
+        }
+        if facts.pid.is_none_or(|pid| pid <= 0) {
+            return refused(
+                "missing_pid",
+                "parked runner process is not identified",
+                "refresh the agent row, then retry",
+            );
+        }
+        immediate(HIJACK_ADAPTER_LLM)
+    } else {
+        // A dead pre-provider runner has no process to signal. The claim,
+        // rather than its stale PID, is the custody identity for this stop.
+        immediate(HIJACK_ADAPTER_PROCESSLESS)
+    }
+}
+
 /// Decide a hijack request against the v2 facts wire.
 ///
-/// This phase encodes today's truthful table: `immediate` for a live,
-/// capable LLM occupant holding a numbered claim; redirects for rows that
-/// need navigation instead of a stop; and a distinct code, message, and
-/// next action for every refusal. Later phases widen rows (latched
-/// finalizing and gate turns, the monitor adapter, processless
-/// waiting turns) without changing this function's shape.
+/// `WAITING`, `QUEUED`, and booting turns use their live runner when it is
+/// alive, or a processless, claim-owned stop after it has died. Rows without
+/// a numbered claim are sent to the existing kill-and-edit flow.
 pub fn agent_hijack_decide(
     facts: &AgentHijackEligibilityFactsV2Wire,
 ) -> Result<AgentHijackEligibilityDecisionV2Wire, AgentHijackDecideError> {
@@ -273,22 +340,28 @@ pub fn agent_hijack_decide(
             if !facts.has_numbered_claim
                 || facts.workspace_num.is_none_or(|number| number <= 0)
             {
-                return Ok(refused(
+                return Ok(redirect(
                     "nothing_to_keep",
-                    "waiting turn holds no numbered workspace; nothing to keep",
-                    "use x, then edit and relaunch",
+                    "waiting turn has no numbered workspace to keep",
+                    "open kill-and-edit to preserve the prompt and relaunch",
+                    HIJACK_REDIRECT_KILL_AND_EDIT,
                 ));
             }
-            let code = if facts.occupying_kind == HIJACK_OCCUPANT_WAIT {
-                "waiting"
-            } else {
-                "queued"
-            };
-            return Ok(refused(
-                code,
-                "parked turn cannot be hijacked yet; wait for it to start",
-                "wait for the turn to start, then hijack",
-            ));
+            if !facts.successor_attachable {
+                return Ok(refused(
+                    "no_session",
+                    "no session to attach a hijack successor to",
+                    "fork or retry from the session instead",
+                ));
+            }
+            if !pre_provider_phase(facts) {
+                return Ok(refused(
+                    "ineligible_status",
+                    "parked turn has already crossed its provider boundary",
+                    "wait for the turn to settle, then use recovery",
+                ));
+            }
+            return Ok(pre_provider_live_decision(facts));
         }
         HIJACK_OCCUPANT_WORKFLOW_STEP => {
             return Ok(refused(
@@ -313,6 +386,28 @@ pub fn agent_hijack_decide(
             "session has no occupying turn",
             "fork or retry the session to start a new turn",
         ));
+    }
+    if facts.occupying_kind == HIJACK_OCCUPANT_LLM
+        && pre_provider_status(facts)
+        && pre_provider_phase(facts)
+    {
+        if !facts.has_numbered_claim
+            || facts.workspace_num.is_none_or(|number| number <= 0)
+        {
+            return Ok(refused(
+                "unnumbered_workspace",
+                "booting turn has no numbered workspace",
+                "wait for a workspace claim, then hijack",
+            ));
+        }
+        if !facts.successor_attachable {
+            return Ok(refused(
+                "no_session",
+                "no session to attach a hijack successor to",
+                "fork or retry from the session instead",
+            ));
+        }
+        return Ok(pre_provider_live_decision(facts));
     }
     if !facts.successor_attachable {
         return Ok(refused(
@@ -357,16 +452,7 @@ pub fn agent_hijack_decide(
         ));
     }
 
-    Ok(AgentHijackEligibilityDecisionV2Wire {
-        schema_version: AGENT_HIJACK_ELIGIBILITY_WIRE_SCHEMA_VERSION,
-        mode: HIJACK_DECISION_IMMEDIATE.to_string(),
-        eligible: true,
-        code: None,
-        message: None,
-        next_action: None,
-        redirect_op: None,
-        adapter: Some(HIJACK_ADAPTER_LLM.to_string()),
-    })
+    Ok(immediate(HIJACK_ADAPTER_LLM))
 }
 
 /// True while a ledger record for this target still needs the workspace.
