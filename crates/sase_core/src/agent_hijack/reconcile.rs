@@ -17,6 +17,13 @@ fn default_min_age_seconds() -> f64 {
     60.0
 }
 
+/// `0` keeps a matching queued successor authoritative forever. Python's
+/// recovery watchdog passes a positive bound so a successor that never
+/// dispatches returns to held instead of showing `RECOVERING…` forever.
+fn default_dispatch_bound_seconds() -> f64 {
+    0.0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AgentHijackReconcileError {
     #[error("unsupported hijack recovery reconcile wire schema_version {0}")]
@@ -87,6 +94,8 @@ pub struct AgentHijackReconcileFactsWire {
     pub resolving_age_seconds: f64,
     #[serde(default = "default_min_age_seconds")]
     pub min_age_seconds: f64,
+    #[serde(default = "default_dispatch_bound_seconds")]
+    pub dispatch_bound_seconds: f64,
     #[serde(default)]
     pub resolver: AgentHijackResolverObservationWire,
     #[serde(default)]
@@ -185,11 +194,21 @@ pub fn hijack_recovery_reconcile(
     match successor.kind.as_str() {
         HIJACK_SUCCESSOR_QUEUED => {
             if successor_queued_matches(record, successor) {
-                Ok(keep(
-                    "queued",
-                    "a matching queued admission request remains authoritative; do not resubmit",
-                    record,
-                ))
+                if facts.dispatch_bound_seconds > 0.0
+                    && facts.resolving_age_seconds >= facts.dispatch_bound_seconds
+                {
+                    Ok(return_to_held_with_code(
+                        "dispatch_timeout",
+                        "the reserved successor never dispatched before the watchdog bound; return to held",
+                        record,
+                    ))
+                } else {
+                    Ok(keep(
+                        "queued",
+                        "a matching queued admission request remains authoritative; do not resubmit",
+                        record,
+                    ))
+                }
             } else {
                 Ok(retain(
                     "uncertain",
@@ -432,6 +451,7 @@ mod tests {
             now_unix: 1_000.0,
             resolving_age_seconds: 90.0,
             min_age_seconds: 60.0,
+            dispatch_bound_seconds: 0.0,
             resolver: AgentHijackResolverObservationWire {
                 pid_live: false,
                 identity_matches: false,
@@ -500,6 +520,27 @@ mod tests {
         let decision = hijack_recovery_reconcile(&record, &observed).unwrap();
         assert_eq!(decision.outcome, HIJACK_RECONCILE_KEEP_RESOLVING);
         assert_eq!(decision.code.as_deref(), Some("queued"));
+    }
+
+    #[test]
+    fn queued_past_dispatch_bound_returns_to_held() {
+        let mut record = resolving();
+        record.admission_request_id = Some("req-1".to_owned());
+        record.admission_identity = Some("agent.2".to_owned());
+        record.launch_stage = Some(HIJACK_LAUNCH_QUEUED.to_owned());
+        let mut observed = facts();
+        observed.dispatch_bound_seconds = 120.0;
+        observed.resolving_age_seconds = 180.0;
+        observed.successor = AgentHijackSuccessorObservationWire {
+            kind: HIJACK_SUCCESSOR_QUEUED.to_owned(),
+            admission_request_id: Some("req-1".to_owned()),
+            admission_identity: Some("agent.2".to_owned()),
+            name: Some("agent.2".to_owned()),
+            ..Default::default()
+        };
+        let decision = hijack_recovery_reconcile(&record, &observed).unwrap();
+        assert_eq!(decision.outcome, HIJACK_RECONCILE_RETURN_TO_HELD);
+        assert_eq!(decision.code.as_deref(), Some("dispatch_timeout"));
     }
 
     #[test]
