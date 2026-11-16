@@ -83,6 +83,7 @@ pub fn replace_agent_artifact_index_dismissed_agents_with_force(
         rows_skipped: 0,
         hidden_terminal_rows_retained: 0,
         hidden_terminal_rows_pruned: 0,
+        ..AgentArtifactIndexUpdateWire::default()
     })
 }
 

@@ -12,5 +12,8 @@ mod self_heal;
 mod storage;
 mod support;
 mod terminalization;
+mod terminalization_cursor;
+mod terminalization_process;
+mod terminalization_witnesses;
 mod visibility;
 mod windowed_query;

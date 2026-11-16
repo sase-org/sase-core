@@ -1,6 +1,11 @@
-use super::super::refresh::terminalized_abandoned_record;
+use super::super::maintenance::terminalize_stale_active_agent_artifact_index_rows_with;
+use super::super::terminalization::{
+    terminalized_abandoned_record, FilesystemClaimProbe, MapClaimProbe,
+    MapProcessProbe, ProcessIdentityObservation, TerminalizationWitnesses,
+};
 use super::super::*;
 use super::support::{artifact, indexed_finished_at, write_json};
+use crate::agent_launch::WorkspaceClaimWire;
 use crate::agent_scan::wire::{
     AgentArtifactRecordShapeWire, AgentArtifactRecordWire,
     AgentArtifactScanOptionsWire,
@@ -8,8 +13,130 @@ use crate::agent_scan::wire::{
 use rusqlite::{params, Connection};
 use serde_json::json;
 use std::fs;
-use std::time::{Duration, UNIX_EPOCH};
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
+
+pub(super) fn dead_process_witnesses() -> TerminalizationWitnesses {
+    process_witnesses(MapProcessProbe::all(ProcessIdentityObservation::Missing))
+}
+
+pub(super) fn process_witnesses(
+    process: MapProcessProbe,
+) -> TerminalizationWitnesses {
+    TerminalizationWitnesses {
+        process: Box::new(process),
+        claims: Box::new(FilesystemClaimProbe::default()),
+        now: SystemTime::now(),
+        local_machine: Some("athena".to_string()),
+        on_after_observe: None,
+    }
+}
+
+pub(super) fn claim_witnesses(
+    process: MapProcessProbe,
+    claims: MapClaimProbe,
+) -> TerminalizationWitnesses {
+    TerminalizationWitnesses {
+        process: Box::new(process),
+        claims: Box::new(claims),
+        now: SystemTime::now(),
+        local_machine: Some("athena".to_string()),
+        on_after_observe: None,
+    }
+}
+
+pub(super) fn terminalize_with(
+    index: &Path,
+    projects: &Path,
+    stale_after_seconds: u64,
+    max_rows: Option<u32>,
+    witnesses: &TerminalizationWitnesses,
+) -> AgentArtifactIndexUpdateWire {
+    terminalize_stale_active_agent_artifact_index_rows_with(
+        index,
+        projects,
+        AgentArtifactScanOptionsWire::default(),
+        stale_after_seconds,
+        max_rows,
+        witnesses,
+    )
+    .unwrap()
+}
+
+pub(super) fn terminalize_with_dead_processes(
+    index: &Path,
+    projects: &Path,
+    stale_after_seconds: u64,
+    max_rows: Option<u32>,
+) -> AgentArtifactIndexUpdateWire {
+    terminalize_with(
+        index,
+        projects,
+        stale_after_seconds,
+        max_rows,
+        &dead_process_witnesses(),
+    )
+}
+
+pub(super) fn write_stale_meta(artifact_dir: &Path, name: &str, pid: i64) {
+    write_json(
+        &artifact_dir.join("agent_meta.json"),
+        json!({
+            "name": name,
+            "pid": pid,
+            "process_identity": "boot-a:1"
+        }),
+    );
+}
+
+pub(super) fn active_query() -> AgentArtifactIndexQueryWire {
+    AgentArtifactIndexQueryWire {
+        include_active: true,
+        include_recent_completed: false,
+        include_full_history: false,
+        active_limit: None,
+        recent_completed_limit: None,
+        include_hidden: false,
+        freshness: AgentArtifactIndexFreshnessWire::Cached,
+        only_monitors: false,
+        record_shape: AgentArtifactRecordShapeWire::Full,
+        window_limit: None,
+        candidate_filter: None,
+        agents_list_projection: false,
+    }
+}
+
+pub(super) fn hidden_completed_query() -> AgentArtifactIndexQueryWire {
+    AgentArtifactIndexQueryWire {
+        include_active: false,
+        include_recent_completed: true,
+        include_full_history: false,
+        active_limit: None,
+        recent_completed_limit: Some(10),
+        include_hidden: true,
+        freshness: AgentArtifactIndexFreshnessWire::Cached,
+        only_monitors: false,
+        record_shape: AgentArtifactRecordShapeWire::Full,
+        window_limit: None,
+        candidate_filter: None,
+        agents_list_projection: false,
+    }
+}
+
+pub(super) fn matching_claim(
+    timestamp: &str,
+    workspace_num: u32,
+) -> WorkspaceClaimWire {
+    WorkspaceClaimWire {
+        workspace_num,
+        workflow: "ace-run".to_string(),
+        cl_name: Some("cl".to_string()),
+        pid: 1234,
+        artifacts_timestamp: Some(timestamp.to_string()),
+        pinned: false,
+    }
+}
 
 #[test]
 fn terminalize_stale_active_rows_hides_abandoned_record() {
@@ -18,7 +145,12 @@ fn terminalize_stale_active_rows_hides_abandoned_record() {
     let artifact_dir = artifact(&projects, "20260521160000");
     write_json(
         &artifact_dir.join("agent_meta.json"),
-        json!({"name": "abandoned", "cl_name": "cl_abandoned"}),
+        json!({
+            "name": "abandoned",
+            "cl_name": "cl_abandoned",
+            "pid": 4242,
+            "process_identity": "boot-a:1"
+        }),
     );
 
     let index = tmp.path().join("agent_artifact_index.sqlite");
@@ -29,15 +161,10 @@ fn terminalize_stale_active_rows_hides_abandoned_record() {
     )
     .unwrap();
 
-    let update = terminalize_stale_active_agent_artifact_index_rows(
-        &index,
-        &projects,
-        AgentArtifactScanOptionsWire::default(),
-        0,
-        None,
-    )
-    .unwrap();
+    let update = terminalize_with_dead_processes(&index, &projects, 0, None);
     assert_eq!(update.rows_indexed, 1);
+    assert_eq!(update.terminalization_synthesized_rows, 1);
+    assert_eq!(update.terminalization_rows_examined, 1);
 
     let active = query_agent_artifact_index(
         &index,
@@ -414,7 +541,12 @@ fn terminalize_repairs_visible_abandoned_rows() {
     let artifact_dir = artifact(&projects, "20260521160030");
     write_json(
         &artifact_dir.join("agent_meta.json"),
-        json!({"name": "repair-abandoned", "cl_name": "cl_repaired"}),
+        json!({
+            "name": "repair-abandoned",
+            "cl_name": "cl_repaired",
+            "pid": 4242,
+            "process_identity": "boot-a:1"
+        }),
     );
 
     let index = tmp.path().join("agent_artifact_index.sqlite");
@@ -424,14 +556,7 @@ fn terminalize_repairs_visible_abandoned_rows() {
         AgentArtifactScanOptionsWire::default(),
     )
     .unwrap();
-    terminalize_stale_active_agent_artifact_index_rows(
-        &index,
-        &projects,
-        AgentArtifactScanOptionsWire::default(),
-        0,
-        None,
-    )
-    .unwrap();
+    terminalize_with_dead_processes(&index, &projects, 0, None);
 
     {
         let conn = Connection::open(&index).unwrap();
@@ -544,16 +669,11 @@ fn terminalize_stale_active_rows_skips_fresh_missing_marker_race() {
     )
     .unwrap();
 
-    let update = terminalize_stale_active_agent_artifact_index_rows(
-        &index,
-        &projects,
-        AgentArtifactScanOptionsWire::default(),
-        24 * 60 * 60,
-        None,
-    )
-    .unwrap();
+    let update =
+        terminalize_with_dead_processes(&index, &projects, 24 * 60 * 60, None);
     assert_eq!(update.rows_indexed, 0);
     assert_eq!(update.rows_skipped, 1);
+    assert_eq!(update.terminalization_skipped_fresh, 1);
 
     let active = query_agent_artifact_index(
         &index,
@@ -597,19 +717,22 @@ fn terminalize_stale_active_rows_revalidates_new_running_marker() {
     .unwrap();
     write_json(
         &artifact_dir.join("running.json"),
-        json!({"pid": 1234, "cl_name": "cl"}),
+        json!({"pid": 1234, "cl_name": "cl", "process_identity": "boot-a:1"}),
     );
 
-    let update = terminalize_stale_active_agent_artifact_index_rows(
+    let update = terminalize_with(
         &index,
         &projects,
-        AgentArtifactScanOptionsWire::default(),
         0,
         None,
-    )
-    .unwrap();
+        &process_witnesses(MapProcessProbe::with(
+            1234,
+            ProcessIdentityObservation::MatchingLive,
+        )),
+    );
     assert_eq!(update.rows_indexed, 0);
     assert_eq!(update.rows_skipped, 1);
+    assert_eq!(update.terminalization_skipped_live, 1);
 
     let active = query_agent_artifact_index(
         &index,
@@ -645,6 +768,8 @@ fn terminalize_stale_active_rows_skips_workspace_claim() {
         json!({
             "name": "claimed",
             "workspace_num": 2,
+            "pid": 4242,
+            "process_identity": "boot-a:1"
         }),
     );
     fs::write(
@@ -661,16 +786,10 @@ fn terminalize_stale_active_rows_skips_workspace_claim() {
     )
     .unwrap();
 
-    let update = terminalize_stale_active_agent_artifact_index_rows(
-        &index,
-        &projects,
-        AgentArtifactScanOptionsWire::default(),
-        0,
-        None,
-    )
-    .unwrap();
+    let update = terminalize_with_dead_processes(&index, &projects, 0, None);
     assert_eq!(update.rows_indexed, 0);
     assert_eq!(update.rows_skipped, 1);
+    assert_eq!(update.terminalization_skipped_claim, 1);
 
     let active = query_agent_artifact_index(
         &index,

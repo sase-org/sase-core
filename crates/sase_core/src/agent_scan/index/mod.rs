@@ -23,6 +23,7 @@ mod record_summary;
 mod refresh;
 mod selection;
 mod storage;
+mod terminalization;
 
 #[cfg(test)]
 mod tests;

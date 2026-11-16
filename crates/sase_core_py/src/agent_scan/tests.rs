@@ -74,6 +74,45 @@ fn scan_agent_artifacts_binding_round_trips_process_identity() {
     });
 }
 
+#[test]
+fn terminalize_binding_round_trips_diagnostic_fields() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempfile::tempdir().unwrap();
+        let projects = temp.path().join("projects");
+        fs::create_dir_all(&projects).unwrap();
+        let index = temp.path().join("agent_artifact_index.sqlite");
+        sase_core::rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            sase_core::AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let module = PyModule::new_bound(py, "agent_scan_test").unwrap();
+        register_agent_scan(&module).unwrap();
+        let result = module
+            .getattr("terminalize_stale_active_agent_artifact_index_rows")
+            .unwrap()
+            .call1((
+                index.to_string_lossy().as_ref(),
+                projects.to_string_lossy().as_ref(),
+                0u64,
+            ))
+            .unwrap();
+        let result = py_to_json_value(&result).unwrap();
+        assert_eq!(result["terminalization_rows_examined"], json!(0));
+        assert_eq!(result["terminalization_source_done_repairs"], json!(0));
+        assert_eq!(result["terminalization_synthesized_rows"], json!(0));
+        assert_eq!(result["terminalization_skipped_live"], json!(0));
+        assert_eq!(result["terminalization_skipped_claim"], json!(0));
+        assert_eq!(result["terminalization_skipped_fresh"], json!(0));
+        assert_eq!(result["terminalization_skipped_unknown"], json!(0));
+        assert_eq!(result["terminalization_skipped_race"], json!(0));
+        assert_eq!(result["terminalization_wrapped"], json!(true));
+    });
+}
+
 fn temp_agent_stats_root() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("sase-core-py-agent-stats-")

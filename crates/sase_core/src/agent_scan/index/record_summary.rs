@@ -296,7 +296,7 @@ pub(super) fn summary_finished_at(
         .and_then(parse_runtime_timestamp)
 }
 
-#[derive(Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct MarkerSignatures {
     pub(super) agent_meta: Option<String>,
     pub(super) done: Option<String>,

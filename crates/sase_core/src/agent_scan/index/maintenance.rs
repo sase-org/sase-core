@@ -9,14 +9,14 @@ use super::output_variables::{
 };
 use super::placeholders;
 use super::record_summary::{MarkerSignatures, RecordSummary};
-use super::refresh::{
-    select_terminalization_candidates, terminalize_stale_candidate,
-    TerminalizationOutcome,
-};
 use super::storage::{
     open_index, open_index_for_rebuild, open_index_with_busy_timeout,
     resolve_index_artifact_dir, AGENT_ARTIFACT_INDEX_WAL_SIZE_LIMIT_BYTES,
     DEFAULT_INDEX_BUSY_TIMEOUT, GATE_TURN_INDEX_COLUMN,
+};
+use super::terminalization::{
+    clear_terminalization_cursors, run_terminalization_pass,
+    TerminalizationWitnesses,
 };
 use crate::agent_scan::scanner::{
     scan_agent_artifact_dir, scan_agent_artifacts,
@@ -43,6 +43,7 @@ pub fn rebuild_agent_artifact_index(
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM agent_artifacts", [])
         .map_err(|e| e.to_string())?;
+    clear_terminalization_cursors(&tx)?;
 
     let mut rows_indexed = 0u64;
     for record in &snapshot.records {
@@ -64,6 +65,7 @@ pub fn rebuild_agent_artifact_index(
         rows_skipped: 0,
         hidden_terminal_rows_retained: retention.retained_rows,
         hidden_terminal_rows_pruned: retention.pruned_rows(),
+        ..AgentArtifactIndexUpdateWire::default()
     })
 }
 
@@ -87,6 +89,7 @@ pub fn upsert_agent_artifact_index_row(
             rows_skipped: 1,
             hidden_terminal_rows_retained: 0,
             hidden_terminal_rows_pruned: 0,
+            ..AgentArtifactIndexUpdateWire::default()
         });
     };
 
@@ -103,6 +106,7 @@ pub fn upsert_agent_artifact_index_row(
         rows_skipped: 0,
         hidden_terminal_rows_retained: 0,
         hidden_terminal_rows_pruned: 0,
+        ..AgentArtifactIndexUpdateWire::default()
     })
 }
 
@@ -155,6 +159,7 @@ pub fn delete_agent_artifact_index_row_with_busy_timeout(
         rows_skipped: 0,
         hidden_terminal_rows_retained: 0,
         hidden_terminal_rows_pruned: 0,
+        ..AgentArtifactIndexUpdateWire::default()
     })
 }
 
@@ -162,8 +167,8 @@ pub fn delete_agent_artifact_index_row_with_busy_timeout(
 ///
 /// This is background index maintenance, not a hot-query repair path. It keeps
 /// abandoned no-marker runs out of the active tier while preserving rows that
-/// still have a running marker, waiting/question marker, workflow state, or a
-/// live workspace claim.
+/// still have a live process, waiting/question marker, workflow state, or a
+/// matching ownership claim.
 pub fn terminalize_stale_active_agent_artifact_index_rows(
     index_path: &Path,
     projects_root: &Path,
@@ -171,19 +176,35 @@ pub fn terminalize_stale_active_agent_artifact_index_rows(
     stale_after_seconds: u64,
     max_rows: Option<u32>,
 ) -> Result<AgentArtifactIndexUpdateWire, String> {
+    terminalize_stale_active_agent_artifact_index_rows_with(
+        index_path,
+        projects_root,
+        options,
+        stale_after_seconds,
+        max_rows,
+        &TerminalizationWitnesses::default(),
+    )
+}
+
+pub(super) fn terminalize_stale_active_agent_artifact_index_rows_with(
+    index_path: &Path,
+    projects_root: &Path,
+    options: AgentArtifactScanOptionsWire,
+    stale_after_seconds: u64,
+    max_rows: Option<u32>,
+    witnesses: &TerminalizationWitnesses,
+) -> Result<AgentArtifactIndexUpdateWire, String> {
     let mut conn = open_index(index_path)?;
     let repaired = repair_abandoned_agent_artifact_index_rows(&mut conn)?;
-    let candidates = select_terminalization_candidates(&conn, max_rows)?;
     let stale_after = Duration::from_secs(stale_after_seconds);
-    let mut rows_indexed = repaired;
-    let mut rows_skipped = 0u64;
-
-    for row in candidates {
-        match terminalize_stale_candidate(&conn, &row, &options, stale_after)? {
-            TerminalizationOutcome::Terminalized => rows_indexed += 1,
-            TerminalizationOutcome::Skipped => rows_skipped += 1,
-        }
-    }
+    let counters = run_terminalization_pass(
+        &mut conn,
+        projects_root,
+        &options,
+        stale_after,
+        max_rows,
+        witnesses,
+    )?;
     let retention = enforce_hidden_terminal_retention(
         &mut conn,
         DEFAULT_HIDDEN_TERMINAL_HOT_ROWS,
@@ -202,11 +223,20 @@ pub fn terminalize_stale_active_agent_artifact_index_rows(
         schema_version: AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
         index_path: index_path.to_string_lossy().into_owned(),
         projects_root: projects_root.to_string_lossy().into_owned(),
-        rows_indexed,
+        rows_indexed: repaired + counters.source_done + counters.synthesized,
         rows_deleted: 0,
-        rows_skipped,
+        rows_skipped: counters.skipped_total(),
         hidden_terminal_rows_retained: retention.retained_rows,
         hidden_terminal_rows_pruned: retention.pruned_rows(),
+        terminalization_rows_examined: counters.examined,
+        terminalization_source_done_repairs: counters.source_done,
+        terminalization_synthesized_rows: counters.synthesized,
+        terminalization_skipped_live: counters.skipped_live,
+        terminalization_skipped_claim: counters.skipped_claim,
+        terminalization_skipped_fresh: counters.skipped_fresh,
+        terminalization_skipped_unknown: counters.skipped_unknown,
+        terminalization_skipped_race: counters.skipped_race,
+        terminalization_wrapped: counters.wrapped,
     })
 }
 
@@ -232,6 +262,7 @@ pub fn prune_hidden_terminal_agent_artifact_index_rows(
         rows_skipped: 0,
         hidden_terminal_rows_retained: retention.retained_rows,
         hidden_terminal_rows_pruned: retention.pruned_rows(),
+        ..AgentArtifactIndexUpdateWire::default()
     })
 }
 

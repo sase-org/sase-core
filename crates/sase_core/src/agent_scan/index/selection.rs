@@ -306,13 +306,6 @@ pub(super) fn select_pending_rows_by_artifact_dirs(
         .collect())
 }
 
-pub(super) fn pending_row_from_sql(
-    row: &rusqlite::Row<'_>,
-) -> Result<PendingRow, String> {
-    let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
-    pending_row_from_sql_with_artifact_dir(row, artifact_dir)
-}
-
 pub(super) fn pending_row_from_sql_with_artifact_dir(
     row: &rusqlite::Row<'_>,
     artifact_dir: String,

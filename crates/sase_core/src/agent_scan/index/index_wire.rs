@@ -250,6 +250,24 @@ pub struct AgentArtifactIndexUpdateWire {
     pub hidden_terminal_rows_retained: u64,
     #[serde(default)]
     pub hidden_terminal_rows_pruned: u64,
+    #[serde(default)]
+    pub terminalization_rows_examined: u64,
+    #[serde(default)]
+    pub terminalization_source_done_repairs: u64,
+    #[serde(default)]
+    pub terminalization_synthesized_rows: u64,
+    #[serde(default)]
+    pub terminalization_skipped_live: u64,
+    #[serde(default)]
+    pub terminalization_skipped_claim: u64,
+    #[serde(default)]
+    pub terminalization_skipped_fresh: u64,
+    #[serde(default)]
+    pub terminalization_skipped_unknown: u64,
+    #[serde(default)]
+    pub terminalization_skipped_race: u64,
+    #[serde(default)]
+    pub terminalization_wrapped: bool,
 }
 
 /// Column-projected rows from `agent_artifacts`, in caller column order.

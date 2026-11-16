@@ -1,29 +1,24 @@
 use super::index_wire::AgentArtifactIndexQueryWire;
 use super::maintenance::{
     delete_agent_artifact_projection_rows, upsert_record,
-    ABANDONED_DONE_OUTCOME,
 };
 use super::placeholders;
-use super::record_summary::{MarkerSignatures, RecordSummary};
+use super::record_summary::MarkerSignatures;
 use super::selection::{
     add_project_filter_to_where, pending_refresh_row_from_sql,
-    pending_row_from_sql, PendingRefreshRow, PendingRow,
+    PendingRefreshRow,
 };
-use crate::agent_launch::list_workspace_claims_from_content;
-use crate::agent_runtime::parse_runtime_timestamp;
 use crate::agent_scan::scanner::{
     list_agent_artifact_dirs, scan_agent_artifact_dir,
 };
 use crate::agent_scan::wire::{
-    decode_agent_artifact_record_json, is_supported_workflow_dir,
-    AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
-    AgentArtifactScanStatsWire, DoneMarkerWire,
+    is_supported_workflow_dir, AgentArtifactRecordWire,
+    AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
 };
 use chrono::{TimeZone, Utc};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -326,229 +321,6 @@ pub(super) fn repair_stale_rows_for_query(
         project_filter,
     );
     refresh_stale_rows(conn, &where_sql, options, stats)
-}
-
-pub(super) fn select_terminalization_candidates(
-    conn: &Connection,
-    max_rows: Option<u32>,
-) -> Result<Vec<PendingRow>, String> {
-    let mut sql = String::from(
-        "SELECT artifact_dir, projects_root, record_json, \
-         agent_meta_sig, done_sig, running_sig, waiting_sig, \
-         pending_question_sig, workflow_state_sig, plan_path_sig, \
-         prompt_steps_sig, macros_sig FROM agent_artifacts \
-         WHERE has_done_marker = 0 \
-           AND has_running_marker = 0 \
-           AND has_waiting_marker = 0 \
-           AND has_workflow_state = 0 \
-           AND pending_question_sig IS NULL \
-         ORDER BY timestamp ASC, artifact_dir ASC",
-    );
-    if max_rows.is_some() {
-        sql.push_str(" LIMIT ?1");
-    }
-
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let mut rows = if let Some(limit) = max_rows {
-        stmt.query([limit]).map_err(|e| e.to_string())?
-    } else {
-        stmt.query([]).map_err(|e| e.to_string())?
-    };
-    let mut candidates = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-        candidates.push(pending_row_from_sql(row)?);
-    }
-    Ok(candidates)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TerminalizationOutcome {
-    Terminalized,
-    Skipped,
-}
-
-pub(super) fn terminalize_stale_candidate(
-    conn: &Connection,
-    row: &PendingRow,
-    options: &AgentArtifactScanOptionsWire,
-    stale_after: Duration,
-) -> Result<TerminalizationOutcome, String> {
-    let current = MarkerSignatures::from_artifact_dir(&row.artifact_dir);
-    let projects_root = PathBuf::from(&row.row_projects_root);
-    let record = if row.stored == current {
-        match decode_agent_artifact_record_json(&row.record_json) {
-            Ok(record) => record,
-            Err(_) => return Ok(TerminalizationOutcome::Skipped),
-        }
-    } else {
-        let artifact_dir = PathBuf::from(&row.artifact_dir);
-        match scan_agent_artifact_dir(&projects_root, &artifact_dir, options) {
-            Some(refreshed) => {
-                let _ = upsert_record(conn, &projects_root, &refreshed);
-                refreshed
-            }
-            None => return Ok(TerminalizationOutcome::Skipped),
-        }
-    };
-
-    if !record_is_terminalization_candidate(&record) {
-        return Ok(TerminalizationOutcome::Skipped);
-    }
-    let Some(latest_modified) =
-        artifact_dir_latest_modified(&record.artifact_dir)
-    else {
-        return Ok(TerminalizationOutcome::Skipped);
-    };
-    if !artifact_dir_is_stale(latest_modified, stale_after) {
-        return Ok(TerminalizationOutcome::Skipped);
-    }
-    if record_has_live_workspace_claim(&record)? {
-        return Ok(TerminalizationOutcome::Skipped);
-    }
-
-    let terminalized =
-        terminalized_abandoned_record(record, Some(latest_modified));
-    upsert_record(conn, &projects_root, &terminalized)?;
-    Ok(TerminalizationOutcome::Terminalized)
-}
-
-pub(super) fn record_is_terminalization_candidate(
-    record: &AgentArtifactRecordWire,
-) -> bool {
-    !record.has_done_marker
-        && record.done.is_none()
-        && record.running.is_none()
-        && record.waiting.is_none()
-        && record.pending_question.is_none()
-        && record.workflow_state.is_none()
-}
-
-pub(super) fn artifact_dir_is_stale(
-    latest: SystemTime,
-    stale_after: Duration,
-) -> bool {
-    SystemTime::now()
-        .duration_since(latest)
-        .map(|age| age >= stale_after)
-        .unwrap_or(false)
-}
-
-pub(super) fn artifact_dir_latest_modified(
-    artifact_dir: &str,
-) -> Option<SystemTime> {
-    let dir = Path::new(artifact_dir);
-    let mut latest = fs::metadata(dir).and_then(|m| m.modified()).ok();
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let modified = entry.metadata().and_then(|m| m.modified()).ok();
-            latest = max_system_time(latest, modified);
-        }
-    }
-    latest
-}
-
-pub(super) fn max_system_time(
-    left: Option<SystemTime>,
-    right: Option<SystemTime>,
-) -> Option<SystemTime> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.max(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
-pub(super) fn record_has_live_workspace_claim(
-    record: &AgentArtifactRecordWire,
-) -> Result<bool, String> {
-    let project_file = Path::new(&record.project_file);
-    let content = match fs::read_to_string(project_file) {
-        Ok(content) => content,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(_) => return Ok(true),
-    };
-    let claims = list_workspace_claims_from_content(&content);
-    if claims.is_empty() {
-        return Ok(false);
-    }
-
-    let summary = RecordSummary::from_record(record);
-    let workspace_num = record_workspace_num(record);
-    for claim in claims {
-        if claim.artifacts_timestamp.as_deref()
-            == Some(record.timestamp.as_str())
-        {
-            return Ok(true);
-        }
-        if workspace_num.is_some_and(|num| num == claim.workspace_num) {
-            return Ok(true);
-        }
-        if claim.workflow == record.workflow_dir_name
-            && claim.cl_name.as_deref() == summary.cl_name.as_deref()
-            && summary.cl_name.is_some()
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-pub(super) fn record_workspace_num(
-    record: &AgentArtifactRecordWire,
-) -> Option<u32> {
-    record
-        .agent_meta
-        .as_ref()
-        .and_then(|meta| meta.workspace_num)
-        .or_else(|| record.done.as_ref().and_then(|done| done.workspace_num))
-        .and_then(|num| u32::try_from(num).ok())
-}
-
-pub(super) fn terminalized_abandoned_record(
-    mut record: AgentArtifactRecordWire,
-    latest_modified: Option<SystemTime>,
-) -> AgentArtifactRecordWire {
-    let summary = RecordSummary::from_record(&record);
-    let meta = record.agent_meta.as_ref();
-    let finished_at = meta
-        .and_then(|value| value.stopped_at.as_deref())
-        .and_then(parse_runtime_timestamp)
-        .or_else(|| {
-            latest_modified.and_then(system_time_to_unix_timestamp_secs)
-        });
-    record.running = None;
-    record.waiting = None;
-    record.pending_question = None;
-    record.has_done_marker = true;
-    record.done = Some(DoneMarkerWire {
-        outcome: Some(ABANDONED_DONE_OUTCOME.to_string()),
-        finished_at,
-        finished_at_estimated: true,
-        cl_name: summary
-            .cl_name
-            .clone()
-            .or_else(|| Some("unknown".to_string())),
-        project_file: Some(record.project_file.clone()),
-        workspace_num: meta.and_then(|m| m.workspace_num),
-        workspace_dir: meta.and_then(|m| m.workspace_dir.clone()),
-        pid: meta.and_then(|m| m.pid),
-        model: summary.model.clone(),
-        llm_provider: summary.llm_provider.clone(),
-        vcs_provider: meta.and_then(|m| m.vcs_provider.clone()),
-        name: summary.agent_name.clone(),
-        hidden: true,
-        ..DoneMarkerWire::default()
-    });
-    record
-}
-
-pub(super) fn system_time_to_unix_timestamp_secs(
-    value: SystemTime,
-) -> Option<f64> {
-    value
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_secs_f64())
 }
 
 pub(super) fn refresh_stale_rows(
