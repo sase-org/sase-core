@@ -676,6 +676,52 @@ fn decide_accepts_a_live_capable_llm_occupant() {
 }
 
 #[test]
+fn decide_pre_provider_turns_select_the_live_or_processless_adapter() {
+    for (kind, status, phase) in [
+        (HIJACK_OCCUPANT_WAIT, "WAITING", "waiting"),
+        (HIJACK_OCCUPANT_QUEUE, "QUEUED", "waiting"),
+        (HIJACK_OCCUPANT_LLM, "STARTING", "booting"),
+        (HIJACK_OCCUPANT_LLM, "LOST", "preparing"),
+    ] {
+        for alive in [true, false] {
+            let mut facts = facts_v2();
+            facts.occupying_kind = kind.to_owned();
+            facts.status = Some(status.to_owned());
+            facts.turn_phase = Some(phase.to_owned());
+            facts.process_alive = alive;
+            facts.has_hijack_capability = alive;
+            facts.pid = alive.then_some(42);
+            let decision = decide(&facts);
+            assert_eq!(decision.mode, HIJACK_DECISION_IMMEDIATE);
+            assert!(decision.eligible);
+            assert_eq!(
+                decision.adapter.as_deref(),
+                Some(if alive {
+                    HIJACK_ADAPTER_LLM
+                } else {
+                    HIJACK_ADAPTER_PROCESSLESS
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn decide_pre_provider_live_runner_still_requires_safe_signalling_facts() {
+    let mut facts = facts_v2();
+    facts.occupying_kind = HIJACK_OCCUPANT_WAIT.to_owned();
+    facts.status = Some("WAITING".to_owned());
+    facts.has_hijack_capability = false;
+    assert_eq!(decide(&facts).code.as_deref(), Some("missing_capability"));
+    facts.has_hijack_capability = true;
+    facts.pid = None;
+    assert_eq!(decide(&facts).code.as_deref(), Some("missing_pid"));
+    facts.pid = Some(42);
+    facts.successor_attachable = false;
+    assert_eq!(decide(&facts).code.as_deref(), Some("no_session"));
+}
+
+#[test]
 fn decide_reports_every_redirect() {
     let mut cases = Vec::new();
 
@@ -707,6 +753,14 @@ fn decide_reports_every_redirect() {
     facts.occupying_kind = HIJACK_OCCUPANT_GATE.to_string();
     facts.gate_state = Some("pending".to_string());
     cases.push((facts, "gate_pending", HIJACK_REDIRECT_GATE_REVIEW));
+
+    for kind in [HIJACK_OCCUPANT_WAIT, HIJACK_OCCUPANT_QUEUE] {
+        let mut facts = facts_v2();
+        facts.occupying_kind = kind.to_owned();
+        facts.has_numbered_claim = false;
+        facts.workspace_num = None;
+        cases.push((facts, "nothing_to_keep", HIJACK_REDIRECT_KILL_AND_EDIT));
+    }
 
     for (facts, expected_code, expected_op) in cases {
         let decision = decide(&facts);
@@ -793,20 +847,10 @@ fn decide_reports_every_refusal_code() {
     cases.push((facts, "gate_executing"));
 
     for kind in [HIJACK_OCCUPANT_WAIT, HIJACK_OCCUPANT_QUEUE] {
-        let expected = if kind == HIJACK_OCCUPANT_WAIT {
-            "waiting"
-        } else {
-            "queued"
-        };
         let mut facts = facts_v2();
         facts.occupying_kind = kind.to_string();
-        cases.push((facts, expected));
-
-        let mut facts = facts_v2();
-        facts.occupying_kind = kind.to_string();
-        facts.has_numbered_claim = false;
-        facts.workspace_num = None;
-        cases.push((facts, "nothing_to_keep"));
+        facts.turn_phase = Some("provider_running".to_owned());
+        cases.push((facts, "ineligible_status"));
     }
 
     let mut facts = facts_v2();
@@ -838,6 +882,7 @@ fn decide_reports_every_refusal_code() {
 
     let mut facts = facts_v2();
     facts.status = Some("WAITING".to_string());
+    facts.turn_phase = Some("provider_running".to_owned());
     cases.push((facts, "ineligible_status"));
 
     let mut facts = facts_v2();
