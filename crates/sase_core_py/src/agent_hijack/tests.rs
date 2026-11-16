@@ -67,6 +67,9 @@ fn hijack_bindings_are_registered() {
         assert!(module.getattr("normalize_hijack_rung").is_ok());
         assert!(module.getattr("hijack_recovery_preview").is_ok());
         assert!(module.getattr("hijack_recovery_reconcile").is_ok());
+        assert!(module.getattr("agent_hijack_latch_observe").is_ok());
+        assert!(module.getattr("hijack_latch_reconcile").is_ok());
+        assert!(module.getattr("hijack_latch_force_eligibility").is_ok());
         assert!(module.getattr("hijack_recovery_effective_target").is_ok());
         assert!(module.getattr("hijack_recovery_validate_execution").is_ok());
         assert!(module.getattr("hijack_recovery_confirm").is_ok());
@@ -76,6 +79,78 @@ fn hijack_bindings_are_registered() {
         assert_eq!(py_hijack_recovery_preview_wire_schema_version(), 1);
         assert_eq!(py_hijack_recovery_reconcile_wire_schema_version(), 1);
         assert_eq!(py_hijack_recovery_execution_wire_schema_version(), 1);
+        assert_eq!(py_agent_hijack_latch_wire_schema_version(), 1);
+    });
+}
+
+#[test]
+fn latch_bindings_round_trip_observation_reconcile_and_force_policy() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let record = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "hijack_id": "h-1",
+                "agent_name": "agent.1",
+                "artifacts_dir": "/artifacts/agent.1",
+                "target_key": "target-1",
+                "state": "latched",
+                "latched_at": 100_000,
+                "owner_pid": 42,
+                "owner_identity": "boot:123"
+            }),
+        );
+        let observation = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "target_key": "target-1",
+                "boundary": "finalizer_done",
+                "member": "agent.1",
+                "artifacts_dir": "/artifacts/agent.1",
+                "owner_pid": 42,
+                "owner_identity": "boot:123"
+            }),
+        );
+        let observed =
+            py_agent_hijack_latch_observe(py, &record, &observation).unwrap();
+        assert_eq!(
+            py_to_json_value(observed.bind(py)).unwrap()["verdict"],
+            json!("pending")
+        );
+
+        let reconciliation = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "owner": {
+                    "lookup_succeeded": true,
+                    "pid": null,
+                    "process_identity": null
+                },
+                "successor": {"kind": "absent"},
+                "boundary_outcome": null
+            }),
+        );
+        let reconciled =
+            py_hijack_latch_reconcile(py, &record, &reconciliation).unwrap();
+        assert_eq!(
+            py_to_json_value(reconciled.bind(py)).unwrap()["outcome"],
+            json!("apply_latch")
+        );
+        let early =
+            py_hijack_latch_force_eligibility(py, &record, 219.0).unwrap();
+        assert_eq!(
+            py_to_json_value(early.bind(py)).unwrap()["eligible"],
+            json!(false)
+        );
+        let ready =
+            py_hijack_latch_force_eligibility(py, &record, 220.0).unwrap();
+        assert_eq!(
+            py_to_json_value(ready.bind(py)).unwrap()["eligible"],
+            json!(true)
+        );
     });
 }
 

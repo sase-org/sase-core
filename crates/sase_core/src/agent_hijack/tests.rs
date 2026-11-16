@@ -22,6 +22,147 @@ fn event(event: &str) -> AgentHijackEventWire {
     }
 }
 
+#[test]
+fn latch_transitions_preserve_identity_and_boundary_evidence() {
+    let mut requested = record(HIJACK_REQUESTED);
+    requested.target_key = "target-1".to_owned();
+    let latched = advance_agent_hijack_record(
+        &requested,
+        &AgentHijackEventWire {
+            event: HIJACK_EVENT_LATCH.to_owned(),
+            owner_pid: Some(42),
+            owner_identity: Some("boot:123".to_owned()),
+            latched_at: Some(10_000),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(latched.state, HIJACK_LATCHED);
+    assert_eq!(latched.owner_pid, Some(42));
+    assert_eq!(latched.owner_identity.as_deref(), Some("boot:123"));
+    assert_eq!(latched.latched_at, Some(10_000));
+
+    let stopping = advance_agent_hijack_record(
+        &latched,
+        &AgentHijackEventWire {
+            event: HIJACK_EVENT_APPLY_LATCH.to_owned(),
+            boundary: Some("staged_adoption".to_owned()),
+            boundary_outcome: Some("handoff".to_owned()),
+            suppressed_followup: Some(AgentHijackSuppressedFollowupWire {
+                kind: "pipe".to_owned(),
+                reference: "/tmp/payload.json".to_owned(),
+            }),
+            at: Some("2026-11-16T10:00:00Z".to_owned()),
+            forced: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(stopping.state, HIJACK_STOPPING);
+    assert_eq!(stopping.boundary.as_deref(), Some("staged_adoption"));
+    assert_eq!(stopping.boundary_outcome.as_deref(), Some("handoff"));
+    assert_eq!(stopping.suppressed_followup.as_ref().unwrap().kind, "pipe");
+    assert_eq!(
+        stopping.suppressed_followup.as_ref().unwrap().reference,
+        "/tmp/payload.json"
+    );
+    assert!(stopping.forced);
+
+    let held = advance_agent_hijack_record(
+        &stopping,
+        &event(HIJACK_EVENT_CONFIRMED_STOP),
+    )
+    .unwrap();
+    assert_eq!(held.state, HIJACK_HELD);
+    assert_eq!(held.owner_identity.as_deref(), Some("boot:123"));
+}
+
+#[test]
+fn latch_cancel_and_moot_are_terminal_and_invalid_edges_are_rejected() {
+    let mut requested = record(HIJACK_REQUESTED);
+    requested.target_key = "target-1".to_owned();
+    let latch_event = AgentHijackEventWire {
+        event: HIJACK_EVENT_LATCH.to_owned(),
+        owner_pid: Some(42),
+        owner_identity: Some("boot:123".to_owned()),
+        latched_at: Some(10_000),
+        ..Default::default()
+    };
+    let latched =
+        advance_agent_hijack_record(&requested, &latch_event).unwrap();
+    let cancelled = advance_agent_hijack_record(
+        &latched,
+        &event(HIJACK_EVENT_CANCEL_LATCH),
+    )
+    .unwrap();
+    assert_eq!(cancelled.state, HIJACK_CANCELLED);
+    assert!(advance_agent_hijack_record(
+        &cancelled,
+        &event(HIJACK_EVENT_CANCEL_LATCH)
+    )
+    .is_err());
+
+    let moot = advance_agent_hijack_record(
+        &latched,
+        &AgentHijackEventWire {
+            event: HIJACK_EVENT_MOOT_LATCH.to_owned(),
+            boundary: Some("run_end".to_owned()),
+            boundary_outcome: Some("completed".to_owned()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(moot.state, HIJACK_FINISHED_FIRST);
+    assert_eq!(moot.boundary_outcome.as_deref(), Some("completed"));
+
+    assert!(advance_agent_hijack_record(
+        &latched,
+        &event(HIJACK_EVENT_FINISHED_FIRST)
+    )
+    .is_err());
+    let finished_first = advance_agent_hijack_record(
+        &latched,
+        &AgentHijackEventWire {
+            event: HIJACK_EVENT_FINISHED_FIRST.to_owned(),
+            boundary: Some("run_end".to_owned()),
+            boundary_outcome: Some("completed".to_owned()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(finished_first.state, HIJACK_FINISHED_FIRST);
+    assert!(advance_agent_hijack_record(
+        &requested,
+        &event(HIJACK_EVENT_APPLY_LATCH)
+    )
+    .is_err());
+    assert!(advance_agent_hijack_record(
+        &latched,
+        &event(HIJACK_EVENT_CONFIRMED_STOP)
+    )
+    .is_err());
+    assert!(advance_agent_hijack_record(
+        &requested,
+        &event(HIJACK_EVENT_LATCH)
+    )
+    .is_err());
+}
+
+#[test]
+fn legacy_hijack_records_default_new_latch_fields() {
+    let legacy = r#"{"schema_version":1,"hijack_id":"old","agent_name":"agent.old","state":"held"}"#;
+    let record: AgentHijackRecordWire = serde_json::from_str(legacy).unwrap();
+    assert_eq!(record.schema_version, 1);
+    assert_eq!(record.latched_at, None);
+    assert_eq!(record.applied_at, None);
+    assert_eq!(record.boundary, None);
+    assert_eq!(record.boundary_outcome, None);
+    assert_eq!(record.suppressed_followup, None);
+    assert!(!record.forced);
+    assert_eq!(record.owner_pid, None);
+    assert_eq!(record.owner_identity, None);
+}
+
 fn resolution(state: &str, action: &str) -> AgentHijackRecordWire {
     AgentHijackRecordWire {
         resolution_action: Some(action.to_string()),

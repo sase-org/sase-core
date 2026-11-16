@@ -11,6 +11,7 @@ pub const AGENT_HIJACK_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_HIJACK_ELIGIBILITY_WIRE_SCHEMA_VERSION: u32 = 2;
 
 pub const HIJACK_REQUESTED: &str = "requested";
+pub const HIJACK_LATCHED: &str = "latched";
 pub const HIJACK_STOPPING: &str = "stopping";
 pub const HIJACK_STOP_BLOCKED: &str = "stop_blocked";
 pub const HIJACK_HELD: &str = "held";
@@ -20,6 +21,7 @@ pub const HIJACK_DISMISSED: &str = "dismissed";
 pub const HIJACK_EXPIRED: &str = "expired";
 pub const HIJACK_STOP_FAILED: &str = "stop_failed";
 pub const HIJACK_FINISHED_FIRST: &str = "finished_first";
+pub const HIJACK_CANCELLED: &str = "cancelled";
 
 /// Ledger scope for a hijack record: which stop mechanism owns the target.
 pub const HIJACK_SCOPE_LLM: &str = "llm";
@@ -28,6 +30,10 @@ pub const HIJACK_SCOPE_MONITOR: &str = "monitor";
 pub const HIJACK_SCOPE_GATE: &str = "gate";
 
 pub const HIJACK_EVENT_BEGIN_STOP: &str = "begin_stop";
+pub const HIJACK_EVENT_LATCH: &str = "latch";
+pub const HIJACK_EVENT_APPLY_LATCH: &str = "apply_latch";
+pub const HIJACK_EVENT_CANCEL_LATCH: &str = "cancel_latch";
+pub const HIJACK_EVENT_MOOT_LATCH: &str = "moot_latch";
 pub const HIJACK_EVENT_CONFIRMED_STOP: &str = "confirmed_stop";
 pub const HIJACK_EVENT_STOP_FAILED: &str = "stop_failed";
 pub const HIJACK_EVENT_STOP_BLOCKED: &str = "stop_blocked";
@@ -124,6 +130,15 @@ pub struct AgentHijackSnapshotWire {
     pub reference: String,
     #[serde(default)]
     pub fingerprint: String,
+}
+
+/// A staged follow-up suppressed when a latch wins at a safe boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentHijackSuppressedFollowupWire {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default, rename = "ref")]
+    pub reference: String,
 }
 
 /// Durable hijack record. File locking and persistence stay in Python; this
@@ -242,6 +257,25 @@ pub struct AgentHijackRecordWire {
     pub error: Option<String>,
     #[serde(default)]
     pub acknowledged: bool,
+    /// Unix epoch milliseconds, rounded up by the request writer.
+    #[serde(default)]
+    pub latched_at: Option<i64>,
+    #[serde(default)]
+    pub applied_at: Option<String>,
+    #[serde(default)]
+    pub boundary: Option<String>,
+    #[serde(default)]
+    pub boundary_outcome: Option<String>,
+    #[serde(default)]
+    pub suppressed_followup: Option<AgentHijackSuppressedFollowupWire>,
+    #[serde(default)]
+    pub forced: bool,
+    /// Identity of the process that owned the member when the latch was
+    /// requested. It is separate from the mutable resolver identity.
+    #[serde(default)]
+    pub owner_pid: Option<i64>,
+    #[serde(default)]
+    pub owner_identity: Option<String>,
 }
 
 /// Event payload consumed by [`crate::agent_hijack::advance_agent_hijack_record`].
@@ -280,6 +314,22 @@ pub struct AgentHijackEventWire {
     pub error: Option<String>,
     #[serde(default)]
     pub at: Option<String>,
+    #[serde(default)]
+    pub latched_at: Option<i64>,
+    #[serde(default)]
+    pub applied_at: Option<String>,
+    #[serde(default)]
+    pub boundary: Option<String>,
+    #[serde(default)]
+    pub boundary_outcome: Option<String>,
+    #[serde(default)]
+    pub suppressed_followup: Option<AgentHijackSuppressedFollowupWire>,
+    #[serde(default)]
+    pub forced: Option<bool>,
+    #[serde(default)]
+    pub owner_pid: Option<i64>,
+    #[serde(default)]
+    pub owner_identity: Option<String>,
 }
 
 /// Facts needed to decide whether a running row supports v1 hijack.

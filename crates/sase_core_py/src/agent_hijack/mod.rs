@@ -12,9 +12,12 @@ use sase_core::agent_hijack::{
     agent_hijack_eligibility as core_eligibility,
     agent_hijack_eligibility_wire_schema_version as core_eligibility_version,
     agent_hijack_escalation_target as core_escalation,
+    agent_hijack_latch_observe as core_latch_observe,
     agent_hijack_select_occupant as core_select_occupant,
     agent_hijack_status_for_done_marker as core_done_status,
     agent_hijack_wire_schema_version as core_wire_version,
+    hijack_latch_force_eligibility as core_latch_force_eligibility,
+    hijack_latch_reconcile as core_latch_reconcile,
     hijack_recovery_confirm as core_confirm,
     hijack_recovery_effective_target as core_effective_target,
     hijack_recovery_preview as core_preview,
@@ -26,12 +29,15 @@ use sase_core::agent_hijack::{
     AgentHijackContinuationRequestWire, AgentHijackEffectiveTargetRequestWire,
     AgentHijackEligibilityFactsV2Wire, AgentHijackEligibilityFactsWire,
     AgentHijackEscalationRequestWire, AgentHijackEventWire,
-    AgentHijackExecutionFactsWire, AgentHijackOccupantSelectionRequestWire,
-    AgentHijackReconcileFactsWire, AgentHijackRecordWire,
-    AgentHijackRecoveryPreviewRequestWire, AgentHijackRollbackFactsWire,
+    AgentHijackExecutionFactsWire, AgentHijackLatchObservationFactsWire,
+    AgentHijackLatchReconcileFactsWire,
+    AgentHijackOccupantSelectionRequestWire, AgentHijackReconcileFactsWire,
+    AgentHijackRecordWire, AgentHijackRecoveryPreviewRequestWire,
+    AgentHijackRollbackFactsWire,
     AGENT_HIJACK_CONTINUATION_WIRE_SCHEMA_VERSION,
     AGENT_HIJACK_ESCALATION_WIRE_SCHEMA_VERSION,
     AGENT_HIJACK_EXECUTION_WIRE_SCHEMA_VERSION,
+    AGENT_HIJACK_LATCH_WIRE_SCHEMA_VERSION,
     AGENT_HIJACK_RECONCILE_WIRE_SCHEMA_VERSION,
     AGENT_HIJACK_RECOVERY_PREVIEW_WIRE_SCHEMA_VERSION,
 };
@@ -68,6 +74,94 @@ fn py_advance_agent_hijack_record<'py>(
     let updated = core_advance_record(&record, &event)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     serialize_to_py(py, &updated)
+}
+
+/// Return the Agent Hijack latch facts/decision schema version.
+#[pyfunction]
+#[pyo3(name = "agent_hijack_latch_wire_schema_version")]
+fn py_agent_hijack_latch_wire_schema_version() -> u32 {
+    AGENT_HIJACK_LATCH_WIRE_SCHEMA_VERSION
+}
+
+/// Observe a target-indexed latch after validating the source identity.
+#[pyfunction]
+#[pyo3(name = "agent_hijack_latch_observe")]
+fn py_agent_hijack_latch_observe<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyDict>,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let record: AgentHijackRecordWire = serde_json::from_value(
+        py_to_json_value(record.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "record is not a valid AgentHijackRecordWire dict: {error}"
+        ))
+    })?;
+    let facts: AgentHijackLatchObservationFactsWire =
+        serde_json::from_value(py_to_json_value(facts.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "facts is not a valid AgentHijackLatchObservationFactsWire dict: {error}"
+                ))
+            },
+        )?;
+    let decision = py
+        .allow_threads(|| core_latch_observe(&record, &facts))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &decision)
+}
+
+/// Reconcile a latch from identity-proven owner and successor observations.
+#[pyfunction]
+#[pyo3(name = "hijack_latch_reconcile")]
+fn py_hijack_latch_reconcile<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyDict>,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let record: AgentHijackRecordWire = serde_json::from_value(
+        py_to_json_value(record.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "record is not a valid AgentHijackRecordWire dict: {error}"
+        ))
+    })?;
+    let facts: AgentHijackLatchReconcileFactsWire = serde_json::from_value(
+        py_to_json_value(facts.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "facts is not a valid AgentHijackLatchReconcileFactsWire dict: {error}"
+        ))
+    })?;
+    let decision = py
+        .allow_threads(|| core_latch_reconcile(&record, &facts))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &decision)
+}
+
+/// Return whether an explicit force may interrupt a pending latch now.
+#[pyfunction]
+#[pyo3(name = "hijack_latch_force_eligibility")]
+fn py_hijack_latch_force_eligibility<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyDict>,
+    now_unix: f64,
+) -> PyResult<PyObject> {
+    let record: AgentHijackRecordWire = serde_json::from_value(
+        py_to_json_value(record.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "record is not a valid AgentHijackRecordWire dict: {error}"
+        ))
+    })?;
+    let decision =
+        py.allow_threads(|| core_latch_force_eligibility(&record, now_unix));
+    serialize_to_py(py, &decision)
 }
 
 #[pyfunction]
@@ -419,6 +513,20 @@ pub(crate) fn register_agent_hijack(
     )?)?;
     module.add_function(wrap_pyfunction!(
         py_advance_agent_hijack_record,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        py_agent_hijack_latch_wire_schema_version,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        py_agent_hijack_latch_observe,
+        module
+    )?)?;
+    module
+        .add_function(wrap_pyfunction!(py_hijack_latch_reconcile, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        py_hijack_latch_force_eligibility,
         module
     )?)?;
     module

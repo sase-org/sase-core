@@ -27,6 +27,12 @@ pub enum AgentHijackLedgerError {
     InvalidAction,
     #[error("agent hijack record revision overflow")]
     RevisionOverflow,
+    #[error(
+        "agent hijack latch requires a target key and owner process identity"
+    )]
+    InvalidLatchOwner,
+    #[error("agent hijack latch application requires a boundary and outcome")]
+    InvalidLatchBoundary,
 }
 
 /// Advance a hijack record through the durable state machine.
@@ -42,6 +48,51 @@ pub fn advance_agent_hijack_record(
 
     let next = match (record.state.as_str(), event.event.as_str()) {
         (HIJACK_REQUESTED, HIJACK_EVENT_BEGIN_STOP) => HIJACK_STOPPING,
+        (HIJACK_REQUESTED, HIJACK_EVENT_LATCH) => {
+            if record.target_key.trim().is_empty()
+                || event.owner_pid.is_none_or(|pid| pid <= 0)
+                || event
+                    .owner_identity
+                    .as_deref()
+                    .is_none_or(|identity| identity.trim().is_empty())
+                || event.latched_at.is_none_or(|at| at < 0)
+            {
+                return Err(AgentHijackLedgerError::InvalidLatchOwner);
+            }
+            HIJACK_LATCHED
+        }
+        (HIJACK_LATCHED, HIJACK_EVENT_APPLY_LATCH) => {
+            if event
+                .boundary
+                .as_deref()
+                .is_none_or(|boundary| boundary.trim().is_empty())
+                || event
+                    .boundary_outcome
+                    .as_deref()
+                    .is_none_or(|outcome| outcome.trim().is_empty())
+            {
+                return Err(AgentHijackLedgerError::InvalidLatchBoundary);
+            }
+            HIJACK_STOPPING
+        }
+        (HIJACK_LATCHED, HIJACK_EVENT_CANCEL_LATCH) => HIJACK_CANCELLED,
+        (
+            HIJACK_LATCHED,
+            HIJACK_EVENT_MOOT_LATCH | HIJACK_EVENT_FINISHED_FIRST,
+        ) => {
+            if event
+                .boundary
+                .as_deref()
+                .is_none_or(|boundary| boundary.trim().is_empty())
+                || event
+                    .boundary_outcome
+                    .as_deref()
+                    .is_none_or(|outcome| outcome.trim().is_empty())
+            {
+                return Err(AgentHijackLedgerError::InvalidLatchBoundary);
+            }
+            HIJACK_FINISHED_FIRST
+        }
         (HIJACK_REQUESTED | HIJACK_STOPPING, HIJACK_EVENT_FINISHED_FIRST) => {
             HIJACK_FINISHED_FIRST
         }
@@ -139,6 +190,41 @@ pub fn advance_agent_hijack_record(
             updated.error = event.error.clone();
         }
         HIJACK_EVENT_STOP_BLOCKED => {}
+        HIJACK_EVENT_LATCH => {
+            updated.owner_pid = event.owner_pid;
+            updated.owner_identity = event.owner_identity.clone();
+            updated.latched_at = event.latched_at;
+            updated.error = None;
+        }
+        HIJACK_EVENT_APPLY_LATCH => {
+            updated.applied_at =
+                event.applied_at.clone().or_else(|| event.at.clone());
+            updated.boundary = event.boundary.clone();
+            updated.boundary_outcome = event.boundary_outcome.clone();
+            updated.suppressed_followup = event.suppressed_followup.clone();
+            updated.forced = event.forced.unwrap_or(false);
+            updated.error = None;
+        }
+        HIJACK_EVENT_MOOT_LATCH
+            if record.state == HIJACK_LATCHED
+                || next == HIJACK_FINISHED_FIRST =>
+        {
+            if event.boundary.is_some() {
+                updated.boundary = event.boundary.clone();
+            }
+            if event.boundary_outcome.is_some() {
+                updated.boundary_outcome = event.boundary_outcome.clone();
+            }
+            if event.suppressed_followup.is_some() {
+                updated.suppressed_followup = event.suppressed_followup.clone();
+            }
+            updated.error = None;
+        }
+        HIJACK_EVENT_FINISHED_FIRST if record.state == HIJACK_LATCHED => {
+            updated.boundary = event.boundary.clone();
+            updated.boundary_outcome = event.boundary_outcome.clone();
+            updated.suppressed_followup = event.suppressed_followup.clone();
+        }
         _ => {}
     }
 

@@ -4,13 +4,15 @@
 //! Shared semantics every frontend must match: the pure ledger, eligibility,
 //! and status policy plus the never-downgrade rung walk, the successor
 //! prompt shape, keep-work preview assembly, and abandoned-resolution
-//! decisions. Python owns file I/O, locks, signals, launches, and the
-//! CLI/TUI. Mirrors the `agent_auto_restart` split.
+//! decisions. Latch transitions and reconciliation also live here; Python
+//! owns file I/O, locks, signals, launches, and the CLI/TUI. Mirrors the
+//! `agent_auto_restart` split.
 
 pub mod continuation;
 mod eligibility;
 pub mod escalation;
 pub mod execution;
+pub mod latch;
 mod ledger;
 pub mod occupant;
 pub mod preview;
@@ -50,6 +52,15 @@ pub use execution::{
     HIJACK_EXECUTION_MODE_PREPARE, HIJACK_EXECUTION_PROCEED,
     HIJACK_EXECUTION_REFUSE, HIJACK_ROLLBACK_RETAIN,
     HIJACK_ROLLBACK_RETURN_TO_HELD,
+};
+pub use latch::{
+    agent_hijack_latch_observe, hijack_latch_force_eligibility,
+    hijack_latch_reconcile, AgentHijackLatchError,
+    AgentHijackLatchForceDecisionWire, AgentHijackLatchObservationFactsWire,
+    AgentHijackLatchObservationWire, AgentHijackLatchOwnerObservationWire,
+    AgentHijackLatchReconcileDecisionWire, AgentHijackLatchReconcileFactsWire,
+    AgentHijackLatchSuccessorObservationWire,
+    AGENT_HIJACK_LATCH_WIRE_SCHEMA_VERSION, HIJACK_LATCH_FORCE_AFTER_SECONDS,
 };
 pub use ledger::{advance_agent_hijack_record, AgentHijackLedgerError};
 pub use occupant::{agent_hijack_select_occupant, AgentHijackOccupantError};
