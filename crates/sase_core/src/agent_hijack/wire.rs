@@ -437,13 +437,21 @@ pub struct AgentHijackEligibilityFactsV2Wire {
     /// State of any non-terminal ledger record for this target.
     #[serde(default)]
     pub active_hijack_state: Option<String>,
+    /// Durable staged handoff pending adoption (read from the staged file
+    /// plus the adoption receipt, never from row text).
+    #[serde(default)]
+    pub has_staged_handoff: bool,
+    /// Staged handoff kind (`pipe`, `plan`, `questions`, ...) when pending.
+    #[serde(default)]
+    pub staged_kind: Option<String>,
 }
 
 /// V2 decision: `mode` is `immediate`, `latched`, `redirect`, or `refused`.
 /// `eligible` stays true for `immediate` and `latched` for older callers.
 /// Redirects carry `redirect_op`; every non-immediate decision carries a
 /// `code`, a one-line `message`, and a `next_action`. Immediate decisions
-/// carry `adapter` (`llm`, `processless`, or `monitor`).
+/// carry `adapter` (`llm`, `processless`, or `monitor`). Latched decisions
+/// carry an additive `boundary` hint (`finalizer`, `staged_adoption`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentHijackEligibilityDecisionV2Wire {
     pub schema_version: u32,
@@ -459,6 +467,9 @@ pub struct AgentHijackEligibilityDecisionV2Wire {
     pub redirect_op: Option<String>,
     #[serde(default)]
     pub adapter: Option<String>,
+    /// Where a latched hijack applies (`finalizer`, `staged_adoption`).
+    #[serde(default)]
+    pub boundary: Option<String>,
 }
 
 /// One session member as seen by occupant selection.

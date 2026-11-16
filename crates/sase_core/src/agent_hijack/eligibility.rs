@@ -4,7 +4,8 @@ use super::wire::{
     AGENT_HIJACK_ELIGIBILITY_WIRE_SCHEMA_VERSION,
     AGENT_HIJACK_WIRE_SCHEMA_VERSION, HIJACK_ADAPTER_LLM,
     HIJACK_ADAPTER_PROCESSLESS, HIJACK_DECISION_IMMEDIATE,
-    HIJACK_DECISION_REDIRECT, HIJACK_DECISION_REFUSED, HIJACK_OCCUPANT_GATE,
+    HIJACK_DECISION_LATCHED, HIJACK_DECISION_REDIRECT, HIJACK_DECISION_REFUSED,
+    HIJACK_OCCUPANT_GATE,
     HIJACK_OCCUPANT_LLM, HIJACK_OCCUPANT_MONITOR, HIJACK_OCCUPANT_NONE,
     HIJACK_OCCUPANT_QUEUE, HIJACK_OCCUPANT_WAIT, HIJACK_OCCUPANT_WORKFLOW_STEP,
     HIJACK_REDIRECT_COPY_REMOTE_COMMAND, HIJACK_REDIRECT_GATE_REVIEW,
@@ -119,6 +120,7 @@ fn refused(
         next_action: Some(next_action.to_string()),
         redirect_op: None,
         adapter: None,
+        boundary: None,
     }
 }
 
@@ -137,6 +139,7 @@ fn redirect(
         next_action: Some(next_action.to_string()),
         redirect_op: Some(redirect_op.to_string()),
         adapter: None,
+        boundary: None,
     }
 }
 
@@ -150,6 +153,26 @@ fn immediate(adapter: &str) -> AgentHijackEligibilityDecisionV2Wire {
         next_action: None,
         redirect_op: None,
         adapter: Some(adapter.to_string()),
+        boundary: None,
+    }
+}
+
+fn latched(
+    boundary: &str,
+    code: &str,
+    message: &str,
+    next_action: &str,
+) -> AgentHijackEligibilityDecisionV2Wire {
+    AgentHijackEligibilityDecisionV2Wire {
+        schema_version: AGENT_HIJACK_ELIGIBILITY_WIRE_SCHEMA_VERSION,
+        mode: HIJACK_DECISION_LATCHED.to_string(),
+        eligible: true,
+        code: Some(code.to_string()),
+        message: Some(message.to_string()),
+        next_action: Some(next_action.to_string()),
+        redirect_op: None,
+        adapter: None,
+        boundary: Some(boundary.to_string()),
     }
 }
 
@@ -290,6 +313,61 @@ pub fn agent_hijack_decide(
             HIJACK_REDIRECT_SHOW_ACTIVE_HIJACK,
         ));
     }
+    // A staged-but-not-adopted agent handoff latches even when a done
+    // marker already exists: the pending staged payload distinguishes it
+    // from a fully completed turn. Locality, capability, numbered-custody,
+    // and successor-attachability still refuse; liveness refuses keep their
+    // own codes so the pending handoff stays visible.
+    if is_staged_pending(facts) {
+        if !facts.successor_attachable {
+            return Ok(refused(
+                "no_session",
+                "no session to attach a hijack successor to",
+                "fork or retry from the session instead",
+            ));
+        }
+        if !facts.has_hijack_capability {
+            return Ok(refused(
+                "missing_capability",
+                "launched before hijack support; use x",
+                "use x, or wait for its next turn",
+            ));
+        }
+        if !facts.has_numbered_claim
+            || facts.workspace_num.is_none_or(|number| number <= 0)
+        {
+            return Ok(refused(
+                "unnumbered_workspace",
+                "agent has no numbered workspace",
+                "wait for a workspace claim, then hijack",
+            ));
+        }
+        if !facts.status.as_deref().is_some_and(|status| {
+            matches!(
+                status.to_ascii_uppercase().as_str(),
+                "RUNNING" | "STARTING" | "RETRYING"
+            )
+        }) {
+            return Ok(refused(
+                "ineligible_status",
+                "agent is not RUNNING, STARTING, or RETRYING",
+                "wait for the turn to run, then hijack",
+            ));
+        }
+        if facts.pid.is_none_or(|pid| pid <= 0) || !facts.process_alive {
+            return Ok(refused(
+                "missing_pid",
+                "agent process is not running",
+                "wait for the runner's next turn",
+            ));
+        }
+        return Ok(latched(
+            "staged_adoption",
+            "staged_pending",
+            "staged handoff pending adoption; hijack latches and applies before adoption",
+            "request the hijack now; it applies before the staged handoff is adopted",
+        ));
+    }
     if facts
         .done_outcome
         .as_deref()
@@ -299,13 +377,6 @@ pub fn agent_hijack_decide(
             "already_completed",
             "agent turn already completed",
             "fork or retry the completed turn",
-        ));
-    }
-    if is_finalizing(facts) {
-        return Ok(refused(
-            "finalizing",
-            "finalizing; try again in a moment",
-            "retry after the hand-off settles",
         ));
     }
 
@@ -452,6 +523,15 @@ pub fn agent_hijack_decide(
         ));
     }
 
+    if is_finalizing(facts) {
+        return Ok(latched(
+            "finalizer",
+            "finalizing",
+            "finalizing; hijack latches and applies after the hand-off settles",
+            "request the hijack now; it applies after the finalizer settles",
+        ));
+    }
+
     Ok(immediate(HIJACK_ADAPTER_LLM))
 }
 
@@ -470,8 +550,16 @@ fn is_active_hijack(state: &str) -> bool {
 
 /// True while the occupying turn is finalizing: the runner lifecycle reached
 /// `provider_done`/`finalizing`/`handoff`, or the finalizer is
-/// `declaring`/`executing`. Latched hijacks (a later phase) apply at the
-/// next safe hand-off; until then this stays refused.
+/// `declaring`/`executing`. Finalizing turns latch; the hijack applies at
+/// the next safe hand-off once locality, capability, numbered-custody, and
+/// successor-attachability checks pass.
+fn is_staged_pending(facts: &AgentHijackEligibilityFactsV2Wire) -> bool {
+    facts.has_staged_handoff && facts.occupying_kind == HIJACK_OCCUPANT_LLM
+}
+
+/// True while the occupying turn is finalizing: the runner lifecycle reached
+/// `provider_done`/`finalizing`/`handoff`, or the finalizer is
+/// `declaring`/`executing`.
 fn is_finalizing(facts: &AgentHijackEligibilityFactsV2Wire) -> bool {
     let turn = facts
         .turn_phase

@@ -814,23 +814,6 @@ fn decide_reports_every_refusal_code() {
     facts.done_outcome = Some("done".to_string());
     cases.push((facts, "already_completed"));
 
-    for (field, value) in [
-        ("turn", "provider_done"),
-        ("turn", "finalizing"),
-        ("turn", "handoff"),
-        ("turn", "FINALIZING"),
-        ("finalizer", "declaring"),
-        ("finalizer", "executing"),
-    ] {
-        let mut facts = facts_v2();
-        if field == "turn" {
-            facts.turn_phase = Some(value.to_string());
-        } else {
-            facts.finalizer_phase = Some(value.to_string());
-        }
-        cases.push((facts, "finalizing"));
-    }
-
     let mut facts = facts_v2();
     facts.occupying_kind = HIJACK_OCCUPANT_MONITOR.to_string();
     facts.monitor_state = Some("running".to_string());
@@ -914,6 +897,93 @@ fn decide_reports_every_refusal_code() {
             "{expected}"
         );
     }
+}
+
+#[test]
+fn decide_latches_finalizing_and_staged_with_boundary_hint() {
+    for (field, value) in [
+        ("turn", "provider_done"),
+        ("turn", "finalizing"),
+        ("turn", "handoff"),
+        ("turn", "FINALIZING"),
+        ("finalizer", "declaring"),
+        ("finalizer", "executing"),
+    ] {
+        let mut facts = facts_v2();
+        if field == "turn" {
+            facts.turn_phase = Some(value.to_string());
+        } else {
+            facts.finalizer_phase = Some(value.to_string());
+        }
+        let decision = decide(&facts);
+        assert_eq!(decision.mode, HIJACK_DECISION_LATCHED, "{value}");
+        assert!(decision.eligible, "{value}");
+        assert_eq!(decision.code.as_deref(), Some("finalizing"), "{value}");
+        assert_eq!(decision.adapter, None, "{value}");
+        assert_eq!(
+            decision.boundary.as_deref(),
+            Some("finalizer"),
+            "{value}"
+        );
+        assert!(
+            decision
+                .message
+                .as_deref()
+                .is_some_and(|message| !message.is_empty()),
+            "{value}"
+        );
+        assert!(
+            decision
+                .next_action
+                .as_deref()
+                .is_some_and(|action| !action.is_empty()),
+            "{value}"
+        );
+    }
+
+    let mut staged = facts_v2();
+    staged.has_staged_handoff = true;
+    staged.staged_kind = Some("pipe".to_string());
+    let decision = decide(&staged);
+    assert_eq!(decision.mode, HIJACK_DECISION_LATCHED);
+    assert!(decision.eligible);
+    assert_eq!(decision.code.as_deref(), Some("staged_pending"));
+    assert_eq!(decision.adapter, None);
+    assert_eq!(
+        decision.boundary.as_deref(),
+        Some("staged_adoption")
+    );
+
+    // A done marker with a genuinely pending handoff is not a completed turn.
+    let mut done_staged = facts_v2();
+    done_staged.has_staged_handoff = true;
+    done_staged.done_outcome = Some("succeeded".to_string());
+    let decision = decide(&done_staged);
+    assert_eq!(decision.mode, HIJACK_DECISION_LATCHED);
+    assert_eq!(decision.code.as_deref(), Some("staged_pending"));
+
+    // Without a staged payload the same done marker stays completed.
+    let mut done = facts_v2();
+    done.done_outcome = Some("succeeded".to_string());
+    let decision = decide(&done);
+    assert_eq!(decision.mode, HIJACK_DECISION_REFUSED);
+    assert_eq!(decision.code.as_deref(), Some("already_completed"));
+
+    // Locality, capability, numbered-custody, and successor constraints win.
+    let mut unnumbered = facts_v2();
+    unnumbered.turn_phase = Some("finalizing".to_string());
+    unnumbered.workspace_num = Some(0);
+    unnumbered.has_numbered_claim = false;
+    let decision = decide(&unnumbered);
+    assert_eq!(decision.mode, HIJACK_DECISION_REFUSED);
+    assert_eq!(decision.code.as_deref(), Some("unnumbered_workspace"));
+
+    let mut incapable = facts_v2();
+    incapable.has_staged_handoff = true;
+    incapable.has_hijack_capability = false;
+    let decision = decide(&incapable);
+    assert_eq!(decision.mode, HIJACK_DECISION_REFUSED);
+    assert_eq!(decision.code.as_deref(), Some("missing_capability"));
 }
 
 #[test]
