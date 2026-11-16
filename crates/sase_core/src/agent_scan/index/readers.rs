@@ -76,6 +76,7 @@ const AGENT_ARTIFACTS_COLUMNS: &[&str] = &[
     "imported_owner_machine",
     "indexed_at",
     "llm_provider",
+    "lookup_session",
     "macros_sig",
     "model",
     "model_alias_origin",

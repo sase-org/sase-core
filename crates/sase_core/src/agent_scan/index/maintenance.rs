@@ -570,13 +570,15 @@ pub(super) fn upsert_record(
             workflow_state_sig, plan_path_sig, prompt_steps_sig, macros_sig,
             agent_clan_generation, clan_tribe, clan_summary, record_json,
             model_alias_origin, done_outcome, source_machine,
-            imported_owner_machine, {GATE_TURN_INDEX_COLUMN}, indexed_at
+            imported_owner_machine, {GATE_TURN_INDEX_COLUMN}, lookup_session,
+            indexed_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
             ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-            ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, CURRENT_TIMESTAMP
+            ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50,
+            CURRENT_TIMESTAMP
         )
         ON CONFLICT(artifact_dir) DO UPDATE SET
             projects_root = excluded.projects_root,
@@ -627,6 +629,7 @@ pub(super) fn upsert_record(
             source_machine = excluded.source_machine,
             imported_owner_machine = excluded.imported_owner_machine,
             {GATE_TURN_INDEX_COLUMN} = excluded.{GATE_TURN_INDEX_COLUMN},
+            lookup_session = excluded.lookup_session,
             indexed_at = CURRENT_TIMESTAMP
         "#,
         ),
@@ -680,6 +683,7 @@ pub(super) fn upsert_record(
             summary.source_machine,
             summary.imported_owner_machine,
             summary.gate_turn_id,
+            summary.lookup_session,
         ],
     )
     .map_err(|e| e.to_string())?;

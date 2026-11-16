@@ -65,6 +65,7 @@ pub(super) fn open_index_with_busy_timeout(
             clan_tribe TEXT,
             clan_summary TEXT,
             agent_session TEXT,
+            lookup_session TEXT,
             timestamp TEXT NOT NULL,
             status TEXT NOT NULL,
             agent_type TEXT NOT NULL,
@@ -313,6 +314,14 @@ pub(super) fn open_index_with_busy_timeout(
     if prior_version.is_none_or(|v| v < 37) {
         migrate_process_identity_projection_v37(&mut conn)?;
     }
+    if prior_version.is_none_or(|v| v < 38) {
+        ensure_agent_artifacts_column(
+            &conn,
+            super::LOOKUP_SESSION_INDEX_COLUMN,
+            "TEXT",
+        )?;
+        migrate_lookup_session_projection_v38(&mut conn)?;
+    }
     conn.execute_batch(&format!(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_session \
          ON agent_artifacts(agent_session, timestamp); \
@@ -324,6 +333,10 @@ pub(super) fn open_index_with_busy_timeout(
          ON agent_artifacts(agent_session COLLATE NOCASE); \
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_name_nocase \
          ON agent_artifacts(agent_name COLLATE NOCASE); \
+         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_name \
+         ON agent_artifacts(agent_name, timestamp); \
+         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_lookup_session \
+         ON agent_artifacts(lookup_session, timestamp); \
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp); \
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_done_outcome \
@@ -935,6 +948,46 @@ pub(super) fn migrate_process_identity_projection_v37(
         [],
     )
     .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// v38 backfills the dedicated `lookup_session` projection used by
+/// identity lookups. The existing `agent_session` column keeps its
+/// documented meaning (`agent_meta.agent_session`).
+pub(super) fn migrate_lookup_session_projection_v38(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let rows: Vec<(String, Option<String>)> = {
+        let mut stmt = tx
+            .prepare("SELECT artifact_dir, record_json FROM agent_artifacts")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let mut projected = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
+            let record_json: String = row.get(1).map_err(|e| e.to_string())?;
+            let lookup_session =
+                decode_agent_artifact_record_json(&record_json)
+                    .ok()
+                    .and_then(|record| {
+                        RecordSummary::from_record(&record).lookup_session
+                    });
+            projected.push((artifact_dir, lookup_session));
+        }
+        projected
+    };
+    for (artifact_dir, lookup_session) in rows {
+        tx.execute(
+            &format!(
+                "UPDATE agent_artifacts SET {} = ?1 WHERE artifact_dir = ?2",
+                super::LOOKUP_SESSION_INDEX_COLUMN
+            ),
+            params![lookup_session, artifact_dir],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 

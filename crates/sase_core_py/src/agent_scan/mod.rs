@@ -687,6 +687,32 @@ fn find_gate_turn_by_gate_id_impl<'py>(
     serialize_to_py(py, &record)
 }
 
+/// Look up matching ace-run artifacts without maintenance on the read path.
+#[pyfunction]
+#[pyo3(name = "lookup_agent_artifacts")]
+fn py_lookup_agent_artifacts<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    projects_root: &str,
+    query: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let json = py_to_json_value(query)?;
+    let query_wire = serde_json::from_value::<
+        sase_core::agent_scan::AgentArtifactLookupQueryWire,
+    >(json)
+    .map_err(|e| {
+        PyValueError::new_err(format!(
+            "query is not a valid AgentArtifactLookupQueryWire dict: {e}"
+        ))
+    })?;
+    let index = PathBuf::from(index_path);
+    let root = PathBuf::from(projects_root);
+    let result = py.allow_threads(|| {
+        sase_core::agent_scan::lookup_agent_artifacts(&index, &root, query_wire)
+    });
+    serialize_to_py(py, &result)
+}
+
 #[pyfunction(name = "agent_output_variable_history_wire_schema_version")]
 fn py_agent_output_variable_history_wire_schema_version() -> u32 {
     AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION
@@ -1150,6 +1176,7 @@ pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_load_agent_artifact_records, m)?)?;
     m.add_function(wrap_pyfunction!(py_find_gate_turn_by_gate_id, m)?)?;
+    m.add_function(wrap_pyfunction!(py_lookup_agent_artifacts, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_agent_output_variable_history_wire_schema_version,
         m

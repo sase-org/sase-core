@@ -678,6 +678,66 @@ fn gate_turn_lookup_binding_serves_turn_records_without_legacy_name() {
 }
 
 #[test]
+fn lookup_agent_artifacts_binding_round_trips_name_hits() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempfile::tempdir().unwrap();
+        let projects = temp.path().join("projects");
+        let dir = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20261116120000");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("agent_meta.json"),
+            serde_json::to_string(&json!({
+                "name": "lane-a--plan",
+                "workflow_name": "lane-a",
+                "agent_session": "lane-a",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let index = temp.path().join("agent_artifact_index.sqlite");
+        sase_core::rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            sase_core::AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        crate::sase_core_rs(py, &module).unwrap();
+        assert!(
+            module.getattr("lookup_agent_artifacts").is_ok(),
+            "missing lookup_agent_artifacts"
+        );
+        let query = pyo3::types::PyDict::new_bound(py);
+        let target = pyo3::types::PyDict::new_bound(py);
+        target.set_item("kind", "names").unwrap();
+        target
+            .set_item("names", vec!["lane-a--plan".to_string()])
+            .unwrap();
+        query.set_item("target", target).unwrap();
+        query.set_item("include_hidden", true).unwrap();
+        let found = py_lookup_agent_artifacts(
+            py,
+            index.to_str().unwrap(),
+            projects.to_str().unwrap(),
+            &query,
+        )
+        .unwrap();
+        let value = py_to_json_value(found.bind(py)).unwrap();
+        assert_eq!(value["availability"], json!("ready"));
+        assert_eq!(value["complete"], json!(true));
+        assert_eq!(value["source"], json!("index"));
+        assert_eq!(value["hits"][0]["agent_name"], json!("lane-a--plan"));
+        assert_eq!(value["hits"][0]["lookup_session"], json!("lane-a"));
+        assert_eq!(value["hits"][0]["match_kind"], json!("exact"));
+    });
+}
+
+#[test]
 fn artifact_index_reader_bindings_round_trip() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

@@ -5,6 +5,7 @@ mod clan_context;
 mod history;
 mod lineage;
 mod lineage_batch;
+mod lookup;
 mod machine_projection;
 mod readers;
 mod self_heal;

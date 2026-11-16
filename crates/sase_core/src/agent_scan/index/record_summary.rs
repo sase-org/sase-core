@@ -1,3 +1,4 @@
+use super::lookup_identity::lookup_session_from_meta;
 use crate::agent_runtime::{
     is_real_gate_member_record, parse_runtime_timestamp,
 };
@@ -37,6 +38,7 @@ pub(super) struct RecordSummary {
     pub(super) clan_tribe: Option<String>,
     pub(super) clan_summary: Option<String>,
     pub(super) agent_session: Option<String>,
+    pub(super) lookup_session: Option<String>,
     pub(super) model: Option<String>,
     pub(super) llm_provider: Option<String>,
     pub(super) started_at: Option<String>,
@@ -112,6 +114,7 @@ impl RecordSummary {
             clan_tribe: meta.and_then(|m| m.clan_tribe.clone()),
             clan_summary: meta.and_then(|m| m.clan_summary.clone()),
             agent_session: meta.and_then(|m| m.agent_session.clone()),
+            lookup_session: meta.and_then(lookup_session_from_meta),
             model: meta
                 .and_then(|m| m.model.clone())
                 .or_else(|| done.and_then(|d| d.model.clone()))

@@ -12,6 +12,9 @@ mod checkpoint;
 mod dismissal;
 mod index_wire;
 mod lineage;
+mod lookup;
+mod lookup_identity;
+mod lookup_recovery;
 mod maintenance;
 mod output_variables;
 mod query;
@@ -53,6 +56,13 @@ pub use lineage::{
     query_related_agent_artifact_dirs, resolve_agent_session_dismissal_lineage,
     AgentSessionDismissalLineageCandidateWire,
     AgentSessionDismissalLineageResultWire,
+};
+
+pub use lookup::{
+    lookup_agent_artifacts, AgentArtifactLookupAvailabilityWire,
+    AgentArtifactLookupHitWire, AgentArtifactLookupQueryWire,
+    AgentArtifactLookupResultWire, AgentArtifactLookupTargetWire,
+    AGENT_ARTIFACT_LOOKUP_FALLBACK_BUDGET,
 };
 
 pub use maintenance::{
@@ -133,6 +143,25 @@ fn last_gate_turn_lookup_records_decoded() -> u64 {
 
 #[cfg(test)]
 thread_local! {
+    /// `record_json` parses issued by the last identity lookup. Healthy
+    /// index hits must stay at zero: matching happens on scalar columns.
+    static LAST_LOOKUP_RECORDS_DECODED: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+fn record_lookup_records_decoded(count: u64) {
+    let _ = count;
+    #[cfg(test)]
+    LAST_LOOKUP_RECORDS_DECODED.with(|cell| cell.set(count));
+}
+
+#[cfg(test)]
+fn last_lookup_records_decoded() -> u64 {
+    LAST_LOOKUP_RECORDS_DECODED.with(|cell| cell.get())
+}
+
+#[cfg(test)]
+thread_local! {
     /// Lineage-column pair loads issued by the last
     /// [`resolve_agent_session_dismissal_lineage`] call. The production
     /// resolver must issue one such query per distinct
@@ -162,3 +191,4 @@ fn placeholders(len: usize) -> String {
 }
 
 pub(super) const AGENT_SESSION_INDEX_COLUMN: &str = "agent_session";
+pub(super) const LOOKUP_SESSION_INDEX_COLUMN: &str = "lookup_session";

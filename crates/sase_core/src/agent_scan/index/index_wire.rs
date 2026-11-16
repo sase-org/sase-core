@@ -1,7 +1,7 @@
 use crate::agent_scan::wire::{AgentArtifactRecordShapeWire, UsedMacroWire};
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 37;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 38;
 
 /// Newest hidden terminal rows kept hot in the materialized SQLite view.
 ///

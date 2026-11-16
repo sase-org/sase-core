@@ -2213,7 +2213,9 @@ fn agent_tab_from_object(data: &Map<String, Value>) -> Option<String> {
 pub(super) fn agent_meta_from_object(
     data: &Map<String, Value>,
 ) -> AgentMetaWire {
-    let legacy_parallel = coerce_bool_truthy(data.get("agent_family_parallel"));
+    let legacy_parallel =
+        coerce_bool_truthy(data.get("agent_session_parallel"))
+            || coerce_bool_truthy(data.get("agent_family_parallel"));
     let raw_agent_session =
         agent_session_str(data, "agent_session", "agent_family");
     let agent_clan = coerce_str(data.get("agent_clan")).or_else(|| {

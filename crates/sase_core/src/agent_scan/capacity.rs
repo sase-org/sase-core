@@ -25,6 +25,7 @@ const CAPACITY_META_FIELDS: &[&str] = &[
     "runner_claim_owner_key",
     "stopped_at",
     "agent_session",
+    "agent_session_parallel",
 ];
 
 /// The part of a record needed for the capacity liveness and retention
