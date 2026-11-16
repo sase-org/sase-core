@@ -920,11 +920,7 @@ fn decide_latches_finalizing_and_staged_with_boundary_hint() {
         assert!(decision.eligible, "{value}");
         assert_eq!(decision.code.as_deref(), Some("finalizing"), "{value}");
         assert_eq!(decision.adapter, None, "{value}");
-        assert_eq!(
-            decision.boundary.as_deref(),
-            Some("finalizer"),
-            "{value}"
-        );
+        assert_eq!(decision.boundary.as_deref(), Some("finalizer"), "{value}");
         assert!(
             decision
                 .message
@@ -949,10 +945,7 @@ fn decide_latches_finalizing_and_staged_with_boundary_hint() {
     assert!(decision.eligible);
     assert_eq!(decision.code.as_deref(), Some("staged_pending"));
     assert_eq!(decision.adapter, None);
-    assert_eq!(
-        decision.boundary.as_deref(),
-        Some("staged_adoption")
-    );
+    assert_eq!(decision.boundary.as_deref(), Some("staged_adoption"));
 
     // A done marker with a genuinely pending handoff is not a completed turn.
     let mut done_staged = facts_v2();

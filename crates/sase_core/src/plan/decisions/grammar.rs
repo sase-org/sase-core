@@ -897,14 +897,10 @@ fn valid_memory_selector(selector: &str) -> bool {
             return false;
         }
     }
-    if selector.contains('/')
+    !(selector.contains('/')
         && (selector.starts_with('/')
             || selector.ends_with('/')
-            || selector.contains("//"))
-    {
-        return false;
-    }
-    true
+            || selector.contains("//")))
 }
 
 /// In Archived mode a stamped plan needs a valid `decided_by` and a valid

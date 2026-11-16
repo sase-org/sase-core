@@ -4,7 +4,9 @@ use chrono::DateTime;
 use serde_json::{json, Value};
 use tempfile::tempdir;
 
-use super::{create_index, insert_row, request, TestRow};
+use super::{
+    create_index, current_schema_version, insert_row, request, TestRow,
+};
 use crate::agent_archive::corpus::compile::compile_agent_archive_corpus;
 use crate::agent_archive::corpus::prepared::PreparedAgentArchiveCorpus;
 use crate::agent_archive::corpus::query::{
@@ -72,7 +74,7 @@ fn archive_profile() -> Value {
 
 fn compile_fixture() -> PreparedAgentArchiveCorpus {
     let temp = tempdir().unwrap();
-    let mut conn = create_index(temp.path(), 3);
+    let mut conn = create_index(temp.path(), current_schema_version());
 
     let mut alpha = TestRow::new("alpha");
     alpha.agent_name = Some("250302.alpha".to_string());
@@ -503,7 +505,7 @@ fn query_order_is_newest_activity_first_and_stable_on_ties() {
 #[test]
 fn query_lookup_resolves_child_with_own_run_id_via_parent_timestamp() {
     let temp = tempdir().unwrap();
-    let mut conn = create_index(temp.path(), 3);
+    let mut conn = create_index(temp.path(), current_schema_version());
 
     let mut parent = TestRow::new("owner");
     parent.agent_name = Some("250302.owner".to_string());
@@ -542,7 +544,7 @@ fn query_lookup_resolves_child_with_own_run_id_via_parent_timestamp() {
 #[test]
 fn query_lookup_returns_empty_for_orphan_workflow_child() {
     let temp = tempdir().unwrap();
-    let mut conn = create_index(temp.path(), 3);
+    let mut conn = create_index(temp.path(), current_schema_version());
 
     insert_row(&mut conn, temp.path(), &TestRow::new("present"));
 

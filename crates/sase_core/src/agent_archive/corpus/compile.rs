@@ -18,13 +18,14 @@ use crate::agent_archive::corpus::wire::{
     AgentArchiveNameMatchWire, AgentArchiveOutcomeWire,
     AgentArchiveTimeBasisWire, AgentArchiveUnsupportedIndexWire,
 };
+use crate::agent_archive::store::ARCHIVE_STORE_SCHEMA_VERSION;
 use crate::agent_archive::AgentArchiveKeyWire;
 use crate::agent_identity::{
     globalize_agent_name, normalize_agent_archive_name, AgentOwnerIdentity,
 };
 
 const INDEX_FILENAME: &str = "index.sqlite";
-const INDEX_SCHEMA_VERSION: u32 = 3;
+const INDEX_SCHEMA_VERSION: u32 = ARCHIVE_STORE_SCHEMA_VERSION as u32;
 const CHILD_SELECT_JOIN_SQL: &str =
     "SELECT s.source_username, s.source_machine, \
         s.source_run_id, s.agent_name, s.parent_timestamp \

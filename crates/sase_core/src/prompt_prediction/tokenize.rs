@@ -511,16 +511,12 @@ fn is_line_marker(trimmed: &str) -> bool {
     }
     // `1. `, `2) ` ordered markers.
     let digits = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
-    if digits > 0
+    digits > 0
         && trimmed
             .chars()
             .nth(digits)
             .is_some_and(|c| c == '.' || c == ')')
         && trimmed.chars().nth(digits + 1).is_some_and(|c| c == ' ')
-    {
-        return true;
-    }
-    false
 }
 
 /// Byte length of the marker prefix (marker chars plus one space).
@@ -835,13 +831,9 @@ fn is_secret_like(word: &str) -> bool {
             return true;
         }
     }
-    if word.len() >= 20
+    word.len() >= 20
         && word.chars().any(|c| c.is_alphabetic())
         && word.chars().any(|c| c.is_ascii_digit())
-    {
-        return true;
-    }
-    false
 }
 
 /// Choose the display surface for a key from recency-weighted votes.

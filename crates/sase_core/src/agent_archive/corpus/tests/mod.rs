@@ -8,6 +8,12 @@ use crate::agent_archive::corpus::wire::{
     AgentArchiveCompileRequestWire, AgentArchiveCorpusRowWire,
     AgentArchiveIndexProbeStatusWire, AgentArchiveLinkFacetsWire,
 };
+use crate::agent_archive::ARCHIVE_STORE_SCHEMA_VERSION;
+
+fn current_schema_version() -> u32 {
+    u32::try_from(ARCHIVE_STORE_SCHEMA_VERSION)
+        .expect("ARCHIVE_STORE_SCHEMA_VERSION fits u32")
+}
 
 mod compile;
 mod query;

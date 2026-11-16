@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use tempfile::tempdir;
 
-use super::{by_run_id, create_index, insert_row, request, TestRow};
+use super::{
+    by_run_id, create_index, current_schema_version, insert_row, request,
+    TestRow,
+};
 use crate::agent_archive::corpus::compile::compile_agent_archive_corpus;
 use crate::agent_archive::corpus::wire::{
     AgentArchiveCorpusStatusWire, AgentArchiveIndexProbeStatusWire,
@@ -13,7 +16,7 @@ use crate::agent_archive::corpus::wire::{
 #[test]
 fn compile_uses_hidden_top_level_rows_and_child_name_map() {
     let temp = tempdir().unwrap();
-    let mut conn = create_index(temp.path(), 3);
+    let mut conn = create_index(temp.path(), current_schema_version());
 
     let mut hidden = TestRow::new("hidden");
     hidden.agent_name = Some("260101.root".to_string());
@@ -78,7 +81,7 @@ fn compile_uses_hidden_top_level_rows_and_child_name_map() {
 #[test]
 fn compile_derives_time_bases_runtime_and_utc_instants() {
     let temp = tempdir().unwrap();
-    let mut conn = create_index(temp.path(), 3);
+    let mut conn = create_index(temp.path(), current_schema_version());
 
     let mut ended = TestRow::new("ended");
     ended.start_time = Some("2025-01-01T10:00:00".to_string());
@@ -168,7 +171,7 @@ fn compile_derives_time_bases_runtime_and_utc_instants() {
 #[test]
 fn compile_builds_clan_session_and_singleton_container_metadata() {
     let temp = tempdir().unwrap();
-    let mut conn = create_index(temp.path(), 3);
+    let mut conn = create_index(temp.path(), current_schema_version());
 
     let mut clan_first = TestRow::new("clan-a");
     clan_first.agent_clan = Some("review".to_string());
@@ -242,7 +245,7 @@ fn compile_reports_missing_rebuilding_and_unsupported_index_status() {
     assert!(corpus.rows.is_empty());
 
     let rebuilding = tempdir().unwrap();
-    let mut conn = create_index(rebuilding.path(), 3);
+    let mut conn = create_index(rebuilding.path(), current_schema_version());
     insert_row(&mut conn, rebuilding.path(), &TestRow::new("partial"));
     let corpus = compile_agent_archive_corpus(request(
         rebuilding.path(),
@@ -268,7 +271,7 @@ fn compile_reports_missing_rebuilding_and_unsupported_index_status() {
     else {
         panic!("expected unsupported schema status");
     };
-    assert_eq!(error.expected_schema_version, 3);
+    assert_eq!(error.expected_schema_version, current_schema_version());
     assert_eq!(error.actual_schema_version.as_deref(), Some("2"));
     assert!(corpus.rows.is_empty());
     assert!(corpus.name_map.is_empty());
@@ -277,7 +280,7 @@ fn compile_reports_missing_rebuilding_and_unsupported_index_status() {
 #[test]
 fn compile_resolves_workflow_child_owner_by_parent_timestamp() {
     let temp = tempdir().unwrap();
-    let mut conn = create_index(temp.path(), 3);
+    let mut conn = create_index(temp.path(), current_schema_version());
 
     let mut parent = TestRow::new("parent-run");
     parent.agent_name = Some("260101.parent".to_string());
@@ -307,7 +310,7 @@ fn compile_resolves_workflow_child_owner_by_parent_timestamp() {
 #[test]
 fn compile_drops_orphan_workflow_child_names() {
     let temp = tempdir().unwrap();
-    let mut conn = create_index(temp.path(), 3);
+    let mut conn = create_index(temp.path(), current_schema_version());
 
     insert_row(&mut conn, temp.path(), &TestRow::new("lonely-parent"));
 

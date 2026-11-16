@@ -591,7 +591,7 @@ fn write_v3_index(py: Python<'_>, root: &std::path::Path) {
                 PRIMARY KEY(source_username, source_machine, source_run_id)
             );
             INSERT INTO dismissed_bundle_index_meta(key, value)
-                VALUES ('schema_version', '3');
+                VALUES ('schema_version', '4');
         ",),
     )
     .unwrap();
@@ -740,7 +740,7 @@ fn agent_archive_corpus_bindings_round_trip_missing_index() {
 }
 
 #[test]
-fn agent_archive_corpus_bindings_round_trip_v3_index() {
+fn agent_archive_corpus_bindings_round_trip_current_index() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
         let temp = tempfile::tempdir().unwrap();

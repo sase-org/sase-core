@@ -44,10 +44,7 @@ fn valid_grant(grant: &ToolRunWorkerGrantWire) -> bool {
             return false;
         }
     }
-    if grant.requested_floor > grant.requested_ceiling {
-        return false;
-    }
-    true
+    grant.requested_floor <= grant.requested_ceiling
 }
 
 fn push_unique(capped: &mut Vec<String>, value: String) {

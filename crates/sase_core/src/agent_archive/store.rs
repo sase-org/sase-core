@@ -1,7 +1,7 @@
 //! Rust-owned dismissed-bundle archive index store (`<root>/index.sqlite`).
 //!
 //! This module ports `src/sase/ace/dismissed_bundle_index/` (schema version
-//! 3) from Python into `sase_core` so the dismissed-bundle index is opened by
+//! 4) from Python into `sase_core` so the dismissed-bundle index is opened by
 //! exactly one SQLite library per process. The DDL below is intentionally
 //! identical to the Python DDL, so indexes written by Python open without a
 //! schema drop.
