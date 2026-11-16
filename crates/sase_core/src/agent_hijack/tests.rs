@@ -488,3 +488,404 @@ fn record_launch_is_illegal_outside_resolving_and_failure_clears_launch_evidence
         Some("claude/opus@high")
     );
 }
+
+#[test]
+fn eligibility_wire_schema_is_split_from_the_ledger_schema() {
+    assert_eq!(agent_hijack_wire_schema_version(), 1);
+    assert_eq!(super::agent_hijack_eligibility_wire_schema_version(), 2);
+    assert_eq!(AGENT_HIJACK_ELIGIBILITY_WIRE_SCHEMA_VERSION, 2);
+}
+
+fn facts_v2() -> AgentHijackEligibilityFactsV2Wire {
+    AgentHijackEligibilityFactsV2Wire {
+        schema_version: AGENT_HIJACK_ELIGIBILITY_WIRE_SCHEMA_VERSION,
+        is_local: true,
+        occupying_kind: HIJACK_OCCUPANT_LLM.to_string(),
+        status: Some("RUNNING".to_string()),
+        workspace_num: Some(4),
+        has_numbered_claim: true,
+        pid: Some(42),
+        process_alive: true,
+        has_hijack_capability: true,
+        successor_attachable: true,
+        ..Default::default()
+    }
+}
+
+fn decide(
+    facts: &AgentHijackEligibilityFactsV2Wire,
+) -> AgentHijackEligibilityDecisionV2Wire {
+    super::agent_hijack_decide(facts).unwrap()
+}
+
+#[test]
+fn decide_accepts_a_live_capable_llm_occupant() {
+    for status in ["RUNNING", "STARTING", "RETRYING", "running"] {
+        let mut facts = facts_v2();
+        facts.status = Some(status.to_string());
+        let decision = decide(&facts);
+        assert_eq!(decision.mode, HIJACK_DECISION_IMMEDIATE, "{status}");
+        assert!(decision.eligible, "{status}");
+        assert_eq!(decision.adapter.as_deref(), Some(HIJACK_ADAPTER_LLM));
+        assert_eq!(decision.code, None);
+        assert_eq!(decision.message, None);
+        assert_eq!(decision.next_action, None);
+        assert_eq!(decision.redirect_op, None);
+    }
+}
+
+#[test]
+fn decide_reports_every_redirect() {
+    let mut cases = Vec::new();
+
+    let mut facts = facts_v2();
+    facts.is_remote = true;
+    facts.is_local = false;
+    cases.push((facts, "remote_row", HIJACK_REDIRECT_COPY_REMOTE_COMMAND));
+
+    let mut facts = facts_v2();
+    facts.is_clan_container = true;
+    cases.push((facts, "clan_container", HIJACK_REDIRECT_SELECT_MEMBER));
+
+    let mut facts = facts_v2();
+    facts.done_outcome = Some("hijacked".to_string());
+    cases.push((facts, "already_hijacked", HIJACK_REDIRECT_OPEN_RECOVERY));
+
+    for state in ["requested", "stopping", "stop_blocked", "held", "resolving"]
+    {
+        let mut facts = facts_v2();
+        facts.active_hijack_state = Some(state.to_string());
+        cases.push((
+            facts,
+            "active_hijack",
+            HIJACK_REDIRECT_SHOW_ACTIVE_HIJACK,
+        ));
+    }
+
+    let mut facts = facts_v2();
+    facts.occupying_kind = HIJACK_OCCUPANT_GATE.to_string();
+    facts.gate_state = Some("pending".to_string());
+    cases.push((facts, "gate_pending", HIJACK_REDIRECT_GATE_REVIEW));
+
+    for (facts, expected_code, expected_op) in cases {
+        let decision = decide(&facts);
+        assert_eq!(decision.mode, HIJACK_DECISION_REDIRECT, "{expected_code}");
+        assert!(!decision.eligible, "{expected_code}");
+        assert_eq!(decision.code.as_deref(), Some(expected_code));
+        assert_eq!(
+            decision.redirect_op.as_deref(),
+            Some(expected_op),
+            "{expected_code}"
+        );
+        assert!(
+            decision
+                .message
+                .as_deref()
+                .is_some_and(|message| !message.is_empty()),
+            "{expected_code}"
+        );
+        assert!(
+            decision
+                .next_action
+                .as_deref()
+                .is_some_and(|action| !action.is_empty()),
+            "{expected_code}"
+        );
+        assert_eq!(decision.adapter, None, "{expected_code}");
+    }
+}
+
+#[test]
+fn decide_reports_every_refusal_code() {
+    let mut cases = Vec::new();
+
+    let mut facts = facts_v2();
+    facts.is_bulk = true;
+    cases.push((facts, "bulk_mark"));
+
+    let mut facts = facts_v2();
+    facts.is_named_proc = true;
+    cases.push((facts, "named_proc"));
+
+    let mut facts = facts_v2();
+    facts.is_home_mode = true;
+    cases.push((facts, "home_mode"));
+
+    let mut facts = facts_v2();
+    facts.is_local = false;
+    cases.push((facts, "not_local_llm_agent"));
+
+    let mut facts = facts_v2();
+    facts.done_outcome = Some("done".to_string());
+    cases.push((facts, "already_completed"));
+
+    for (field, value) in [
+        ("turn", "provider_done"),
+        ("turn", "finalizing"),
+        ("turn", "handoff"),
+        ("turn", "FINALIZING"),
+        ("finalizer", "declaring"),
+        ("finalizer", "executing"),
+    ] {
+        let mut facts = facts_v2();
+        if field == "turn" {
+            facts.turn_phase = Some(value.to_string());
+        } else {
+            facts.finalizer_phase = Some(value.to_string());
+        }
+        cases.push((facts, "finalizing"));
+    }
+
+    let mut facts = facts_v2();
+    facts.occupying_kind = HIJACK_OCCUPANT_MONITOR.to_string();
+    facts.monitor_state = Some("running".to_string());
+    cases.push((facts, "monitor_turn"));
+
+    for gate_state in ["settling", "executing", "", "done"] {
+        let mut facts = facts_v2();
+        facts.occupying_kind = HIJACK_OCCUPANT_GATE.to_string();
+        facts.gate_state = Some(gate_state.to_string());
+        cases.push((facts, "gate_executing"));
+    }
+    let mut facts = facts_v2();
+    facts.occupying_kind = HIJACK_OCCUPANT_GATE.to_string();
+    cases.push((facts, "gate_executing"));
+
+    for kind in [HIJACK_OCCUPANT_WAIT, HIJACK_OCCUPANT_QUEUE] {
+        let expected = if kind == HIJACK_OCCUPANT_WAIT {
+            "waiting"
+        } else {
+            "queued"
+        };
+        let mut facts = facts_v2();
+        facts.occupying_kind = kind.to_string();
+        cases.push((facts, expected));
+
+        let mut facts = facts_v2();
+        facts.occupying_kind = kind.to_string();
+        facts.has_numbered_claim = false;
+        facts.workspace_num = None;
+        cases.push((facts, "nothing_to_keep"));
+    }
+
+    let mut facts = facts_v2();
+    facts.occupying_kind = HIJACK_OCCUPANT_WORKFLOW_STEP.to_string();
+    cases.push((facts, "workflow_step"));
+
+    let mut facts = facts_v2();
+    facts.occupying_kind = HIJACK_OCCUPANT_NONE.to_string();
+    cases.push((facts, "nothing_to_keep"));
+
+    let mut facts = facts_v2();
+    facts.occupying_kind = "bogus".to_string();
+    cases.push((facts, "unknown_occupant"));
+
+    let mut facts = facts_v2();
+    facts.successor_attachable = false;
+    cases.push((facts, "no_session"));
+
+    let mut facts = facts_v2();
+    facts.has_hijack_capability = false;
+    cases.push((facts, "missing_capability"));
+
+    let mut facts = facts_v2();
+    facts.workspace_num = Some(0);
+    cases.push((facts, "unnumbered_workspace"));
+    let mut facts = facts_v2();
+    facts.has_numbered_claim = false;
+    cases.push((facts, "unnumbered_workspace"));
+
+    let mut facts = facts_v2();
+    facts.status = Some("WAITING".to_string());
+    cases.push((facts, "ineligible_status"));
+
+    let mut facts = facts_v2();
+    facts.pid = None;
+    cases.push((facts, "missing_pid"));
+    let mut facts = facts_v2();
+    facts.process_alive = false;
+    cases.push((facts, "missing_pid"));
+
+    for (facts, expected) in cases {
+        let decision = decide(&facts);
+        assert_eq!(decision.mode, HIJACK_DECISION_REFUSED, "{expected}");
+        assert!(!decision.eligible, "{expected}");
+        assert_eq!(decision.code.as_deref(), Some(expected));
+        assert_eq!(decision.redirect_op, None, "{expected}");
+        assert_eq!(decision.adapter, None, "{expected}");
+        assert!(
+            decision
+                .message
+                .as_deref()
+                .is_some_and(|message| !message.is_empty()),
+            "{expected}"
+        );
+        assert!(
+            decision
+                .next_action
+                .as_deref()
+                .is_some_and(|action| !action.is_empty()),
+            "{expected}"
+        );
+    }
+}
+
+#[test]
+fn decide_rejects_unsupported_schema() {
+    let mut facts = facts_v2();
+    facts.schema_version += 1;
+    assert!(super::agent_hijack_decide(&facts).is_err());
+}
+
+#[test]
+fn stop_blocked_keeps_custody_until_retry_or_explicit_abandon() {
+    let stopping = advance_agent_hijack_record(
+        &record(HIJACK_REQUESTED),
+        &event(HIJACK_EVENT_BEGIN_STOP),
+    )
+    .unwrap();
+    let mut blocked_event = event(HIJACK_EVENT_STOP_BLOCKED);
+    blocked_event.error = Some("2 processes survived".to_string());
+    let blocked =
+        advance_agent_hijack_record(&stopping, &blocked_event).unwrap();
+    assert_eq!(blocked.state, HIJACK_STOP_BLOCKED);
+    assert_eq!(blocked.revision, stopping.revision + 1);
+    assert_eq!(blocked.error.as_deref(), Some("2 processes survived"));
+
+    let retried =
+        advance_agent_hijack_record(&blocked, &event(HIJACK_EVENT_RETRY_STOP))
+            .unwrap();
+    assert_eq!(retried.state, HIJACK_STOPPING);
+
+    let reblocked = advance_agent_hijack_record(
+        &retried,
+        &event(HIJACK_EVENT_STOP_BLOCKED),
+    )
+    .unwrap();
+    assert_eq!(reblocked.state, HIJACK_STOP_BLOCKED);
+
+    let mut abandon = event(HIJACK_EVENT_ABANDON_STOP);
+    abandon.error = Some("operator released the claim".to_string());
+    let failed = advance_agent_hijack_record(&reblocked, &abandon).unwrap();
+    assert_eq!(failed.state, HIJACK_STOP_FAILED);
+    assert_eq!(failed.error.as_deref(), Some("operator released the claim"));
+}
+
+#[test]
+fn stop_blocked_transitions_reject_foreign_states_and_events() {
+    assert!(advance_agent_hijack_record(
+        &record(HIJACK_REQUESTED),
+        &event(HIJACK_EVENT_STOP_BLOCKED),
+    )
+    .is_err());
+    assert!(advance_agent_hijack_record(
+        &record(HIJACK_STOP_BLOCKED),
+        &event(HIJACK_EVENT_CONFIRMED_STOP),
+    )
+    .is_err());
+    assert!(advance_agent_hijack_record(
+        &record(HIJACK_STOPPING),
+        &event(HIJACK_EVENT_RETRY_STOP),
+    )
+    .is_err());
+    assert!(advance_agent_hijack_record(
+        &record(HIJACK_HELD),
+        &event(HIJACK_EVENT_ABANDON_STOP),
+    )
+    .is_err());
+}
+
+#[test]
+fn v1_records_without_the_new_fields_still_advance() {
+    let json = r#"{"schema_version":1,"state":"requested","revision":0,"hijack_id":"h-9"}"#;
+    let parsed: AgentHijackRecordWire = serde_json::from_str(json).unwrap();
+    assert_eq!(parsed.target_key, "");
+    assert_eq!(parsed.scope, None);
+    let stopping = advance_agent_hijack_record(
+        &parsed,
+        &AgentHijackEventWire {
+            event: HIJACK_EVENT_BEGIN_STOP.to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(stopping.state, HIJACK_STOPPING);
+    assert_eq!(stopping.scope, None);
+}
+
+fn occupant_member(name: &str, order: i64) -> AgentHijackOccupantFactsWire {
+    AgentHijackOccupantFactsWire {
+        name: name.to_string(),
+        order,
+        ..Default::default()
+    }
+}
+
+fn occupant_request(
+    members: Vec<AgentHijackOccupantFactsWire>,
+) -> AgentHijackOccupantSelectionRequestWire {
+    AgentHijackOccupantSelectionRequestWire {
+        schema_version: AGENT_HIJACK_ELIGIBILITY_WIRE_SCHEMA_VERSION,
+        members,
+    }
+}
+
+fn select(
+    members: Vec<AgentHijackOccupantFactsWire>,
+) -> AgentHijackOccupantSelectionWire {
+    super::agent_hijack_select_occupant(&occupant_request(members)).unwrap()
+}
+
+#[test]
+fn occupant_selection_prefers_claim_holder_then_newest_then_earliest() {
+    let mut older = occupant_member("s.t.1", 1);
+    older.in_flight = true;
+    let mut newer = occupant_member("s.t.2", 2);
+    newer.in_flight = true;
+    newer.holds_claim = true;
+    let selection = select(vec![older, newer]);
+    assert_eq!(selection.selected_index, Some(1));
+    assert!(selection.reason.contains("s.t.2"));
+    assert!(selection.reason.contains("claim"));
+
+    let mut older = occupant_member("s.t.1", 1);
+    older.in_flight = true;
+    let mut newer = occupant_member("s.t.2", 2);
+    newer.in_flight = true;
+    let selection = select(vec![older, newer]);
+    assert_eq!(selection.selected_index, Some(1));
+    assert!(selection.reason.contains("s.t.2"));
+    assert!(selection.reason.contains("newest"));
+
+    let mut first = occupant_member("s.t.1", 1);
+    first.waiting = true;
+    let mut second = occupant_member("s.t.2", 2);
+    second.waiting = true;
+    let selection = select(vec![first, second]);
+    assert_eq!(selection.selected_index, Some(0));
+    assert!(selection.reason.contains("s.t.1"));
+    assert!(selection.reason.contains("waiting"));
+
+    let mut live = occupant_member("s.t.1", 1);
+    live.waiting = true;
+    let mut settled = occupant_member("s.t.2", 2);
+    settled.settled = true;
+    settled.in_flight = true;
+    let selection = select(vec![live, settled]);
+    assert_eq!(selection.selected_index, Some(0));
+
+    let mut settled = occupant_member("s.t.9", 9);
+    settled.settled = true;
+    let selection = select(vec![settled]);
+    assert_eq!(selection.selected_index, None);
+
+    let selection = select(Vec::new());
+    assert_eq!(selection.selected_index, None);
+}
+
+#[test]
+fn occupant_selection_rejects_unsupported_schema() {
+    let mut request = occupant_request(vec![occupant_member("s.t.1", 1)]);
+    request.schema_version += 1;
+    assert!(super::agent_hijack_select_occupant(&request).is_err());
+}

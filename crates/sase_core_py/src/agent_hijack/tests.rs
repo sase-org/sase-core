@@ -125,7 +125,10 @@ fn hijack_bindings_are_registered_and_advance_records() {
         let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
         register_agent_hijack(&module).unwrap();
         assert_eq!(py_agent_hijack_wire_schema_version(), 1);
+        assert_eq!(py_agent_hijack_eligibility_wire_schema_version(), 2);
         assert!(module.getattr("agent_hijack_eligibility").is_ok());
+        assert!(module.getattr("agent_hijack_decide").is_ok());
+        assert!(module.getattr("agent_hijack_select_occupant").is_ok());
 
         let record = dict(
             py,
@@ -176,6 +179,48 @@ fn eligibility_and_done_status_bindings_share_core_rules() {
             .as_deref(),
             Some("ESCALATED")
         );
+    });
+}
+
+#[test]
+fn decide_and_occupant_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let facts = dict(
+            py,
+            json!({
+                "schema_version": 2,
+                "is_local": true,
+                "occupying_kind": "llm",
+                "status": "RUNNING",
+                "workspace_num": 4,
+                "has_numbered_claim": true,
+                "pid": 42,
+                "process_alive": true,
+                "has_hijack_capability": true,
+                "successor_attachable": true,
+            }),
+        );
+        let decision = py_agent_hijack_decide(py, &facts).unwrap();
+        let value = py_to_json_value(decision.bind(py)).unwrap();
+        assert_eq!(value["mode"], json!("immediate"));
+        assert_eq!(value["eligible"], json!(true));
+        assert_eq!(value["adapter"], json!("llm"));
+
+        let request = dict(
+            py,
+            json!({
+                "schema_version": 2,
+                "members": [
+                    {"name": "s.t.1", "settled": true, "order": 1},
+                    {"name": "s.t.2", "in_flight": true, "order": 2},
+                ],
+            }),
+        );
+        let selection = py_agent_hijack_select_occupant(py, &request).unwrap();
+        let value = py_to_json_value(selection.bind(py)).unwrap();
+        assert_eq!(value["selected_index"], json!(1));
+        assert!(value["reason"].as_str().unwrap().contains("s.t.2"));
     });
 }
 

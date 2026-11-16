@@ -47,6 +47,9 @@ pub fn advance_agent_hijack_record(
         }
         (HIJACK_STOPPING, HIJACK_EVENT_CONFIRMED_STOP) => HIJACK_HELD,
         (HIJACK_STOPPING, HIJACK_EVENT_STOP_FAILED) => HIJACK_STOP_FAILED,
+        (HIJACK_STOPPING, HIJACK_EVENT_STOP_BLOCKED) => HIJACK_STOP_BLOCKED,
+        (HIJACK_STOP_BLOCKED, HIJACK_EVENT_RETRY_STOP) => HIJACK_STOPPING,
+        (HIJACK_STOP_BLOCKED, HIJACK_EVENT_ABANDON_STOP) => HIJACK_STOP_FAILED,
         (HIJACK_HELD, HIJACK_EVENT_EXPIRE) => HIJACK_EXPIRED,
         (HIJACK_HELD | HIJACK_EXPIRED, HIJACK_EVENT_BEGIN_RESOLUTION) => {
             let action = event
@@ -129,7 +132,13 @@ pub fn advance_agent_hijack_record(
             updated.resolver_process_identity_token = None;
             updated.error = event.error.clone();
         }
-        HIJACK_EVENT_STOP_FAILED => updated.error = event.error.clone(),
+        HIJACK_EVENT_STOP_FAILED | HIJACK_EVENT_ABANDON_STOP => {
+            updated.error = event.error.clone();
+        }
+        HIJACK_EVENT_STOP_BLOCKED if event.error.is_some() => {
+            updated.error = event.error.clone();
+        }
+        HIJACK_EVENT_STOP_BLOCKED => {}
         _ => {}
     }
 

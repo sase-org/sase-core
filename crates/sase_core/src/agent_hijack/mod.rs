@@ -12,6 +12,7 @@ mod eligibility;
 pub mod escalation;
 pub mod execution;
 mod ledger;
+pub mod occupant;
 pub mod preview;
 pub mod reconcile;
 mod status;
@@ -26,7 +27,10 @@ pub use continuation::{
     AGENT_HIJACK_CONTINUATION_WIRE_SCHEMA_VERSION, STRIPPED_LAUNCH_DIRECTIVES,
     STRIPPED_LAUNCH_DIRECTIVE_ALIASES,
 };
-pub use eligibility::{agent_hijack_eligibility, AgentHijackEligibilityError};
+pub use eligibility::{
+    agent_hijack_decide, agent_hijack_eligibility, AgentHijackDecideError,
+    AgentHijackEligibilityError,
+};
 pub use escalation::{
     agent_hijack_escalation_target, normalize_hijack_rung,
     AgentHijackEscalationRequestWire, AgentHijackEscalationResultWire,
@@ -48,6 +52,7 @@ pub use execution::{
     HIJACK_ROLLBACK_RETURN_TO_HELD,
 };
 pub use ledger::{advance_agent_hijack_record, AgentHijackLedgerError};
+pub use occupant::{agent_hijack_select_occupant, AgentHijackOccupantError};
 pub use preview::{
     hijack_recovery_preview, AgentHijackPreviewError,
     AgentHijackRecoveryActionWire, AgentHijackRecoveryHeaderWire,
@@ -69,4 +74,9 @@ pub use wire::*;
 /// Return the Agent Hijack wire schema version.
 pub fn agent_hijack_wire_schema_version() -> u32 {
     AGENT_HIJACK_WIRE_SCHEMA_VERSION
+}
+
+/// Return the Agent Hijack eligibility facts/decision wire schema version.
+pub fn agent_hijack_eligibility_wire_schema_version() -> u32 {
+    AGENT_HIJACK_ELIGIBILITY_WIRE_SCHEMA_VERSION
 }

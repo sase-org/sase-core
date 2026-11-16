@@ -8,8 +8,11 @@ use sase_core::agent_auto_restart::AgentRecoveryWire;
 use sase_core::agent_hijack::{
     advance_agent_hijack_record as core_advance_record,
     agent_hijack_continuation_prompt as core_continuation,
+    agent_hijack_decide as core_decide,
     agent_hijack_eligibility as core_eligibility,
+    agent_hijack_eligibility_wire_schema_version as core_eligibility_version,
     agent_hijack_escalation_target as core_escalation,
+    agent_hijack_select_occupant as core_select_occupant,
     agent_hijack_status_for_done_marker as core_done_status,
     agent_hijack_wire_schema_version as core_wire_version,
     hijack_recovery_confirm as core_confirm,
@@ -21,8 +24,9 @@ use sase_core::agent_hijack::{
     normalize_hijack_rung as core_normalize_rung,
     strip_launch_directives as core_strip, AgentHijackConfirmationFactsWire,
     AgentHijackContinuationRequestWire, AgentHijackEffectiveTargetRequestWire,
-    AgentHijackEligibilityFactsWire, AgentHijackEscalationRequestWire,
-    AgentHijackEventWire, AgentHijackExecutionFactsWire,
+    AgentHijackEligibilityFactsV2Wire, AgentHijackEligibilityFactsWire,
+    AgentHijackEscalationRequestWire, AgentHijackEventWire,
+    AgentHijackExecutionFactsWire, AgentHijackOccupantSelectionRequestWire,
     AgentHijackReconcileFactsWire, AgentHijackRecordWire,
     AgentHijackRecoveryPreviewRequestWire, AgentHijackRollbackFactsWire,
     AGENT_HIJACK_CONTINUATION_WIRE_SCHEMA_VERSION,
@@ -83,6 +87,53 @@ fn py_agent_hijack_eligibility<'py>(
     let decision = core_eligibility(&facts)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     serialize_to_py(py, &decision)
+}
+
+/// Return the hijack eligibility facts/decision wire schema version.
+#[pyfunction]
+#[pyo3(name = "agent_hijack_eligibility_wire_schema_version")]
+fn py_agent_hijack_eligibility_wire_schema_version() -> u32 {
+    core_eligibility_version()
+}
+
+/// Decide a hijack request against the v2 facts wire.
+#[pyfunction]
+#[pyo3(name = "agent_hijack_decide")]
+fn py_agent_hijack_decide<'py>(
+    py: Python<'py>,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let facts: AgentHijackEligibilityFactsV2Wire = serde_json::from_value(
+        py_to_json_value(facts.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "facts is not a valid AgentHijackEligibilityFactsV2Wire dict: {error}"
+        ))
+    })?;
+    let decision = core_decide(&facts)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &decision)
+}
+
+/// Select the session's occupying member from its roster.
+#[pyfunction]
+#[pyo3(name = "agent_hijack_select_occupant")]
+fn py_agent_hijack_select_occupant<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: AgentHijackOccupantSelectionRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid AgentHijackOccupantSelectionRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    let selection = core_select_occupant(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &selection)
 }
 
 #[pyfunction]
@@ -372,6 +423,15 @@ pub(crate) fn register_agent_hijack(
     )?)?;
     module
         .add_function(wrap_pyfunction!(py_agent_hijack_eligibility, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        py_agent_hijack_eligibility_wire_schema_version,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(py_agent_hijack_decide, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        py_agent_hijack_select_occupant,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(
         py_agent_hijack_status_for_done_marker,
         module
