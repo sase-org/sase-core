@@ -849,7 +849,7 @@ fn dismissed_bundle_index_bindings_are_exported_and_round_trip() {
 
         let signature = py_dismissed_bundle_index_signature(py, &root).unwrap();
         let signature = py_to_json_value(signature.bind(py)).unwrap();
-        assert_eq!(signature["schema_version"], json!(3));
+        assert_eq!(signature["schema_version"], json!(4));
         assert_eq!(signature["row_count"], json!(1));
 
         let request = request_dict(py, json!({}));

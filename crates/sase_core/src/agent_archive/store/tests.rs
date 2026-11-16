@@ -41,7 +41,7 @@ fn store_upsert_query_signature_and_delete_round_trip() {
         .unwrap();
 
     let signature = index_signature(root).unwrap();
-    assert_eq!(signature.schema_version, 3);
+    assert_eq!(signature.schema_version, 4);
     assert_eq!(signature.row_count, 2);
 
     let all = query_summaries(
@@ -171,6 +171,7 @@ fn store_query_filters_by_exact_run_identity() {
             &format!("unrelated-{i:02}"),
             |bundle| {
                 bundle["agent_name"] = json!(format!("other-{i:02}"));
+                bundle["workflow_name"] = json!(format!("other-wf-{i:02}"));
                 bundle["source_run_id"] = json!(format!("other-run-{i:02}"));
             },
         );
@@ -319,6 +320,51 @@ fn store_query_filters_by_exact_run_identity() {
 }
 
 #[test]
+fn store_agent_names_match_workflow_name_projection() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    upsert_custom_bundle(root, "by-agent.json", "by-agent", |bundle| {
+        bundle["agent_name"] = json!("wanted-agent");
+    });
+    upsert_custom_bundle(root, "by-workflow.json", "by-workflow", |bundle| {
+        bundle["agent_name"] = json!("other-agent");
+        bundle["workflow_name"] = json!("wanted-agent");
+        // The display `workflow` field must not satisfy the lookup.
+        bundle["workflow"] = json!("unrelated-display");
+    });
+    upsert_custom_bundle(root, "by-display.json", "by-display", |bundle| {
+        bundle["agent_name"] = json!("third-agent");
+        bundle["workflow"] = json!("wanted-agent");
+    });
+
+    let matched = query_suffixes(
+        root,
+        DismissedBundleIndexQueryWire {
+            agent_names: Some(vec!["wanted-agent".to_string()]),
+            visibility: None,
+            ..Default::default()
+        },
+    );
+    assert_eq!(matched, vec!["by-agent", "by-workflow"]);
+
+    let rows = query_summaries(
+        root,
+        DismissedBundleIndexQueryWire {
+            agent_names: Some(vec!["wanted-agent".to_string()]),
+            visibility: None,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let by_workflow = rows
+        .iter()
+        .find(|row| row.raw_suffix == "by-workflow")
+        .unwrap();
+    assert_eq!(by_workflow.workflow_name.as_deref(), Some("wanted-agent"));
+}
+
+#[test]
 fn query_wire_omitted_identity_fields_deserialize_to_none() {
     let parsed: DismissedBundleIndexQueryWire = serde_json::from_value(json!({
         "suffixes": ["a"],
@@ -397,7 +443,7 @@ fn store_opens_python_created_index_without_schema_drop() {
     }
     conn.execute(
         "INSERT OR REPLACE INTO dismissed_bundle_index_meta(key, value) \
-         VALUES ('schema_version', '3')",
+         VALUES ('schema_version', '4')",
         [],
     )
     .unwrap();
@@ -430,7 +476,7 @@ fn store_opens_python_created_index_without_schema_drop() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "3");
+    assert_eq!(version, "4");
 
     let rows = query_summaries(
         root,
@@ -466,7 +512,7 @@ fn store_rebuilds_incompatible_schema() {
     .unwrap();
     conn.execute(
         "INSERT OR REPLACE INTO dismissed_bundle_index_meta(key, value) \
-         VALUES ('schema_version', '3')",
+         VALUES ('schema_version', '4')",
         [],
     )
     .unwrap();
@@ -768,7 +814,7 @@ fn store_queries_return_none_for_old_or_incompatible_index_without_dropping_tabl
     bad_conn
         .execute(
             "INSERT OR REPLACE INTO dismissed_bundle_index_meta(key, value) \
-             VALUES ('schema_version', '3')",
+             VALUES ('schema_version', '4')",
             [],
         )
         .unwrap();

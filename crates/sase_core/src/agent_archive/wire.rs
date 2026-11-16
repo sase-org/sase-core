@@ -196,6 +196,7 @@ pub struct DismissedBundleSummaryWire {
     pub llm_provider: Option<String>,
     pub vcs_provider: Option<String>,
     pub workflow: Option<String>,
+    pub workflow_name: Option<String>,
     #[serde(default)]
     pub is_workflow_child: bool,
     pub parent_timestamp: Option<String>,

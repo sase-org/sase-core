@@ -29,7 +29,7 @@ use crate::agent_archive::{
     AgentArchiveKeyWire, AgentArchiveVisibilityWire,
 };
 
-pub const ARCHIVE_STORE_SCHEMA_VERSION: i64 = 3;
+pub const ARCHIVE_STORE_SCHEMA_VERSION: i64 = 4;
 pub const ARCHIVE_STORE_INDEX_FILENAME: &str = "index.sqlite";
 
 const META_DDL: &str = "
@@ -60,6 +60,7 @@ const SUMMARIES_DDL: &str = "
             agent_type TEXT NOT NULL,
             cl_name TEXT NOT NULL,
             agent_name TEXT,
+            workflow_name TEXT,
             status TEXT NOT NULL,
             start_time TEXT,
             stop_time TEXT,
@@ -132,6 +133,8 @@ const INDEX_DDLS: &[&str] = &[
      ON dismissed_bundle_summaries(archive_visibility)",
     "CREATE INDEX IF NOT EXISTS idx_dismissed_bundle_agent_name \
      ON dismissed_bundle_summaries(agent_name)",
+    "CREATE INDEX IF NOT EXISTS idx_dismissed_bundle_workflow_name \
+     ON dismissed_bundle_summaries(workflow_name)",
     "CREATE INDEX IF NOT EXISTS idx_dismissed_bundle_source_run_id \
      ON dismissed_bundle_summaries(source_run_id)",
 ];
@@ -877,6 +880,7 @@ fn summary_from_bundle(
             agent_type: string_or_default(map.get("agent_type"), "run"),
             cl_name: string_or_default(map.get("cl_name"), "unknown"),
             agent_name: optional_str(map.get("agent_name")),
+            workflow_name: optional_str(map.get("workflow_name")),
             status: string_or_default(map.get("status"), "DONE"),
             start_time: optional_str(map.get("start_time")),
             stop_time: optional_str(map.get("stop_time")),
@@ -960,6 +964,7 @@ fn upsert_summary_row(
             source_username, source_machine, source_run_id, archive_visibility,
             archive_payload_sha256, historically_viewable, durably_revivable,
             restartable, missing_requirements, agent_type, cl_name, agent_name,
+            workflow_name,
             status, start_time, stop_time, dismissed_at, revived_at,
             agent_session, agent_session_role, agent_clan,
             agent_clan_generation, agent_tab, tribe, clan_tribe,
@@ -974,7 +979,8 @@ fn upsert_summary_row(
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
             ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-            ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50
+            ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50,
+            ?51
         )
         ON CONFLICT(bundle_path) DO UPDATE SET
             agent_id=excluded.agent_id,
@@ -993,6 +999,7 @@ fn upsert_summary_row(
             agent_type=excluded.agent_type,
             cl_name=excluded.cl_name,
             agent_name=excluded.agent_name,
+            workflow_name=excluded.workflow_name,
             status=excluded.status,
             start_time=excluded.start_time,
             stop_time=excluded.stop_time,
@@ -1045,6 +1052,7 @@ fn upsert_summary_row(
             summary.agent_type,
             summary.cl_name,
             summary.agent_name,
+            summary.workflow_name,
             summary.status,
             summary.start_time,
             summary.stop_time,
@@ -1206,38 +1214,22 @@ fn in_clause(
     format!("{column} IN ({placeholders})")
 }
 
-fn push_identity_clause(
+/// Shared non-identity filters (suffixes, runs, cl, project, child, visibility).
+fn push_shared_clauses(
     request: &DismissedBundleIndexQueryWire,
     clauses: &mut Vec<String>,
     params: &mut Vec<rusqlite::types::Value>,
 ) {
-    let names = nonempty_sorted(request.agent_names.as_ref());
-    let runs = nonempty_sorted(request.source_run_ids.as_ref());
-    match (names.as_deref(), runs.as_deref()) {
-        (None, None) => {}
-        (Some(names), None) => {
-            clauses.push(in_clause("s.agent_name", names, params));
-        }
-        (None, Some(runs)) => {
-            clauses.push(in_clause("s.source_run_id", runs, params));
-        }
-        (Some(names), Some(runs)) => {
-            let names_clause = in_clause("s.agent_name", names, params);
-            let runs_clause = in_clause("s.source_run_id", runs, params);
-            clauses.push(format!("({names_clause} OR {runs_clause})"));
-        }
-    }
-}
-
-fn build_summary_query(
-    request: &DismissedBundleIndexQueryWire,
-) -> (String, Vec<rusqlite::types::Value>) {
-    let mut clauses: Vec<String> = Vec::new();
-    let mut params: Vec<rusqlite::types::Value> = Vec::new();
     if let Some(suffixes) = nonempty_sorted(request.suffixes.as_ref()) {
-        clauses.push(in_clause("s.raw_suffix", &suffixes, &mut params));
+        clauses.push(in_clause("s.raw_suffix", &suffixes, params));
     }
-    push_identity_clause(request, &mut clauses, &mut params);
+    if let Some(runs) = nonempty_sorted(request.source_run_ids.as_ref()) {
+        // When agent_names is also present the caller unions the agent and
+        // workflow branches; the run match joins each branch as an OR.
+        if request.agent_names.as_ref().is_none_or(Vec::is_empty) {
+            clauses.push(in_clause("s.source_run_id", &runs, params));
+        }
+    }
     if let Some(cl_name) = &request.cl_name {
         clauses.push("(s.cl_name = ? OR s.meta_patch = ?)".to_string());
         params.push(rusqlite::types::Value::Text(cl_name.clone()));
@@ -1257,14 +1249,116 @@ fn build_summary_query(
         );
         params.push(rusqlite::types::Value::Text(visibility.clone()));
     }
+}
+
+fn build_summary_query(
+    request: &DismissedBundleIndexQueryWire,
+) -> (String, Vec<rusqlite::types::Value>) {
+    const ORDER_BY: &str =
+        " ORDER BY COALESCE(s.start_time, s.raw_suffix) DESC, s.filename ASC";
+    // UNION output columns lose the `s.` qualifier; order the combined rows
+    // by the same output names.
+    const UNION_ORDER_BY: &str =
+        " ORDER BY COALESCE(start_time, raw_suffix) DESC, filename ASC";
+    if let Some(names) = nonempty_sorted(request.agent_names.as_ref()) {
+        // Match `agent_names` against the source bundle's `agent_name` or its
+        // `workflow_name` (never the display `workflow` field). Each UNION
+        // branch filters one indexed column with no OR so the planner keeps
+        // single-column index seeks; UNION (not UNION ALL) dedups rows that
+        // match both. The legacy scan matched either column.
+        let runs = nonempty_sorted(request.source_run_ids.as_ref());
+        let mut branches = Vec::new();
+        let mut params = Vec::new();
+        for column in ["s.agent_name", "s.workflow_name"] {
+            let mut clauses = vec![in_clause(column, &names, &mut params)];
+            let mut shared_clauses = Vec::new();
+            let mut shared_params = Vec::new();
+            push_shared_without_runs_or_names(
+                request,
+                &mut shared_clauses,
+                &mut shared_params,
+            );
+            clauses.extend(shared_clauses);
+            params.extend(shared_params);
+            let mut branch = SUMMARY_SELECT.to_string();
+            branch.push_str(" WHERE ");
+            branch.push_str(&clauses.join(" AND "));
+            branches.push(branch);
+        }
+        if let Some(runs) = runs.as_deref() {
+            let mut clauses =
+                vec![in_clause("s.source_run_id", runs, &mut params)];
+            let mut shared_clauses = Vec::new();
+            let mut shared_params = Vec::new();
+            push_shared_without_runs_or_names(
+                request,
+                &mut shared_clauses,
+                &mut shared_params,
+            );
+            clauses.extend(shared_clauses);
+            params.extend(shared_params);
+            let mut branch = SUMMARY_SELECT.to_string();
+            branch.push_str(" WHERE ");
+            branch.push_str(&clauses.join(" AND "));
+            branches.push(branch);
+        }
+        // Wrap the UNION so ORDER BY expressions resolve against the combined
+        // output columns (UNION ORDER BY terms must match result columns).
+        let mut sql = String::from("SELECT * FROM (");
+        sql.push_str(&branches.join(" UNION "));
+        sql.push(')');
+        sql.push_str(UNION_ORDER_BY);
+        push_limit_offset(request, &mut sql, &mut params);
+        return (sql, params);
+    }
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+    push_shared_clauses(request, &mut clauses, &mut params);
     let mut sql = SUMMARY_SELECT.to_string();
     if !clauses.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&clauses.join(" AND "));
     }
-    sql.push_str(
-        " ORDER BY COALESCE(s.start_time, s.raw_suffix) DESC, s.filename ASC",
-    );
+    sql.push_str(ORDER_BY);
+    push_limit_offset(request, &mut sql, &mut params);
+    (sql, params)
+}
+
+/// Shared filters excluding identity names/runs (handled per UNION branch).
+fn push_shared_without_runs_or_names(
+    request: &DismissedBundleIndexQueryWire,
+    clauses: &mut Vec<String>,
+    params: &mut Vec<rusqlite::types::Value>,
+) {
+    if let Some(suffixes) = nonempty_sorted(request.suffixes.as_ref()) {
+        clauses.push(in_clause("s.raw_suffix", &suffixes, params));
+    }
+    if let Some(cl_name) = &request.cl_name {
+        clauses.push("(s.cl_name = ? OR s.meta_patch = ?)".to_string());
+        params.push(rusqlite::types::Value::Text(cl_name.clone()));
+        params.push(rusqlite::types::Value::Text(cl_name.clone()));
+    }
+    if let Some(project_name) = &request.project_name {
+        clauses.push("s.project_file LIKE ?".to_string());
+        params
+            .push(rusqlite::types::Value::Text(format!("%/{project_name}/%")));
+    }
+    if request.top_level_only {
+        clauses.push("s.is_workflow_child = 0".to_string());
+    }
+    if let Some(visibility) = &request.visibility {
+        clauses.push(
+            "COALESCE(v.visibility, s.archive_visibility) = ?".to_string(),
+        );
+        params.push(rusqlite::types::Value::Text(visibility.clone()));
+    }
+}
+
+fn push_limit_offset(
+    request: &DismissedBundleIndexQueryWire,
+    sql: &mut String,
+    params: &mut Vec<rusqlite::types::Value>,
+) {
     if let Some(limit) = request.limit {
         sql.push_str(" LIMIT ?");
         params.push(rusqlite::types::Value::Integer(limit.max(0)));
@@ -1276,7 +1370,6 @@ fn build_summary_query(
         sql.push_str(" OFFSET ?");
         params.push(rusqlite::types::Value::Integer(offset.max(0)));
     }
-    (sql, params)
 }
 
 /// Query summaries with the Python `query_summaries` filters and ordering.
@@ -1390,6 +1483,7 @@ fn summary_wire_from_row(
         agent_type: get_text("agent_type", "run")?,
         cl_name: get_text("cl_name", "unknown")?,
         agent_name: get_opt("agent_name")?,
+        workflow_name: get_opt("workflow_name")?,
         status: get_text("status", "DONE")?,
         start_time: get_opt("start_time")?,
         stop_time: get_opt("stop_time")?,
