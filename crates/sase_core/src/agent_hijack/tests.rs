@@ -814,11 +814,6 @@ fn decide_reports_every_refusal_code() {
     facts.done_outcome = Some("done".to_string());
     cases.push((facts, "already_completed"));
 
-    let mut facts = facts_v2();
-    facts.occupying_kind = HIJACK_OCCUPANT_MONITOR.to_string();
-    facts.monitor_state = Some("running".to_string());
-    cases.push((facts, "monitor_turn"));
-
     for gate_state in ["settling", "executing", "", "done"] {
         let mut facts = facts_v2();
         facts.occupying_kind = HIJACK_OCCUPANT_GATE.to_string();
@@ -977,6 +972,88 @@ fn decide_latches_finalizing_and_staged_with_boundary_hint() {
     let decision = decide(&incapable);
     assert_eq!(decision.mode, HIJACK_DECISION_REFUSED);
     assert_eq!(decision.code.as_deref(), Some("missing_capability"));
+}
+
+#[test]
+fn decide_accepts_a_running_monitor_with_the_monitor_adapter() {
+    for status in ["RUNNING", "STARTING", "RETRYING", "running"] {
+        let mut facts = facts_v2();
+        facts.occupying_kind = HIJACK_OCCUPANT_MONITOR.to_string();
+        facts.monitor_state = Some("running".to_string());
+        facts.status = Some(status.to_string());
+        facts.has_hijack_capability = false;
+        facts.pid = None;
+        facts.process_alive = false;
+        let decision = decide(&facts);
+        assert_eq!(decision.mode, HIJACK_DECISION_IMMEDIATE, "{status}");
+        assert!(decision.eligible, "{status}");
+        assert_eq!(
+            decision.adapter.as_deref(),
+            Some(HIJACK_ADAPTER_MONITOR),
+            "{status}"
+        );
+        assert_eq!(decision.code, None, "{status}");
+        assert_eq!(decision.boundary, None, "{status}");
+    }
+}
+
+#[test]
+fn decide_latches_pending_monitor_followup_before_already_completed() {
+    let mut pending = facts_v2();
+    pending.occupying_kind = HIJACK_OCCUPANT_MONITOR.to_string();
+    pending.monitor_state = Some("completed".to_string());
+    pending.monitor_followup_pending = true;
+    pending.done_outcome = Some("succeeded".to_string());
+    pending.status = Some("DONE".to_string());
+    pending.has_hijack_capability = false;
+    pending.pid = None;
+    pending.process_alive = false;
+    let decision = decide(&pending);
+    assert_eq!(decision.mode, HIJACK_DECISION_LATCHED);
+    assert!(decision.eligible);
+    assert_eq!(decision.code.as_deref(), Some("monitor_followup_pending"));
+    assert_eq!(decision.adapter, None);
+    assert_eq!(decision.boundary.as_deref(), Some("monitor"));
+
+    let mut unnumbered = pending.clone();
+    unnumbered.has_numbered_claim = false;
+    unnumbered.workspace_num = None;
+    assert_eq!(
+        decide(&unnumbered).code.as_deref(),
+        Some("unnumbered_workspace")
+    );
+
+    let mut no_session = pending.clone();
+    no_session.successor_attachable = false;
+    assert_eq!(decide(&no_session).code.as_deref(), Some("no_session"));
+}
+
+#[test]
+fn decide_refuses_delivered_and_unclaimed_monitors() {
+    let mut delivered = facts_v2();
+    delivered.occupying_kind = HIJACK_OCCUPANT_MONITOR.to_string();
+    delivered.monitor_state = Some("completed".to_string());
+    delivered.done_outcome = Some("succeeded".to_string());
+    delivered.status = Some("DONE".to_string());
+    let decision = decide(&delivered);
+    assert_eq!(decision.mode, HIJACK_DECISION_REFUSED);
+    assert_eq!(decision.code.as_deref(), Some("already_completed"));
+
+    let mut unclaimed = facts_v2();
+    unclaimed.occupying_kind = HIJACK_OCCUPANT_MONITOR.to_string();
+    unclaimed.monitor_state = Some("running".to_string());
+    unclaimed.has_numbered_claim = false;
+    unclaimed.workspace_num = None;
+    assert_eq!(
+        decide(&unclaimed).code.as_deref(),
+        Some("unnumbered_workspace")
+    );
+
+    let mut idle = facts_v2();
+    idle.occupying_kind = HIJACK_OCCUPANT_MONITOR.to_string();
+    idle.monitor_state = Some("completed".to_string());
+    idle.status = Some("DONE".to_string());
+    assert_eq!(decide(&idle).code.as_deref(), Some("ineligible_status"));
 }
 
 #[test]

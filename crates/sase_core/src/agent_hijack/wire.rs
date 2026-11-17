@@ -446,6 +446,11 @@ pub struct AgentHijackEligibilityFactsV2Wire {
     /// Staged handoff kind (`pipe`, `plan`, `questions`, ...) when pending.
     #[serde(default)]
     pub staged_kind: Option<String>,
+    /// Command-settled monitor whose owned follow-up is still pending
+    /// delivery. Derived from settlement/delivery records, never from
+    /// `monitor_next_action` alone. A done marker must not mask this.
+    #[serde(default)]
+    pub monitor_followup_pending: bool,
 }
 
 /// V2 decision: `mode` is `immediate`, `latched`, `redirect`, or `refused`.
@@ -453,7 +458,8 @@ pub struct AgentHijackEligibilityFactsV2Wire {
 /// Redirects carry `redirect_op`; every non-immediate decision carries a
 /// `code`, a one-line `message`, and a `next_action`. Immediate decisions
 /// carry `adapter` (`llm`, `processless`, or `monitor`). Latched decisions
-/// carry an additive `boundary` hint (`finalizer`, `staged_adoption`).
+/// carry an additive `boundary` hint (`finalizer`, `staged_adoption`,
+/// `monitor`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentHijackEligibilityDecisionV2Wire {
     pub schema_version: u32,
@@ -469,7 +475,8 @@ pub struct AgentHijackEligibilityDecisionV2Wire {
     pub redirect_op: Option<String>,
     #[serde(default)]
     pub adapter: Option<String>,
-    /// Where a latched hijack applies (`finalizer`, `staged_adoption`).
+    /// Where a latched hijack applies (`finalizer`, `staged_adoption`,
+    /// `monitor`).
     #[serde(default)]
     pub boundary: Option<String>,
 }

@@ -3,14 +3,14 @@ use super::wire::{
     AgentHijackEligibilityFactsV2Wire, AgentHijackEligibilityFactsWire,
     AGENT_HIJACK_ELIGIBILITY_WIRE_SCHEMA_VERSION,
     AGENT_HIJACK_WIRE_SCHEMA_VERSION, HIJACK_ADAPTER_LLM,
-    HIJACK_ADAPTER_PROCESSLESS, HIJACK_DECISION_IMMEDIATE,
-    HIJACK_DECISION_LATCHED, HIJACK_DECISION_REDIRECT, HIJACK_DECISION_REFUSED,
-    HIJACK_OCCUPANT_GATE, HIJACK_OCCUPANT_LLM, HIJACK_OCCUPANT_MONITOR,
-    HIJACK_OCCUPANT_NONE, HIJACK_OCCUPANT_QUEUE, HIJACK_OCCUPANT_WAIT,
-    HIJACK_OCCUPANT_WORKFLOW_STEP, HIJACK_REDIRECT_COPY_REMOTE_COMMAND,
-    HIJACK_REDIRECT_GATE_REVIEW, HIJACK_REDIRECT_KILL_AND_EDIT,
-    HIJACK_REDIRECT_OPEN_RECOVERY, HIJACK_REDIRECT_SELECT_MEMBER,
-    HIJACK_REDIRECT_SHOW_ACTIVE_HIJACK,
+    HIJACK_ADAPTER_MONITOR, HIJACK_ADAPTER_PROCESSLESS,
+    HIJACK_DECISION_IMMEDIATE, HIJACK_DECISION_LATCHED,
+    HIJACK_DECISION_REDIRECT, HIJACK_DECISION_REFUSED, HIJACK_OCCUPANT_GATE,
+    HIJACK_OCCUPANT_LLM, HIJACK_OCCUPANT_MONITOR, HIJACK_OCCUPANT_NONE,
+    HIJACK_OCCUPANT_QUEUE, HIJACK_OCCUPANT_WAIT, HIJACK_OCCUPANT_WORKFLOW_STEP,
+    HIJACK_REDIRECT_COPY_REMOTE_COMMAND, HIJACK_REDIRECT_GATE_REVIEW,
+    HIJACK_REDIRECT_KILL_AND_EDIT, HIJACK_REDIRECT_OPEN_RECOVERY,
+    HIJACK_REDIRECT_SELECT_MEMBER, HIJACK_REDIRECT_SHOW_ACTIVE_HIJACK,
 };
 use thiserror::Error;
 
@@ -313,6 +313,35 @@ pub fn agent_hijack_decide(
             HIJACK_REDIRECT_SHOW_ACTIVE_HIJACK,
         ));
     }
+    // A command-settled monitor with a still-owned follow-up latches even
+    // when a done marker already exists: the pending settlement/delivery
+    // records distinguish it from a fully completed turn. Numbered custody
+    // and successor-attachability still refuse. A monitor uses supervisor
+    // identity rather than an inherited LLM capability or starter PID.
+    if is_monitor_followup_pending(facts) {
+        if !facts.successor_attachable {
+            return Ok(refused(
+                "no_session",
+                "no session to attach a hijack successor to",
+                "fork or retry from the session instead",
+            ));
+        }
+        if !facts.has_numbered_claim
+            || facts.workspace_num.is_none_or(|number| number <= 0)
+        {
+            return Ok(refused(
+                "unnumbered_workspace",
+                "agent has no numbered workspace",
+                "wait for a workspace claim, then hijack",
+            ));
+        }
+        return Ok(latched(
+            "monitor",
+            "monitor_followup_pending",
+            "monitor follow-up pending settlement; hijack latches and applies before delivery",
+            "request the hijack now; it applies before the monitor follow-up is delivered",
+        ));
+    }
     // A staged-but-not-adopted agent handoff latches even when a done
     // marker already exists: the pending staged payload distinguishes it
     // from a fully completed turn. Locality, capability, numbered-custody,
@@ -382,11 +411,7 @@ pub fn agent_hijack_decide(
 
     match facts.occupying_kind.as_str() {
         HIJACK_OCCUPANT_MONITOR => {
-            return Ok(refused(
-                "monitor_turn",
-                "monitor turns cannot be hijacked yet; stop it with x or wait for its follow-up",
-                "stop it with x or wait for its follow-up",
-            ));
+            return Ok(monitor_running_decision(facts));
         }
         HIJACK_OCCUPANT_GATE => {
             if facts
@@ -555,6 +580,47 @@ fn is_active_hijack(state: &str) -> bool {
 /// successor-attachability checks pass.
 fn is_staged_pending(facts: &AgentHijackEligibilityFactsV2Wire) -> bool {
     facts.has_staged_handoff && facts.occupying_kind == HIJACK_OCCUPANT_LLM
+}
+
+fn is_monitor_followup_pending(
+    facts: &AgentHijackEligibilityFactsV2Wire,
+) -> bool {
+    facts.monitor_followup_pending
+        && facts.occupying_kind == HIJACK_OCCUPANT_MONITOR
+}
+
+fn monitor_running_decision(
+    facts: &AgentHijackEligibilityFactsV2Wire,
+) -> AgentHijackEligibilityDecisionV2Wire {
+    if !facts.successor_attachable {
+        return refused(
+            "no_session",
+            "no session to attach a hijack successor to",
+            "fork or retry from the session instead",
+        );
+    }
+    if !facts.has_numbered_claim
+        || facts.workspace_num.is_none_or(|number| number <= 0)
+    {
+        return refused(
+            "unnumbered_workspace",
+            "agent has no numbered workspace",
+            "wait for a workspace claim, then hijack",
+        );
+    }
+    if !facts.status.as_deref().is_some_and(|status| {
+        matches!(
+            status.to_ascii_uppercase().as_str(),
+            "RUNNING" | "STARTING" | "RETRYING"
+        )
+    }) {
+        return refused(
+            "ineligible_status",
+            "agent is not RUNNING, STARTING, or RETRYING",
+            "wait for the turn to run, then hijack",
+        );
+    }
+    immediate(HIJACK_ADAPTER_MONITOR)
 }
 
 /// True while the occupying turn is finalizing: the runner lifecycle reached
