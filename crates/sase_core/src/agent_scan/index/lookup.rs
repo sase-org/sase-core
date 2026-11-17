@@ -5,7 +5,9 @@
 //! authoritative miss.
 
 use super::index_wire::AGENT_ARTIFACT_INDEX_SCHEMA_VERSION;
-use super::lookup_recovery::{bounded_lookup_recovery, LOOKUP_FALLBACK_BUDGET};
+use super::lookup_recovery::{
+    bounded_lookup_recovery, revalidate_lookup_hits, LOOKUP_FALLBACK_BUDGET,
+};
 use super::readers::AGENT_ARTIFACT_INDEX_PROJECTION_BUSY_TIMEOUT;
 use super::storage::{
     open_index_read_only_no_migrate, read_index_schema_version,
@@ -128,7 +130,8 @@ pub fn lookup_agent_artifacts(
                     AgentArtifactLookupAvailabilityWire::Ready;
                 result.complete = true;
                 result.source = "index".to_string();
-                result.hits = hits;
+                result.hits =
+                    revalidate_lookup_hits(projects_root, &query, hits);
                 result
             }
             Err(error) if is_busy_error(&error) => recover(
@@ -474,9 +477,20 @@ fn recover(
 ) -> AgentArtifactLookupResultWire {
     let recovered = bounded_lookup_recovery(projects_root, &query);
     super::record_lookup_records_decoded(recovered.records_decoded);
+    let group_query = matches!(
+        &query.target,
+        AgentArtifactLookupTargetWire::Session { .. }
+            | AgentArtifactLookupTargetWire::Clan { .. }
+            | AgentArtifactLookupTargetWire::Pointers { .. }
+    );
     let mut result = empty_result(index_path, projects_root, query);
     result.availability = availability;
-    result.complete = false;
+    // A group can only use bounded recovery when the source traversal proves
+    // exhaustion without an IO error or budget truncation. Other identity
+    // consumers retain their incomplete recovery contract. An absent projects
+    // root is a complete empty result for every target.
+    result.complete = (group_query && recovered.exhausted)
+        || projects_root.try_exists().is_ok_and(|exists| !exists);
     result.source = if recovered.hits.is_empty() && recovered.dirs_visited == 0
     {
         "none".to_string()

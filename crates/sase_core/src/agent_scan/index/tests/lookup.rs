@@ -125,6 +125,40 @@ fn healthy_name_lookup_is_complete_and_does_not_decode_records() {
 }
 
 #[test]
+fn metadata_aliases_match_scanner_for_indexed_and_recovery_queries() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let target = artifact(&projects, "20261116120000");
+    write_named(
+        &target,
+        json!({
+            "name": "lane--code",
+            "workflow_name": "lane",
+            "agent_family": "lane",
+            "agent_clan": "wave",
+            "patch_name": "feature",
+            "changespec_name": "feature",
+            "cl_name": "feature",
+            "commit_patch_name": "feature",
+            "commit_changespec_name": "feature"
+        }),
+    );
+    let index = rebuild_index(tmp.path(), &projects);
+    for index_path in [&index, &tmp.path().join("missing.sqlite")] {
+        for query in [
+            names_query(&["lane--code"]),
+            session_query(&["lane"]),
+            clan_query(&["wave"]),
+        ] {
+            let result = lookup_agent_artifacts(index_path, &projects, query);
+            assert_eq!(result.hits.len(), 1, "{result:?}");
+            assert_eq!(result.hits[0].lookup_session.as_deref(), Some("lane"));
+            assert_eq!(result.hits[0].agent_clan.as_deref(), Some("wave"));
+        }
+    }
+}
+
+#[test]
 fn healthy_empty_name_lookup_is_ready_and_complete() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
@@ -359,6 +393,26 @@ fn missing_index_recovers_from_source_and_stays_incomplete() {
 }
 
 #[test]
+fn missing_index_and_projects_root_is_a_complete_empty_result() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let index = tmp.path().join("missing.sqlite");
+    let result = lookup_agent_artifacts(
+        &index,
+        &projects,
+        session_query(&["missing-session"]),
+    );
+    assert_eq!(
+        result.availability,
+        AgentArtifactLookupAvailabilityWire::Missing
+    );
+    assert!(result.complete);
+    assert_eq!(result.source, "none");
+    assert!(result.hits.is_empty());
+    assert_eq!(result.dirs_visited, 0);
+}
+
+#[test]
 fn stale_schema_does_not_migrate_and_maintenance_restores_index() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
@@ -388,8 +442,12 @@ fn stale_schema_does_not_migrate_and_maintenance_restores_index() {
         stale.availability,
         AgentArtifactLookupAvailabilityWire::StaleSchema
     );
-    assert!(!stale.complete);
+    assert!(
+        stale.complete,
+        "the bounded source walk exhausted this fixture"
+    );
     assert_eq!(stale.source, "fallback");
+    assert_eq!(stale.hits.len(), 1);
     let version: String = Connection::open(&index)
         .unwrap()
         .query_row(
@@ -569,4 +627,104 @@ fn lookup_session_column_is_present_after_open() {
         )
         .unwrap();
     assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
+}
+
+#[test]
+fn fallback_bounds_unrelated_directory_entries_and_does_not_claim_complete_group(
+) {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    fs::create_dir_all(&projects).unwrap();
+    for n in 0..300 {
+        fs::write(projects.join(format!("unrelated-{n}")), "").unwrap();
+    }
+    let result = lookup_agent_artifacts(
+        &tmp.path().join("missing.sqlite"),
+        &projects,
+        session_query(&["lane"]),
+    );
+    assert!(result.truncated);
+    assert!(!result.complete);
+    assert_eq!(result.dirs_visited, 200);
+}
+
+#[test]
+fn bounded_recovery_preserves_legacy_non_timestamp_artifacts() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    write_named(
+        &artifact(&projects, "member-ts"),
+        json!({"name": "wave.worker", "agent_clan": "wave"}),
+    );
+    let result = lookup_agent_artifacts(
+        &tmp.path().join("missing.sqlite"),
+        &projects,
+        clan_query(&["wave"]),
+    );
+    assert!(result.complete);
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].agent_name.as_deref(), Some("wave.worker"));
+}
+
+#[test]
+fn fully_exhausted_small_group_recovery_is_complete() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    write_named(
+        &artifact(&projects, "20261116120000"),
+        json!({"name":"lane--1", "agent_session":"lane"}),
+    );
+    let result = lookup_agent_artifacts(
+        &tmp.path().join("missing.sqlite"),
+        &projects,
+        session_query(&["lane"]),
+    );
+    assert!(result.complete);
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.source, "fallback");
+}
+
+#[test]
+fn healthy_lookup_revalidates_relation_and_markers_only_on_matching_records() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let member = artifact(&projects, "20261116120000");
+    write_named(&member, json!({"name":"lane--1", "agent_session":"lane"}));
+    let index = rebuild_index(tmp.path(), &projects);
+    fs::write(member.join("done.json"), r#"{"outcome":"completed"}"#).unwrap();
+    let result =
+        lookup_agent_artifacts(&index, &projects, session_query(&["lane"]));
+    assert!(result.hits[0].has_done_marker);
+    write_named(
+        &member,
+        json!({"name":"renamed--1", "agent_session":"renamed"}),
+    );
+    assert!(lookup_agent_artifacts(
+        &index,
+        &projects,
+        session_query(&["lane"])
+    )
+    .hits
+    .is_empty());
+}
+
+#[test]
+fn explicit_pointer_is_discovered_before_its_index_upsert() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    fs::create_dir_all(&projects).unwrap();
+    let index = rebuild_index(tmp.path(), &projects);
+    let member = artifact(&projects, "20261116120000");
+    write_named(&member, json!({"name":"lane--1", "agent_session":"lane"}));
+    let query = AgentArtifactLookupQueryWire {
+        target: AgentArtifactLookupTargetWire::Pointers {
+            artifact_dirs: vec![member.to_string_lossy().into_owned()],
+        },
+        include_hidden: true,
+        forced_unavailability: None,
+    };
+    let result = lookup_agent_artifacts(&index, &projects, query);
+    assert!(result.complete);
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].lookup_session.as_deref(), Some("lane"));
 }

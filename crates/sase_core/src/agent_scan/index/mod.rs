@@ -10,6 +10,7 @@ mod alias_history;
 mod candidates;
 mod checkpoint;
 mod dismissal;
+mod group_selection;
 mod index_wire;
 mod lineage;
 mod lookup;
@@ -64,6 +65,11 @@ pub use lookup::{
     AgentArtifactLookupHitWire, AgentArtifactLookupQueryWire,
     AgentArtifactLookupResultWire, AgentArtifactLookupTargetWire,
     AGENT_ARTIFACT_LOOKUP_FALLBACK_BUDGET,
+};
+
+pub use group_selection::{
+    select_agent_artifact_group, AgentArtifactGroupSelectionRequestWire,
+    AgentArtifactGroupSelectionResultWire,
 };
 
 pub use maintenance::{

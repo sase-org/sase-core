@@ -713,6 +713,41 @@ fn py_lookup_agent_artifacts<'py>(
     serialize_to_py(py, &result)
 }
 
+/// Select one complete session or clan generation from targeted identity hits.
+#[pyfunction]
+#[pyo3(name = "select_agent_artifact_group")]
+fn py_select_agent_artifact_group<'py>(
+    py: Python<'py>,
+    lookup: &Bound<'py, PyDict>,
+    selection: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let lookup_json = py_to_json_value(lookup)?;
+    let lookup_wire = serde_json::from_value::<
+        sase_core::agent_scan::AgentArtifactLookupResultWire,
+    >(lookup_json)
+    .map_err(|e| {
+        PyValueError::new_err(format!(
+            "lookup is not a valid AgentArtifactLookupResultWire dict: {e}"
+        ))
+    })?;
+    let selection_json = py_to_json_value(selection)?;
+    let selection_wire = serde_json::from_value::<
+        sase_core::agent_scan::AgentArtifactGroupSelectionRequestWire,
+    >(selection_json)
+    .map_err(|e| {
+        PyValueError::new_err(format!(
+            "selection is not a valid AgentArtifactGroupSelectionRequestWire dict: {e}"
+        ))
+    })?;
+    let result = py.allow_threads(|| {
+        sase_core::agent_scan::select_agent_artifact_group(
+            lookup_wire,
+            selection_wire,
+        )
+    });
+    serialize_to_py(py, &result)
+}
+
 #[pyfunction(name = "agent_output_variable_history_wire_schema_version")]
 fn py_agent_output_variable_history_wire_schema_version() -> u32 {
     AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION
@@ -1177,6 +1212,7 @@ pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_load_agent_artifact_records, m)?)?;
     m.add_function(wrap_pyfunction!(py_find_gate_turn_by_gate_id, m)?)?;
     m.add_function(wrap_pyfunction!(py_lookup_agent_artifacts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_select_agent_artifact_group, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_agent_output_variable_history_wire_schema_version,
         m

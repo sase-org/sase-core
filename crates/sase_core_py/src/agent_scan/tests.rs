@@ -777,6 +777,88 @@ fn lookup_agent_artifacts_binding_round_trips_name_hits() {
 }
 
 #[test]
+fn select_agent_artifact_group_binding_round_trips_session_generation() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        crate::sase_core_rs(py, &module).unwrap();
+        assert!(
+            module.getattr("select_agent_artifact_group").is_ok(),
+            "missing select_agent_artifact_group"
+        );
+
+        let names = vec!["lane".to_string()];
+        let hit = |path: &str, timestamp: &str, parent: Option<&str>| {
+            sase_core::agent_scan::AgentArtifactLookupHitWire {
+                artifact_dir: path.to_string(),
+                project_name: "proj".to_string(),
+                workflow_dir_name: "ace-run".to_string(),
+                timestamp: timestamp.to_string(),
+                agent_name: Some(format!("lane--{timestamp}")),
+                workflow_name: None,
+                agent_session: None,
+                lookup_session: Some("lane".to_string()),
+                agent_clan: None,
+                agent_clan_generation: None,
+                parent_timestamp: parent.map(str::to_string),
+                has_done_marker: false,
+                has_running_marker: false,
+                hidden: false,
+                match_kind: Some("session".to_string()),
+            }
+        };
+        let lookup = sase_core::agent_scan::AgentArtifactLookupResultWire {
+            schema_version: 38,
+            index_path: "/tmp/index.sqlite".to_string(),
+            projects_root: "/tmp/projects".to_string(),
+            query: sase_core::agent_scan::AgentArtifactLookupQueryWire {
+                target: sase_core::agent_scan::AgentArtifactLookupTargetWire::Session {
+                    names: names.clone(),
+                },
+                include_hidden: true,
+                forced_unavailability: None,
+            },
+            availability:
+                sase_core::agent_scan::AgentArtifactLookupAvailabilityWire::Ready,
+            complete: true,
+            source: "index".to_string(),
+            diagnostic: None,
+            hits: vec![
+                hit("/tmp/root", "100", None),
+                hit("/tmp/child", "101", Some("100")),
+            ],
+            truncated: false,
+            dirs_visited: 0,
+            records_decoded: 0,
+        };
+        let lookup_obj =
+            json_value_to_py(py, &serde_json::to_value(lookup).unwrap())
+                .unwrap();
+        let selection_obj = json_value_to_py(
+            py,
+            &json!({"kind": "session_latest", "names": ["lane"]}),
+        )
+        .unwrap();
+        let lookup_dict = lookup_obj
+            .bind(py)
+            .downcast::<pyo3::types::PyDict>()
+            .unwrap();
+        let selection_dict = selection_obj
+            .bind(py)
+            .downcast::<pyo3::types::PyDict>()
+            .unwrap();
+        let selected =
+            py_select_agent_artifact_group(py, lookup_dict, selection_dict)
+                .unwrap();
+        let value = py_to_json_value(selected.bind(py)).unwrap();
+        assert_eq!(value["complete"], json!(true));
+        assert_eq!(value["selected_name"], json!("lane"));
+        assert_eq!(value["root"]["artifact_dir"], json!("/tmp/root"));
+        assert_eq!(value["members"].as_array().unwrap().len(), 2);
+    });
+}
+
+#[test]
 fn artifact_index_reader_bindings_round_trip() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
