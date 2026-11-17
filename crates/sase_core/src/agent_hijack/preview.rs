@@ -16,6 +16,11 @@ const NOT_YET_AVAILABLE: &str = "not yet available";
 const EXPIRED_REASON: &str = "workspace already released";
 const RESOLVING_REASON: &str = "already being resolved";
 const UNKNOWN_MODEL_REASON: &str = "stalled model is unknown";
+const FOLLOWUP_UNAVAILABLE_REASON: &str =
+    "recorded follow-up is unavailable; cannot Continue or Escalate";
+const RERUN_UNAVAILABLE_REASON: &str = "re-run command is not yet available";
+const MONITOR_ESCALATE_FALLBACK: &str =
+    "no different model available; use Continue";
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AgentHijackPreviewError {
@@ -90,6 +95,20 @@ pub struct AgentHijackRecoveryPreviewRequestWire {
     pub edit_reason: Option<String>,
     #[serde(default)]
     pub dismiss_reason: Option<String>,
+    /// Occupying-turn scope. Empty or `llm` preserves the LLM preview.
+    #[serde(default)]
+    pub scope: String,
+    /// Whether a recorded follow-up can be launched (monitor Continue/Escalate).
+    #[serde(default)]
+    pub followup_available: bool,
+    #[serde(default)]
+    pub followup_reason: Option<String>,
+    #[serde(default)]
+    pub view_reason: Option<String>,
+    #[serde(default)]
+    pub shell_reason: Option<String>,
+    #[serde(default)]
+    pub rerun_reason: Option<String>,
 }
 
 /// Side-effect-free recovery preview.
@@ -122,8 +141,33 @@ pub fn hijack_recovery_preview(
     }
 
     let keep_reason = keep_work_disabled_reason(&request.state);
-    let escalate = escalate_action(request, keep_reason.as_deref());
-    let continue_action = continue_action(request, keep_reason.as_deref());
+    let actions = if is_monitor_scope(&request.scope) {
+        monitor_actions(request, keep_reason.as_deref())
+    } else {
+        llm_actions(request, keep_reason.as_deref())
+    };
+    let default_action = default_keep_work_action(&actions);
+
+    Ok(AgentHijackRecoveryPreviewWire {
+        schema_version: AGENT_HIJACK_RECOVERY_PREVIEW_WIRE_SCHEMA_VERSION,
+        hijack_id: request.hijack_id.clone(),
+        revision: request.revision,
+        header: request.header.clone(),
+        default_action,
+        actions,
+    })
+}
+
+fn is_monitor_scope(scope: &str) -> bool {
+    scope == HIJACK_SCOPE_MONITOR
+}
+
+fn llm_actions(
+    request: &AgentHijackRecoveryPreviewRequestWire,
+    keep_reason: Option<&str>,
+) -> Vec<AgentHijackRecoveryActionWire> {
+    let escalate = escalate_action(request, keep_reason, None);
+    let continue_action = continue_action(request, keep_reason);
     let instruct = instruct_action(&continue_action);
     let restart = unavailable_action(
         HIJACK_ACTION_RESTART,
@@ -140,19 +184,133 @@ pub fn hijack_recovery_preview(
         "Dismiss",
         request.dismiss_reason.as_deref(),
     );
+    vec![escalate, continue_action, instruct, restart, edit, dismiss]
+}
 
-    let actions =
-        vec![escalate, continue_action, instruct, restart, edit, dismiss];
-    let default_action = default_keep_work_action(&actions);
+fn monitor_actions(
+    request: &AgentHijackRecoveryPreviewRequestWire,
+    keep_reason: Option<&str>,
+) -> Vec<AgentHijackRecoveryActionWire> {
+    let followup_reason = monitor_followup_reason(request, keep_reason);
+    let escalate =
+        escalate_action(request, keep_reason, followup_reason.as_deref());
+    let continue_action = monitor_continue_action(
+        request,
+        keep_reason,
+        followup_reason.as_deref(),
+    );
+    let rerun = unavailable_action(
+        HIJACK_ACTION_RERUN,
+        "Re-run command",
+        request
+            .rerun_reason
+            .as_deref()
+            .or(keep_reason)
+            .or(Some(RERUN_UNAVAILABLE_REASON)),
+    );
+    let view = access_action(
+        HIJACK_ACTION_VIEW,
+        "View",
+        "open the recovery snapshot",
+        request.view_reason.as_deref(),
+        keep_reason.filter(|_| request.state == HIJACK_RESOLVING),
+    );
+    let shell = access_action(
+        HIJACK_ACTION_SHELL,
+        "Shell",
+        "open a shell in the held workspace",
+        request.shell_reason.as_deref(),
+        keep_reason.filter(|_| request.state == HIJACK_RESOLVING),
+    );
+    let dismiss = monitor_dismiss_action(request, keep_reason);
+    vec![escalate, continue_action, rerun, view, shell, dismiss]
+}
 
-    Ok(AgentHijackRecoveryPreviewWire {
-        schema_version: AGENT_HIJACK_RECOVERY_PREVIEW_WIRE_SCHEMA_VERSION,
-        hijack_id: request.hijack_id.clone(),
-        revision: request.revision,
-        header: request.header.clone(),
-        default_action,
-        actions,
-    })
+fn monitor_followup_reason(
+    request: &AgentHijackRecoveryPreviewRequestWire,
+    keep_reason: Option<&str>,
+) -> Option<String> {
+    if keep_reason.is_some() {
+        return None;
+    }
+    if request.followup_available {
+        return None;
+    }
+    Some(
+        request
+            .followup_reason
+            .clone()
+            .unwrap_or_else(|| FOLLOWUP_UNAVAILABLE_REASON.to_owned()),
+    )
+}
+
+fn monitor_continue_action(
+    request: &AgentHijackRecoveryPreviewRequestWire,
+    keep_reason: Option<&str>,
+    followup_reason: Option<&str>,
+) -> AgentHijackRecoveryActionWire {
+    if let Some(reason) = keep_reason {
+        return disabled(HIJACK_ACTION_CONTINUE, "Continue", reason, None);
+    }
+    if let Some(reason) = followup_reason {
+        return disabled(HIJACK_ACTION_CONTINUE, "Continue", reason, None);
+    }
+    continue_action(request, None)
+}
+
+fn monitor_dismiss_action(
+    request: &AgentHijackRecoveryPreviewRequestWire,
+    keep_reason: Option<&str>,
+) -> AgentHijackRecoveryActionWire {
+    match request.state.as_str() {
+        HIJACK_HELD | HIJACK_EXPIRED => {
+            if let Some(reason) = request.dismiss_reason.as_deref() {
+                return disabled(
+                    HIJACK_ACTION_DISMISS,
+                    "Dismiss",
+                    reason,
+                    None,
+                );
+            }
+            AgentHijackRecoveryActionWire {
+                action: HIJACK_ACTION_DISMISS.to_owned(),
+                available: true,
+                reason: None,
+                label: "Dismiss".to_owned(),
+                detail: "snapshot first, then workspace released".to_owned(),
+                target: None,
+            }
+        }
+        HIJACK_RESOLVING => {
+            disabled(HIJACK_ACTION_DISMISS, "Dismiss", RESOLVING_REASON, None)
+        }
+        _ => disabled(
+            HIJACK_ACTION_DISMISS,
+            "Dismiss",
+            keep_reason.unwrap_or("dismiss is not available"),
+            None,
+        ),
+    }
+}
+
+fn access_action(
+    action: &str,
+    label: &str,
+    detail: &str,
+    reason: Option<&str>,
+    resolving_reason: Option<&str>,
+) -> AgentHijackRecoveryActionWire {
+    if let Some(reason) = resolving_reason.or(reason) {
+        return disabled(action, label, reason, None);
+    }
+    AgentHijackRecoveryActionWire {
+        action: action.to_owned(),
+        available: true,
+        reason: None,
+        label: label.to_owned(),
+        detail: detail.to_owned(),
+        target: None,
+    }
 }
 
 fn keep_work_disabled_reason(state: &str) -> Option<String> {
@@ -167,8 +325,12 @@ fn keep_work_disabled_reason(state: &str) -> Option<String> {
 fn escalate_action(
     request: &AgentHijackRecoveryPreviewRequestWire,
     keep_reason: Option<&str>,
+    followup_reason: Option<&str>,
 ) -> AgentHijackRecoveryActionWire {
     if let Some(reason) = keep_reason {
+        return disabled(HIJACK_ACTION_ESCALATE, "Escalate", reason, None);
+    }
+    if let Some(reason) = followup_reason {
         return disabled(HIJACK_ACTION_ESCALATE, "Escalate", reason, None);
     }
     let Some(result) = request.escalate.as_ref() else {
@@ -182,9 +344,12 @@ fn escalate_action(
     let switch = result.kind.as_deref() == Some("switch");
     let label = if switch { "Switch" } else { "Escalate" };
     if !result.available {
-        let reason = result.reason.as_deref().unwrap_or(
-            "no different model available; use Continue or Instruct",
-        );
+        let fallback = if is_monitor_scope(&request.scope) {
+            MONITOR_ESCALATE_FALLBACK
+        } else {
+            "no different model available; use Continue or Instruct"
+        };
+        let reason = result.reason.as_deref().unwrap_or(fallback);
         return disabled(
             HIJACK_ACTION_ESCALATE,
             label,
@@ -455,5 +620,126 @@ mod tests {
         let mut req = request();
         req.schema_version = 2;
         assert!(hijack_recovery_preview(&req).is_err());
+    }
+
+    fn monitor_request() -> AgentHijackRecoveryPreviewRequestWire {
+        let mut req = request();
+        req.scope = HIJACK_SCOPE_MONITOR.to_owned();
+        req.followup_available = true;
+        req.continue_target = Some("claude/opus@high".to_owned());
+        req.rerun_reason = Some(RERUN_UNAVAILABLE_REASON.to_owned());
+        req
+    }
+
+    fn monitor_action_names(
+        preview: &AgentHijackRecoveryPreviewWire,
+    ) -> Vec<&str> {
+        preview
+            .actions
+            .iter()
+            .map(|item| item.action.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn monitor_preview_returns_truthful_rows_without_llm_actions() {
+        let preview = hijack_recovery_preview(&monitor_request()).unwrap();
+        assert_eq!(
+            monitor_action_names(&preview),
+            [
+                HIJACK_ACTION_ESCALATE,
+                HIJACK_ACTION_CONTINUE,
+                HIJACK_ACTION_RERUN,
+                HIJACK_ACTION_VIEW,
+                HIJACK_ACTION_SHELL,
+                HIJACK_ACTION_DISMISS,
+            ]
+        );
+        assert_eq!(
+            preview.default_action.as_deref(),
+            Some(HIJACK_ACTION_ESCALATE)
+        );
+        assert!(action(&preview, HIJACK_ACTION_CONTINUE).available);
+        assert_eq!(
+            action(&preview, HIJACK_ACTION_CONTINUE).target.as_deref(),
+            Some("claude/opus@high")
+        );
+        assert!(action(&preview, HIJACK_ACTION_ESCALATE).available);
+        assert!(action(&preview, HIJACK_ACTION_VIEW).available);
+        assert!(action(&preview, HIJACK_ACTION_SHELL).available);
+        assert!(action(&preview, HIJACK_ACTION_DISMISS).available);
+        assert!(!action(&preview, HIJACK_ACTION_RERUN).available);
+        assert_eq!(
+            action(&preview, HIJACK_ACTION_RERUN).reason.as_deref(),
+            Some(RERUN_UNAVAILABLE_REASON)
+        );
+        assert_eq!(
+            action(&preview, HIJACK_ACTION_RERUN).label,
+            "Re-run command"
+        );
+        assert!(preview
+            .actions
+            .iter()
+            .all(|item| item.action != HIJACK_ACTION_INSTRUCT
+                && item.action != HIJACK_ACTION_RESTART
+                && item.action != HIJACK_ACTION_EDIT));
+    }
+
+    #[test]
+    fn missing_monitor_followup_disables_continue_and_escalate() {
+        let mut req = monitor_request();
+        req.followup_available = false;
+        req.followup_reason = Some(
+            "recorded monitor follow-up is missing; cannot Continue or Escalate"
+                .to_owned(),
+        );
+        req.continue_target = None;
+        let preview = hijack_recovery_preview(&req).unwrap();
+        assert!(!action(&preview, HIJACK_ACTION_CONTINUE).available);
+        assert!(!action(&preview, HIJACK_ACTION_ESCALATE).available);
+        assert_eq!(
+            action(&preview, HIJACK_ACTION_CONTINUE).reason.as_deref(),
+            Some(
+                "recorded monitor follow-up is missing; cannot Continue or Escalate"
+            )
+        );
+        assert!(action(&preview, HIJACK_ACTION_VIEW).available);
+        assert!(action(&preview, HIJACK_ACTION_SHELL).available);
+        assert!(action(&preview, HIJACK_ACTION_DISMISS).available);
+        assert!(preview.default_action.is_none());
+    }
+
+    #[test]
+    fn empty_scope_preserves_llm_preview() {
+        let preview = hijack_recovery_preview(&request()).unwrap();
+        assert!(action(&preview, HIJACK_ACTION_INSTRUCT).available);
+        assert_eq!(
+            monitor_action_names(&preview),
+            [
+                HIJACK_ACTION_ESCALATE,
+                HIJACK_ACTION_CONTINUE,
+                HIJACK_ACTION_INSTRUCT,
+                HIJACK_ACTION_RESTART,
+                HIJACK_ACTION_EDIT,
+                HIJACK_ACTION_DISMISS,
+            ]
+        );
+    }
+
+    #[test]
+    fn monitor_expired_disables_keep_work_and_keeps_dismiss() {
+        let mut req = monitor_request();
+        req.state = HIJACK_EXPIRED.to_owned();
+        let preview = hijack_recovery_preview(&req).unwrap();
+        assert!(!action(&preview, HIJACK_ACTION_CONTINUE).available);
+        assert_eq!(
+            action(&preview, HIJACK_ACTION_CONTINUE).reason.as_deref(),
+            Some(EXPIRED_REASON)
+        );
+        assert!(action(&preview, HIJACK_ACTION_DISMISS).available);
+        assert_eq!(
+            action(&preview, HIJACK_ACTION_VIEW).reason.as_deref(),
+            None
+        );
     }
 }

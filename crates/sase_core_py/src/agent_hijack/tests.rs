@@ -327,6 +327,45 @@ fn preview_and_reconcile_bindings_round_trip() {
         assert_eq!(value["default_action"], json!("escalate"));
         assert_eq!(value["actions"][0]["target"], json!("claude/opus@xhigh"));
 
+        let monitor_request = dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "hijack_id": "h-mon",
+                "revision": 2,
+                "state": "held",
+                "scope": "monitor",
+                "followup_available": true,
+                "continue_target": "codex/gpt-5.4@high",
+                "header": {"agent_name": "lane--mon-3", "workspace_num": 4},
+                "escalate": {
+                    "schema_version": 1,
+                    "available": true,
+                    "kind": "escalate",
+                    "from_rung": "@large",
+                    "to_rung": "@xlarge",
+                    "concrete": "codex/gpt-5.4@xhigh",
+                },
+                "rerun_reason": "re-run command is not yet available",
+            }),
+        );
+        let monitor_preview =
+            py_hijack_recovery_preview(py, &monitor_request).unwrap();
+        let monitor_value = py_to_json_value(monitor_preview.bind(py)).unwrap();
+        let actions = monitor_value["actions"].as_array().unwrap();
+        let names: Vec<&str> = actions
+            .iter()
+            .map(|item| item["action"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["escalate", "continue", "rerun", "view", "shell", "dismiss"]
+        );
+        assert_eq!(monitor_value["default_action"], json!("escalate"));
+        assert_eq!(actions[1]["target"], json!("codex/gpt-5.4@high"));
+        assert_eq!(actions[2]["available"], json!(false));
+        assert_eq!(actions[5]["available"], json!(true));
+
         let record = dict(
             py,
             json!({

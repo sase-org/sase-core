@@ -80,6 +80,8 @@ pub const HIJACK_ACTION_INSTRUCT: &str = "instruct";
 pub const HIJACK_ACTION_RESTART: &str = "restart";
 pub const HIJACK_ACTION_EDIT: &str = "edit";
 pub const HIJACK_ACTION_VIEW: &str = "view";
+pub const HIJACK_ACTION_SHELL: &str = "shell";
+pub const HIJACK_ACTION_RERUN: &str = "rerun";
 pub const HIJACK_ACTION_DISMISS: &str = "dismiss";
 
 /// Durable successor launch stage persisted on a resolving record.
