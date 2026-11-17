@@ -748,6 +748,26 @@ fn py_select_agent_artifact_group<'py>(
     serialize_to_py(py, &result)
 }
 
+/// Apply named-agent eligibility and ranking to target-selective hits.
+#[pyfunction]
+#[pyo3(name = "select_named_agent")]
+fn py_select_named_agent<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = serde_json::from_value::<
+        sase_core::agent_scan::NamedAgentSelectionRequestWire,
+    >(py_to_json_value(request.as_any())?)
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid NamedAgentSelectionRequestWire dict: {error}"
+        ))
+    })?;
+    let result =
+        py.allow_threads(|| sase_core::agent_scan::select_named_agent(request));
+    serialize_to_py(py, &result)
+}
+
 #[pyfunction(name = "agent_output_variable_history_wire_schema_version")]
 fn py_agent_output_variable_history_wire_schema_version() -> u32 {
     AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION
@@ -1213,6 +1233,7 @@ pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_find_gate_turn_by_gate_id, m)?)?;
     m.add_function(wrap_pyfunction!(py_lookup_agent_artifacts, m)?)?;
     m.add_function(wrap_pyfunction!(py_select_agent_artifact_group, m)?)?;
+    m.add_function(wrap_pyfunction!(py_select_named_agent, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_agent_output_variable_history_wire_schema_version,
         m

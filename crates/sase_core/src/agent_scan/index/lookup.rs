@@ -477,19 +477,13 @@ fn recover(
 ) -> AgentArtifactLookupResultWire {
     let recovered = bounded_lookup_recovery(projects_root, &query);
     super::record_lookup_records_decoded(recovered.records_decoded);
-    let group_query = matches!(
-        &query.target,
-        AgentArtifactLookupTargetWire::Session { .. }
-            | AgentArtifactLookupTargetWire::Clan { .. }
-            | AgentArtifactLookupTargetWire::Pointers { .. }
-    );
     let mut result = empty_result(index_path, projects_root, query);
     result.availability = availability;
-    // A group can only use bounded recovery when the source traversal proves
-    // exhaustion without an IO error or budget truncation. Other identity
-    // consumers retain their incomplete recovery contract. An absent projects
-    // root is a complete empty result for every target.
-    result.complete = (group_query && recovered.exhausted)
+    // Any identity consumer can use bounded recovery when the source traversal
+    // proves exhaustion without an IO error or budget truncation. A small
+    // exhausted source is authoritative; a large or unreadable source remains
+    // incomplete. An absent projects root is a complete empty result.
+    result.complete = recovered.exhausted
         || projects_root.try_exists().is_ok_and(|exists| !exists);
     result.source = if recovered.hits.is_empty() && recovered.dirs_visited == 0
     {

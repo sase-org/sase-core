@@ -1020,6 +1020,7 @@ use sase_core::agent_archive::store::ArchiveStoreError;
 use sase_core::agent_archive::store::{
     delete_bundle_summaries_for_suffixes as core_delete_bundle_summaries_for_suffixes,
     index_signature as core_dismissed_bundle_index_signature,
+    lookup_named_dismissed_bundle as core_lookup_named_dismissed_bundle,
     query_bundle_paths_by_suffixes as core_query_bundle_paths_by_suffixes,
     query_summaries as core_query_dismissed_bundle_summaries,
     query_summary_identities as core_query_summary_identities,
@@ -1099,6 +1100,24 @@ fn py_query_dismissed_bundle_summaries<'py>(
             core_query_dismissed_bundle_summaries(&PathBuf::from(root), request)
         })
         .map_err(store_error_to_pyerr)?;
+    serialize_to_py(py, &result)
+}
+
+/// Resolve one exact agent/workflow name through the bounded bundle lookup.
+#[pyfunction]
+#[pyo3(
+    name = "lookup_named_dismissed_bundle",
+    signature = (root, name, budget = 200)
+)]
+fn py_lookup_named_dismissed_bundle<'py>(
+    py: Python<'py>,
+    root: &str,
+    name: &str,
+    budget: u64,
+) -> PyResult<PyObject> {
+    let result = py.allow_threads(|| {
+        core_lookup_named_dismissed_bundle(&PathBuf::from(root), name, budget)
+    });
     serialize_to_py(py, &result)
 }
 
@@ -1229,6 +1248,7 @@ pub(crate) fn register_agent_custody(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_query_dismissed_bundle_summaries, m)?)?;
+    m.add_function(wrap_pyfunction!(py_lookup_named_dismissed_bundle, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_query_dismissed_bundle_paths_by_suffixes,
         m

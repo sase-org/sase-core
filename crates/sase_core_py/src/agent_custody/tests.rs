@@ -798,6 +798,7 @@ fn dismissed_bundle_index_bindings_are_exported_and_round_trip() {
             "upsert_dismissed_bundle_summary",
             "delete_dismissed_bundle_summaries_for_suffixes",
             "query_dismissed_bundle_summaries",
+            "lookup_named_dismissed_bundle",
             "query_dismissed_bundle_paths_by_suffixes",
             "set_dismissed_bundle_visibility_for_suffixes",
             "query_dismissed_bundle_summary_identities",
@@ -821,6 +822,7 @@ fn dismissed_bundle_index_bindings_are_exported_and_round_trip() {
             "cl_name": "cl_a",
             "agent_type": "run",
             "agent_name": "agent-1",
+            "workflow_name": "workflow-1",
             "source_username": "alice",
             "source_machine": "athena",
             "source_run_id": "run-1",
@@ -858,6 +860,16 @@ fn dismissed_bundle_index_bindings_are_exported_and_round_trip() {
         let rows = py_to_json_value(rows.bind(py)).unwrap();
         assert_eq!(rows.as_array().unwrap().len(), 1);
         assert_eq!(rows[0]["agent_id"], json!("alice.athena@run-1"));
+
+        let named =
+            py_lookup_named_dismissed_bundle(py, &root, "workflow-1", 200)
+                .unwrap();
+        let named = py_to_json_value(named.bind(py)).unwrap();
+        assert_eq!(named["availability"], json!("ready"));
+        assert_eq!(named["complete"], json!(true));
+        assert_eq!(named["source"], json!("index"));
+        assert_eq!(named["winner"]["bundle_path"], json!(bundle_path));
+        assert_eq!(named["winner"]["artifacts_dir"], json!(temp.path()));
 
         let paths = py_query_dismissed_bundle_paths_by_suffixes(
             py,

@@ -17,6 +17,7 @@ mod lookup;
 mod lookup_identity;
 mod lookup_recovery;
 mod maintenance;
+mod named_selection;
 mod output_variables;
 mod query;
 mod readers;
@@ -79,6 +80,11 @@ pub use maintenance::{
     rebuild_agent_artifact_index,
     terminalize_stale_active_agent_artifact_index_rows,
     upsert_agent_artifact_index_row,
+};
+
+pub use named_selection::{
+    select_named_agent, NamedAgentObservationWire, NamedAgentSelectionHitWire,
+    NamedAgentSelectionRequestWire, NamedAgentSelectionResultWire,
 };
 
 pub use output_variables::query_agent_output_variable_history;

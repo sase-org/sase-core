@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use chrono::NaiveDateTime;
 use rusqlite::{params_from_iter, Connection, OpenFlags};
@@ -22,6 +22,8 @@ use crate::agent_archive::wire::{
     DismissedBundleIndexIdentityWire, DismissedBundleIndexProgressWire,
     DismissedBundleIndexQueryWire, DismissedBundleIndexRebuildReportWire,
     DismissedBundleIndexSignatureWire, DismissedBundleSummaryWire,
+    NamedDismissedBundleAvailabilityWire, NamedDismissedBundleHitWire,
+    NamedDismissedBundleLookupWire,
 };
 use crate::agent_archive::{
     validate_agent_archive_key, validate_agent_archive_visibility,
@@ -31,6 +33,10 @@ use crate::agent_archive::{
 
 pub const ARCHIVE_STORE_SCHEMA_VERSION: i64 = 4;
 pub const ARCHIVE_STORE_INDEX_FILENAME: &str = "index.sqlite";
+
+const NAMED_BUNDLE_LOOKUP_BUDGET: u64 = 200;
+const NAMED_BUNDLE_MAX_PAYLOAD_BYTES: u64 = 4 * 1024 * 1024;
+const NAMED_BUNDLE_LOOKUP_BUSY_TIMEOUT: Duration = Duration::from_millis(200);
 
 const META_DDL: &str = "
             CREATE TABLE IF NOT EXISTS dismissed_bundle_index_meta (
@@ -1190,6 +1196,480 @@ fn identity_filters_are_vacuous(
     let names_empty = request.agent_names.as_ref().is_none_or(Vec::is_empty);
     let runs_empty = request.source_run_ids.as_ref().is_none_or(Vec::is_empty);
     either_present && names_empty && runs_empty
+}
+
+/// Read one dismissed bundle by exact agent or source-workflow name.
+///
+/// The indexed path is read-only and uses a short lock timeout. Missing,
+/// stale, corrupt, or busy indexes use the shared-size bounded filesystem
+/// recovery; its completeness is carried to the caller.
+pub fn lookup_named_dismissed_bundle(
+    root: &Path,
+    name: &str,
+    budget: u64,
+) -> NamedDismissedBundleLookupWire {
+    let budget = budget.clamp(1, NAMED_BUNDLE_LOOKUP_BUDGET);
+    match open_named_lookup_store(root) {
+        Ok(conn) => match query_named_bundle_index(&conn, root, name, budget) {
+            Ok(result) => result,
+            Err(error) => {
+                let availability = named_lookup_error_availability(&error);
+                bounded_named_bundle_fallback(
+                    root,
+                    name,
+                    budget,
+                    availability,
+                    Some(error),
+                )
+            }
+        },
+        Err((availability, diagnostic)) => bounded_named_bundle_fallback(
+            root,
+            name,
+            budget,
+            availability,
+            diagnostic,
+        ),
+    }
+}
+
+fn open_named_lookup_store(
+    root: &Path,
+) -> Result<Connection, (NamedDismissedBundleAvailabilityWire, Option<String>)>
+{
+    let path = index_path_for_root(root);
+    if !path.is_file() {
+        return Err((NamedDismissedBundleAvailabilityWire::Missing, None));
+    }
+    let conn =
+        Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| {
+                let diagnostic = error.to_string();
+                (
+                    named_lookup_error_availability(&diagnostic),
+                    Some(diagnostic),
+                )
+            })?;
+    conn.busy_timeout(NAMED_BUNDLE_LOOKUP_BUSY_TIMEOUT)
+        .map_err(|error| {
+            let diagnostic = error.to_string();
+            (
+                named_lookup_error_availability(&diagnostic),
+                Some(diagnostic),
+            )
+        })?;
+    let version_row = conn.query_row(
+        "SELECT value FROM dismissed_bundle_index_meta \
+         WHERE key = 'schema_version'",
+        [],
+        |row| row.get::<_, String>(0),
+    );
+    let version = match version_row {
+        Ok(version) => schema_version_from_row(Some(version)),
+        Err(error) => {
+            let diagnostic = error.to_string();
+            let availability = if diagnostic.contains("no such table")
+                || diagnostic.contains("no such column")
+            {
+                NamedDismissedBundleAvailabilityWire::StaleSchema
+            } else {
+                named_lookup_error_availability(&diagnostic)
+            };
+            return Err((availability, Some(diagnostic)));
+        }
+    };
+    if version != Some(ARCHIVE_STORE_SCHEMA_VERSION) {
+        let availability = match version {
+            Some(version) if version > ARCHIVE_STORE_SCHEMA_VERSION => {
+                NamedDismissedBundleAvailabilityWire::NewerSchema
+            }
+            _ => NamedDismissedBundleAvailabilityWire::StaleSchema,
+        };
+        return Err((
+            availability,
+            Some(format!("schema_version={version:?}")),
+        ));
+    }
+    match schema_compatible(&conn) {
+        Ok(true) => match named_lookup_columns_compatible(&conn) {
+            Ok(true) => Ok(conn),
+            Ok(false) => Err((
+                NamedDismissedBundleAvailabilityWire::StaleSchema,
+                Some("named bundle lookup columns are missing".to_string()),
+            )),
+            Err(error) => {
+                let diagnostic = error.to_string();
+                Err((
+                    named_lookup_error_availability(&diagnostic),
+                    Some(diagnostic),
+                ))
+            }
+        },
+        Ok(false) => Err((
+            NamedDismissedBundleAvailabilityWire::StaleSchema,
+            Some("required bundle lookup columns are missing".to_string()),
+        )),
+        Err(error) => {
+            let diagnostic = error.to_string();
+            Err((
+                named_lookup_error_availability(&diagnostic),
+                Some(diagnostic),
+            ))
+        }
+    }
+}
+
+fn named_lookup_columns_compatible(
+    conn: &Connection,
+) -> Result<bool, ArchiveStoreError> {
+    let summary_columns = table_columns(conn, "dismissed_bundle_summaries")?;
+    Ok(["agent_name", "workflow_name"]
+        .iter()
+        .all(|column| summary_columns.contains(*column)))
+}
+
+fn query_named_bundle_index(
+    conn: &Connection,
+    root: &Path,
+    name: &str,
+    budget: u64,
+) -> Result<NamedDismissedBundleLookupWire, String> {
+    let mut result = named_bundle_lookup_result(
+        NamedDismissedBundleAvailabilityWire::Ready,
+        "index",
+        None,
+    );
+    result.complete = true;
+    let sql = "SELECT bundle_path, raw_suffix, filename \
+               FROM dismissed_bundle_summaries \
+               WHERE agent_name = ?1 OR workflow_name = ?1 \
+               ORDER BY raw_suffix DESC, filename DESC LIMIT ?2";
+    let mut statement = conn.prepare(sql).map_err(|error| error.to_string())?;
+    let limit = budget.saturating_add(1).min(i64::MAX as u64) as i64;
+    let mut rows = statement
+        .query(rusqlite::params![name, limit])
+        .map_err(|error| error.to_string())?;
+    while let Some(row) = rows.next().map_err(|error| error.to_string())? {
+        if result.file_probes >= budget {
+            result.complete = false;
+            result.truncated = true;
+            result.diagnostic = Some(format!(
+                "named bundle index recovery exceeded the {budget}-candidate budget"
+            ));
+            break;
+        }
+        let bundle_path =
+            row.get::<_, String>(0).map_err(|error| error.to_string())?;
+        let raw_suffix =
+            row.get::<_, String>(1).map_err(|error| error.to_string())?;
+        let filename =
+            row.get::<_, String>(2).map_err(|error| error.to_string())?;
+        result.file_probes += 1;
+        match validate_named_bundle(
+            root,
+            Path::new(&bundle_path),
+            name,
+            &raw_suffix,
+            &filename,
+            &mut result,
+        ) {
+            Ok(Some(winner)) => {
+                result.winner = Some(winner);
+                return Ok(result);
+            }
+            Ok(None) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(result)
+}
+
+fn validate_named_bundle(
+    root: &Path,
+    path: &Path,
+    name: &str,
+    indexed_raw_suffix: &str,
+    indexed_filename: &str,
+    result: &mut NamedDismissedBundleLookupWire,
+) -> Result<Option<NamedDismissedBundleHitWire>, String> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let canonical_root =
+        root.canonicalize().map_err(|error| error.to_string())?;
+    let canonical_path = match path.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    if !canonical_path.starts_with(&canonical_root) {
+        return Ok(None);
+    }
+    let metadata = match fs::metadata(&canonical_path) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    if metadata.len() > NAMED_BUNDLE_MAX_PAYLOAD_BYTES {
+        return Err(
+            "matching bundle payload exceeds the bounded read size".to_string()
+        );
+    }
+    let bytes = match fs::read(&canonical_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    result.payloads_decoded += 1;
+    let bundle = match serde_json::from_slice::<JsonValue>(&bytes) {
+        Ok(bundle) if bundle.is_object() => bundle,
+        _ => return Ok(None),
+    };
+    let matches_name = bundle.get("agent_name").and_then(JsonValue::as_str)
+        == Some(name)
+        || bundle.get("workflow_name").and_then(JsonValue::as_str)
+            == Some(name);
+    if !matches_name {
+        return Ok(None);
+    }
+    let filename = canonical_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if filename != indexed_filename {
+        return Ok(None);
+    }
+    let payload_suffix = bundle
+        .get("raw_suffix")
+        .and_then(JsonValue::as_str)
+        .or_else(|| canonical_path.file_stem().and_then(|value| value.to_str()))
+        .unwrap_or_default();
+    if payload_suffix != indexed_raw_suffix {
+        return Ok(None);
+    }
+    let artifacts_dir = bundle
+        .get("artifacts_dir")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            canonical_path
+                .parent()
+                .map(|value| value.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default();
+    Ok(Some(NamedDismissedBundleHitWire {
+        bundle_path: canonical_path.to_string_lossy().into_owned(),
+        artifacts_dir,
+        raw_suffix: payload_suffix.to_string(),
+        filename: filename.to_string(),
+    }))
+}
+
+fn bounded_named_bundle_fallback(
+    root: &Path,
+    name: &str,
+    budget: u64,
+    availability: NamedDismissedBundleAvailabilityWire,
+    diagnostic: Option<String>,
+) -> NamedDismissedBundleLookupWire {
+    let mut result =
+        named_bundle_lookup_result(availability, "fallback", diagnostic);
+    let canonical_root = match root.canonicalize() {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            result.complete = true;
+            result.source = "none".to_string();
+            return result;
+        }
+        Err(error) => {
+            result.diagnostic = Some(error.to_string());
+            return result;
+        }
+    };
+    let mut pending = vec![canonical_root];
+    let mut best_key: Option<(String, String)> = None;
+    let mut best_hit: Option<NamedDismissedBundleHitWire> = None;
+    let mut uncertain = false;
+
+    while let Some(directory) = pending.pop() {
+        result.directories_visited += 1;
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                uncertain = true;
+                result.diagnostic = Some(error.to_string());
+                continue;
+            }
+        };
+        for entry in entries {
+            if result.entries_visited >= budget {
+                result.truncated = true;
+                result.diagnostic = Some(format!(
+                    "named bundle recovery exceeded the {budget}-entry budget"
+                ));
+                return result;
+            }
+            result.entries_visited += 1;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    uncertain = true;
+                    result.diagnostic = Some(error.to_string());
+                    continue;
+                }
+            };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) => {
+                    uncertain = true;
+                    result.diagnostic = Some(error.to_string());
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if file_type.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !file_type.is_file()
+                || path.extension().and_then(|value| value.to_str())
+                    != Some("json")
+            {
+                continue;
+            }
+            if result.file_probes >= budget {
+                result.truncated = true;
+                result.diagnostic = Some(format!(
+                    "named bundle recovery exceeded the {budget}-file budget"
+                ));
+                return result;
+            }
+            result.file_probes += 1;
+            let metadata = match fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    uncertain = true;
+                    result.diagnostic = Some(error.to_string());
+                    continue;
+                }
+            };
+            if metadata.len() > NAMED_BUNDLE_MAX_PAYLOAD_BYTES {
+                result.truncated = true;
+                result.diagnostic = Some(
+                    "bundle recovery encountered a payload above the bounded read size"
+                        .to_string(),
+                );
+                return result;
+            }
+            let bytes = match fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    uncertain = true;
+                    result.diagnostic = Some(error.to_string());
+                    continue;
+                }
+            };
+            result.payloads_decoded += 1;
+            let bundle = match serde_json::from_slice::<JsonValue>(&bytes) {
+                Ok(bundle) if bundle.is_object() => bundle,
+                _ => continue,
+            };
+            let matches_name =
+                bundle.get("agent_name").and_then(JsonValue::as_str)
+                    == Some(name)
+                    || bundle.get("workflow_name").and_then(JsonValue::as_str)
+                        == Some(name);
+            if !matches_name {
+                continue;
+            }
+            let filename = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let raw_suffix = bundle
+                .get("raw_suffix")
+                .and_then(JsonValue::as_str)
+                .or_else(|| path.file_stem().and_then(|value| value.to_str()))
+                .unwrap_or_default()
+                .to_string();
+            let key = (raw_suffix.clone(), filename.clone());
+            if best_key.as_ref().is_some_and(|current| key <= *current) {
+                continue;
+            }
+            let artifacts_dir = bundle
+                .get("artifacts_dir")
+                .and_then(JsonValue::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    path.parent()
+                        .map(|value| value.to_string_lossy().into_owned())
+                })
+                .unwrap_or_default();
+            best_key = Some(key);
+            best_hit = Some(NamedDismissedBundleHitWire {
+                bundle_path: path.to_string_lossy().into_owned(),
+                artifacts_dir,
+                raw_suffix,
+                filename,
+            });
+        }
+    }
+
+    result.complete = !uncertain;
+    if result.complete {
+        result.winner = best_hit;
+    }
+    result
+}
+
+fn named_bundle_lookup_result(
+    availability: NamedDismissedBundleAvailabilityWire,
+    source: &str,
+    diagnostic: Option<String>,
+) -> NamedDismissedBundleLookupWire {
+    NamedDismissedBundleLookupWire {
+        availability,
+        complete: false,
+        source: source.to_string(),
+        diagnostic,
+        winner: None,
+        truncated: false,
+        directories_visited: 0,
+        entries_visited: 0,
+        file_probes: 0,
+        payloads_decoded: 0,
+    }
+}
+
+fn named_lookup_error_availability(
+    diagnostic: &str,
+) -> NamedDismissedBundleAvailabilityWire {
+    let lower = diagnostic.to_ascii_lowercase();
+    if lower.contains("database is locked")
+        || lower.contains("database table is locked")
+        || lower.contains("busy")
+    {
+        NamedDismissedBundleAvailabilityWire::Busy
+    } else if lower.contains("not a database")
+        || lower.contains("malformed")
+        || lower.contains("corrupt")
+    {
+        NamedDismissedBundleAvailabilityWire::Corrupt
+    } else {
+        NamedDismissedBundleAvailabilityWire::StaleSchema
+    }
 }
 
 fn nonempty_sorted(values: Option<&Vec<String>>) -> Option<Vec<String>> {

@@ -777,6 +777,67 @@ fn lookup_agent_artifacts_binding_round_trips_name_hits() {
 }
 
 #[test]
+fn select_named_agent_binding_preserves_later_exact_spelling() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        crate::sase_core_rs(py, &module).unwrap();
+        assert!(module.getattr("select_named_agent").is_ok());
+
+        let request = pyo3::types::PyDict::new_bound(py);
+        request
+            .set_item("names", vec!["foo", "alice.athena.foo"])
+            .unwrap();
+        request.set_item("only_done", false).unwrap();
+        request.set_item("include_dead", false).unwrap();
+        let hits = json_value_to_py(
+            py,
+            &json!([{
+                "artifact_dir": "/projects/p/ace-run/2026111701",
+                "project_name": "p",
+                "workflow_dir_name": "ace-run",
+                "timestamp": "2026111701",
+                "agent_name": "alice.athena.foo",
+                "workflow_name": "foo",
+                "parent_timestamp": "root",
+                "has_done_marker": false,
+                "has_running_marker": true,
+                "hidden": false
+            }]),
+        )
+        .unwrap();
+        request.set_item("hits", hits.bind(py)).unwrap();
+        let observations = json_value_to_py(
+            py,
+            &json!([{
+                "artifact_dir": "/projects/p/ace-run/2026111701",
+                "process_alive": true
+            }]),
+        )
+        .unwrap();
+        request
+            .set_item("observations", observations.bind(py))
+            .unwrap();
+
+        let selected = py_select_named_agent(py, &request).unwrap();
+        let value = py_to_json_value(selected.bind(py)).unwrap();
+        assert_eq!(
+            value["selected"]["requested_name"],
+            json!("alice.athena.foo")
+        );
+        assert_eq!(
+            value["selected"]["hit"]["agent_name"],
+            json!("alice.athena.foo")
+        );
+        assert!(value["selections"][0].is_null());
+        assert_eq!(
+            value["selections"][1]["requested_name"],
+            json!("alice.athena.foo")
+        );
+    });
+}
+
+#[test]
 fn select_agent_artifact_group_binding_round_trips_session_generation() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

@@ -240,6 +240,45 @@ pub struct DismissedBundleIndexQueryWire {
     pub offset: Option<i64>,
 }
 
+/// Availability of the read-only name lookup in the dismissed-bundle store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NamedDismissedBundleAvailabilityWire {
+    Ready,
+    Missing,
+    StaleSchema,
+    NewerSchema,
+    Corrupt,
+    Busy,
+}
+
+/// One validated bundle candidate returned by a named lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedDismissedBundleHitWire {
+    pub bundle_path: String,
+    pub artifacts_dir: String,
+    pub raw_suffix: String,
+    pub filename: String,
+}
+
+/// Result of a bounded named dismissed-bundle lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedDismissedBundleLookupWire {
+    pub availability: NamedDismissedBundleAvailabilityWire,
+    pub complete: bool,
+    pub source: String,
+    #[serde(default)]
+    pub diagnostic: Option<String>,
+    #[serde(default)]
+    pub winner: Option<NamedDismissedBundleHitWire>,
+    #[serde(default)]
+    pub truncated: bool,
+    pub directories_visited: u64,
+    pub entries_visited: u64,
+    pub file_probes: u64,
+    pub payloads_decoded: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DismissedBundleIndexSignatureWire {
     pub schema_version: i64,

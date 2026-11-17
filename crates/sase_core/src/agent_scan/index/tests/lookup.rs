@@ -369,7 +369,7 @@ fn session_lookup_query_plan_uses_lookup_session_index() {
 }
 
 #[test]
-fn missing_index_recovers_from_source_and_stays_incomplete() {
+fn exhausted_small_name_recovery_is_complete() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
     write_named(
@@ -386,7 +386,7 @@ fn missing_index_recovers_from_source_and_stays_incomplete() {
         result.availability,
         AgentArtifactLookupAvailabilityWire::Missing
     );
-    assert!(!result.complete);
+    assert!(result.complete);
     assert_eq!(result.source, "fallback");
     assert_eq!(result.hits.len(), 1);
     assert_eq!(result.hits[0].agent_name.as_deref(), Some("from-source"));
@@ -495,7 +495,8 @@ fn newer_schema_is_unavailable_without_writes() {
         result.availability,
         AgentArtifactLookupAvailabilityWire::NewerSchema
     );
-    assert!(!result.complete);
+    assert!(result.complete);
+    assert!(!result.truncated);
     let version: String = Connection::open(&index)
         .unwrap()
         .query_row(
@@ -527,7 +528,8 @@ fn corrupt_index_falls_back_without_quarantine() {
         result.availability,
         AgentArtifactLookupAvailabilityWire::Corrupt
     );
-    assert!(!result.complete);
+    assert!(result.complete);
+    assert!(!result.truncated);
     assert_eq!(result.source, "fallback");
     assert_eq!(result.hits.len(), 1);
     let leftover: Vec<_> = fs::read_dir(tmp.path())
@@ -557,7 +559,8 @@ fn busy_index_falls_back_without_mutating() {
         result.availability,
         AgentArtifactLookupAvailabilityWire::Busy
     );
-    assert!(!result.complete);
+    assert!(result.complete);
+    assert!(!result.truncated);
     assert_eq!(result.source, "fallback");
     assert_eq!(result.hits.len(), 1);
 }
@@ -630,8 +633,7 @@ fn lookup_session_column_is_present_after_open() {
 }
 
 #[test]
-fn fallback_bounds_unrelated_directory_entries_and_does_not_claim_complete_group(
-) {
+fn fallback_bounds_unrelated_directory_entries_and_reports_truncation() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
     fs::create_dir_all(&projects).unwrap();

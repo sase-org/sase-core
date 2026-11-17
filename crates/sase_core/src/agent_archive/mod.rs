@@ -42,11 +42,12 @@ use crate::agent_identity::AgentOwnerIdentity;
 
 pub use store::{
     delete_bundle_summaries_for_suffixes, index_signature,
-    open_archive_store_read_only, open_archive_store_writable,
-    open_existing_store_writable, query_bundle_paths_by_suffixes,
-    query_summaries, query_summary_identities, rebuild_index, rebuild_progress,
-    set_visibility_for_suffixes, upsert_bundle_summary, ArchiveStoreError,
-    ARCHIVE_STORE_INDEX_FILENAME, ARCHIVE_STORE_SCHEMA_VERSION,
+    lookup_named_dismissed_bundle, open_archive_store_read_only,
+    open_archive_store_writable, open_existing_store_writable,
+    query_bundle_paths_by_suffixes, query_summaries, query_summary_identities,
+    rebuild_index, rebuild_progress, set_visibility_for_suffixes,
+    upsert_bundle_summary, ArchiveStoreError, ARCHIVE_STORE_INDEX_FILENAME,
+    ARCHIVE_STORE_SCHEMA_VERSION,
 };
 pub use wire::{
     AgentArchiveCapabilitiesWire, AgentArchiveCapabilityFactsWire,
@@ -60,7 +61,9 @@ pub use wire::{
     AgentArchiveVisibilityWire, DismissedBundleIndexIdentityWire,
     DismissedBundleIndexProgressWire, DismissedBundleIndexQueryWire,
     DismissedBundleIndexRebuildReportWire, DismissedBundleIndexSignatureWire,
-    DismissedBundleSummaryWire, AGENT_ARCHIVE_WIRE_SCHEMA_VERSION,
+    DismissedBundleSummaryWire, NamedDismissedBundleAvailabilityWire,
+    NamedDismissedBundleHitWire, NamedDismissedBundleLookupWire,
+    AGENT_ARCHIVE_WIRE_SCHEMA_VERSION,
 };
 
 const MAX_SOURCE_RUN_ID_BYTES: usize = 128;

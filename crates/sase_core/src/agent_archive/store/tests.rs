@@ -28,6 +28,19 @@ fn sample_bundle(suffix: &str) -> JsonValue {
     })
 }
 
+fn named_bundle(
+    suffix: &str,
+    agent_name: &str,
+    workflow_name: Option<&str>,
+) -> JsonValue {
+    let mut bundle = sample_bundle(suffix);
+    bundle["agent_name"] = json!(agent_name);
+    if let Some(workflow_name) = workflow_name {
+        bundle["workflow_name"] = json!(workflow_name);
+    }
+    bundle
+}
+
 #[test]
 fn store_upsert_query_signature_and_delete_round_trip() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -132,6 +145,247 @@ fn store_upsert_query_signature_and_delete_round_trip() {
     let signature = index_signature(root).unwrap();
     assert_eq!(signature.row_count, 1);
     delete_bundle_summaries_for_suffixes(root, &[]).unwrap();
+}
+
+#[test]
+fn named_bundle_lookup_selects_exact_name_or_workflow_across_visibility() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    let first = write_bundle(
+        root,
+        "2026111601.json",
+        &named_bundle("2026111601", "agent-a", Some("lane-a")),
+    );
+    let second = write_bundle(
+        root,
+        "2026111602.json",
+        &named_bundle("2026111602", "agent-a", Some("lane-a")),
+    );
+    upsert_bundle_summary(root, &first, &read_bundle(&first).unwrap()).unwrap();
+    upsert_bundle_summary(root, &second, &read_bundle(&second).unwrap())
+        .unwrap();
+    set_visibility_for_suffixes(
+        root,
+        &["2026111602".to_string()],
+        "visible",
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let by_agent = lookup_named_dismissed_bundle(root, "agent-a", 200);
+    let by_workflow = lookup_named_dismissed_bundle(root, "lane-a", 200);
+    for result in [by_agent, by_workflow] {
+        assert_eq!(
+            result.availability,
+            NamedDismissedBundleAvailabilityWire::Ready
+        );
+        assert!(result.complete);
+        assert_eq!(result.source, "index");
+        assert_eq!(
+            result.winner.unwrap().bundle_path,
+            second.to_string_lossy()
+        );
+    }
+}
+
+#[test]
+fn named_bundle_lookup_skips_deleted_newest_index_row() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    let older = write_bundle(
+        root,
+        "2026111601.json",
+        &named_bundle("2026111601", "agent-a", None),
+    );
+    let newer = write_bundle(
+        root,
+        "2026111602.json",
+        &named_bundle("2026111602", "agent-a", None),
+    );
+    upsert_bundle_summary(root, &older, &read_bundle(&older).unwrap()).unwrap();
+    upsert_bundle_summary(root, &newer, &read_bundle(&newer).unwrap()).unwrap();
+    fs::remove_file(newer).unwrap();
+
+    let result = lookup_named_dismissed_bundle(root, "agent-a", 200);
+    assert!(result.complete);
+    assert_eq!(result.winner.unwrap().bundle_path, older.to_string_lossy());
+}
+
+#[test]
+fn missing_index_recovery_visits_nested_child_bundles_and_skips_malformed_json()
+{
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    let nested = root.join("202611").join("child").join("deep");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(root.join("broken.json"), "not json").unwrap();
+    let child = write_bundle(
+        &nested,
+        "2026111601.json",
+        &named_bundle("2026111601", "child-agent", None),
+    );
+
+    let result = lookup_named_dismissed_bundle(root, "child-agent", 200);
+    assert_eq!(
+        result.availability,
+        NamedDismissedBundleAvailabilityWire::Missing
+    );
+    assert!(result.complete);
+    assert_eq!(result.source, "fallback");
+    assert_eq!(result.winner.unwrap().bundle_path, child.to_string_lossy());
+    assert!(result.directories_visited >= 3);
+    assert_eq!(result.payloads_decoded, 2);
+}
+
+#[test]
+fn missing_index_recovery_bounds_non_json_directory_entries() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    for index in 0..500 {
+        fs::write(root.join(format!("other-{index}")), "irrelevant").unwrap();
+    }
+
+    let result = lookup_named_dismissed_bundle(root, "missing", 1);
+    assert!(!result.complete);
+    assert!(result.truncated);
+    assert!(result.entries_visited <= 1);
+    assert_eq!(result.file_probes, 0);
+    assert!(result.winner.is_none());
+}
+
+#[test]
+fn named_bundle_lookup_returns_complete_fallback_after_explicit_maintenance() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    let path = write_bundle(
+        root,
+        "2026111601.json",
+        &named_bundle("2026111601", "agent-a", None),
+    );
+
+    let recovered = lookup_named_dismissed_bundle(root, "agent-a", 200);
+    assert!(recovered.complete);
+    assert_eq!(recovered.source, "fallback");
+    assert_eq!(
+        recovered.winner.as_ref().unwrap().bundle_path,
+        path.to_string_lossy()
+    );
+
+    upsert_bundle_summary(root, &path, &read_bundle(&path).unwrap()).unwrap();
+    let indexed = lookup_named_dismissed_bundle(root, "agent-a", 200);
+    assert!(indexed.complete);
+    assert_eq!(indexed.source, "index");
+    assert_eq!(indexed.winner.unwrap().bundle_path, path.to_string_lossy());
+}
+
+#[test]
+fn named_bundle_lookup_busy_timeout_is_bounded_and_busy_index_recovers() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    let path = write_bundle(
+        root,
+        "2026111601.json",
+        &named_bundle("2026111601", "agent-a", None),
+    );
+    upsert_bundle_summary(root, &path, &read_bundle(&path).unwrap()).unwrap();
+
+    let conn = open_named_lookup_store(root).unwrap();
+    let timeout: i64 = conn
+        .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(timeout, NAMED_BUNDLE_LOOKUP_BUSY_TIMEOUT.as_millis() as i64);
+    drop(conn);
+
+    let lock = Connection::open(index_path_for_root(root)).unwrap();
+    lock.execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+        .unwrap();
+    let result = lookup_named_dismissed_bundle(root, "agent-a", 200);
+    lock.execute_batch("ROLLBACK;").unwrap();
+    assert_eq!(
+        result.availability,
+        NamedDismissedBundleAvailabilityWire::Busy
+    );
+    assert!(result.complete);
+    assert_eq!(result.source, "fallback");
+    assert_eq!(result.winner.unwrap().bundle_path, path.to_string_lossy());
+}
+
+#[test]
+fn unavailable_named_bundle_indexes_keep_classification_when_recovery_exhausts()
+{
+    let cases = [
+        ("missing", NamedDismissedBundleAvailabilityWire::Missing),
+        ("stale", NamedDismissedBundleAvailabilityWire::StaleSchema),
+        ("newer", NamedDismissedBundleAvailabilityWire::NewerSchema),
+        ("corrupt", NamedDismissedBundleAvailabilityWire::Corrupt),
+    ];
+    for (case, expected) in cases {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let path = write_bundle(
+            root,
+            "2026111601.json",
+            &named_bundle("2026111601", "agent-a", None),
+        );
+        if case == "stale" || case == "newer" {
+            upsert_bundle_summary(root, &path, &read_bundle(&path).unwrap())
+                .unwrap();
+            let conn = Connection::open(index_path_for_root(root)).unwrap();
+            let version = if case == "stale" { "3" } else { "5" };
+            conn.execute(
+                "UPDATE dismissed_bundle_index_meta SET value = ?1 \
+                 WHERE key = 'schema_version'",
+                [version],
+            )
+            .unwrap();
+        } else if case == "corrupt" {
+            fs::write(index_path_for_root(root), b"not a sqlite database")
+                .unwrap();
+        }
+
+        let result = lookup_named_dismissed_bundle(root, "agent-a", 200);
+        assert_eq!(result.availability, expected, "case={case}");
+        assert!(result.complete, "case={case}");
+        assert_eq!(result.source, "fallback", "case={case}");
+        assert_eq!(
+            result.winner.unwrap().bundle_path,
+            path.to_string_lossy(),
+            "case={case}"
+        );
+    }
+}
+
+#[test]
+fn missing_name_columns_only_disable_named_lookup() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    let path = write_bundle(
+        root,
+        "2026111601.json",
+        &named_bundle("2026111601", "agent-a", None),
+    );
+    upsert_bundle_summary(root, &path, &read_bundle(&path).unwrap()).unwrap();
+    let conn = Connection::open(index_path_for_root(root)).unwrap();
+    conn.execute_batch(
+        "DROP INDEX idx_dismissed_bundle_agent_name;
+         DROP INDEX idx_dismissed_bundle_workflow_name;
+         ALTER TABLE dismissed_bundle_summaries DROP COLUMN agent_name;
+         ALTER TABLE dismissed_bundle_summaries DROP COLUMN workflow_name;",
+    )
+    .unwrap();
+    drop(conn);
+
+    assert!(query_summaries(root, hidden_query()).unwrap().is_some());
+    let result = lookup_named_dismissed_bundle(root, "agent-a", 200);
+    assert_eq!(
+        result.availability,
+        NamedDismissedBundleAvailabilityWire::StaleSchema
+    );
+    assert!(result.complete);
+    assert_eq!(result.source, "fallback");
+    assert_eq!(result.winner.unwrap().bundle_path, path.to_string_lossy());
 }
 
 fn upsert_custom_bundle(
