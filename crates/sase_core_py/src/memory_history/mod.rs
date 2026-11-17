@@ -180,6 +180,55 @@ fn py_memory_history_mark_reviewed<'py>(
     serialize_to_py(py, &out)
 }
 
+/// Query memory-read audit rows for ordered member selectors.
+#[pyfunction]
+#[pyo3(name = "memory_audit_query")]
+fn py_memory_audit_query<'py>(
+    py: Python<'py>,
+    log_path: &str,
+    query: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let query = serde_json::from_value::<
+        sase_core::audit_query::MemoryAuditQueryWire,
+    >(py_to_json_value(query.as_any())?)
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "query is not a valid MemoryAuditQueryWire dict: {error}"
+        ))
+    })?;
+    let log_path = std::path::PathBuf::from(log_path);
+    let result = py
+        .allow_threads(|| {
+            sase_core::audit_query::query_memory_audit(&log_path, &query)
+        })
+        .map_err(|error| match error {
+            sase_core::audit_query::AuditQueryError::Io(error)
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                PyOSError::new_err(error.to_string())
+            }
+            sase_core::audit_query::AuditQueryError::Io(error) => {
+                PyOSError::new_err(error.to_string())
+            }
+            sase_core::audit_query::AuditQueryError::InvalidWire(message) => {
+                PyValueError::new_err(message)
+            }
+        })?;
+    let value = serde_json::to_value(result).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal memory audit query serialize error: {error}"
+        ))
+    })?;
+    serialize_to_py(py, &value)
+}
+
+/// Return the memory-audit query wire schema version.
+#[pyfunction]
+#[pyo3(name = "memory_audit_query_wire_schema_version")]
+fn py_memory_audit_query_wire_schema_version() -> u64 {
+    sase_core::audit_query::MEMORY_AUDIT_QUERY_WIRE_SCHEMA_VERSION
+}
+
 pub(crate) fn register_memory_history(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(
         py_memory_history_wire_schema_version,
@@ -194,6 +243,11 @@ pub(crate) fn register_memory_history(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_memory_history_feed, m)?)?;
     m.add_function(wrap_pyfunction!(py_memory_history_review_state, m)?)?;
     m.add_function(wrap_pyfunction!(py_memory_history_mark_reviewed, m)?)?;
+    m.add_function(wrap_pyfunction!(py_memory_audit_query, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_memory_audit_query_wire_schema_version,
+        m
+    )?)?;
     Ok(())
 }
 

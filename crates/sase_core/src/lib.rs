@@ -44,6 +44,7 @@ pub mod artifact_link;
 pub mod artifact_link_eligibility;
 pub mod artifact_object_store;
 pub mod artifact_ref;
+pub mod audit_query;
 pub mod autonomy;
 pub mod axe_chop;
 pub mod axe_overrun;
