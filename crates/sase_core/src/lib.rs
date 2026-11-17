@@ -122,6 +122,7 @@ pub mod project_stats;
 pub mod project_tag;
 pub mod prompt_archive;
 pub mod prompt_artifact;
+pub mod prompt_command_substitution;
 pub mod prompt_history_filter;
 pub mod prompt_literals;
 pub mod prompt_prediction;

@@ -61,6 +61,7 @@ mod procs;
 mod project_onboarding;
 mod project_stats;
 mod project_tag;
+mod prompt_command_substitution;
 mod prompt_prediction;
 mod prose_diff;
 mod provider_policy;
@@ -133,6 +134,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sudo::register_sudo(m)?;
     continuation::register_continuation(m)?;
     telemetry::register_telemetry(m)?;
+    prompt_command_substitution::register_prompt_command_substitution(m)?;
     prompt_prediction::register_prompt_prediction(m)?;
     instruction_manifest::register_instruction_manifest(m)?;
     instruction_readout::register_instruction_readout(m)?;
