@@ -41,6 +41,25 @@ fn py_scan_agent_artifacts<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Walk an agent-artifact tree and return compact list rows.
+#[pyfunction]
+#[pyo3(name = "scan_agent_artifacts_list", signature = (projects_root, options = None))]
+fn py_scan_agent_artifacts_list<'py>(
+    py: Python<'py>,
+    projects_root: &str,
+    options: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let opts = match options {
+        Some(dict) => agent_scan_options_from_pydict(dict)?,
+        None => AgentArtifactScanOptionsWire::default(),
+    };
+    let root = PathBuf::from(projects_root);
+    let snapshot = py.allow_threads(|| {
+        sase_core::agent_scan::scan_agent_artifacts_list(&root, opts)
+    });
+    serialize_to_py(py, &snapshot)
+}
+
 /// Scan exact agent artifact directories and return scanner-shaped records.
 #[pyfunction]
 #[pyo3(
@@ -69,6 +88,64 @@ fn py_scan_agent_artifact_dirs<'py>(
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+/// Scan exact artifact directories and return compact list rows.
+#[pyfunction]
+#[pyo3(
+    name = "scan_agent_artifact_dirs_list",
+    signature = (projects_root, artifact_dirs, options = None)
+)]
+fn py_scan_agent_artifact_dirs_list<'py>(
+    py: Python<'py>,
+    projects_root: &str,
+    artifact_dirs: Vec<String>,
+    options: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let opts = match options {
+        Some(dict) => agent_scan_options_from_pydict(dict)?,
+        None => AgentArtifactScanOptionsWire::default(),
+    };
+    let root = PathBuf::from(projects_root);
+    let artifacts = artifact_dirs
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    let snapshot = py.allow_threads(|| {
+        sase_core::agent_scan::scan_agent_artifact_dirs_list(
+            &root, &artifacts, opts,
+        )
+    });
+    serialize_to_py(py, &snapshot)
+}
+
+/// Scan one artifact directory and return a compact list row.
+#[pyfunction]
+#[pyo3(
+    name = "scan_agent_artifact_dir_list",
+    signature = (projects_root, artifact_dir, options = None)
+)]
+fn py_scan_agent_artifact_dir_list<'py>(
+    py: Python<'py>,
+    projects_root: &str,
+    artifact_dir: &str,
+    options: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Option<PyObject>> {
+    let opts = match options {
+        Some(dict) => agent_scan_options_from_pydict(dict)?,
+        None => AgentArtifactScanOptionsWire::default(),
+    };
+    let root = PathBuf::from(projects_root);
+    let artifact = PathBuf::from(artifact_dir);
+    let record = py.allow_threads(|| {
+        sase_core::agent_scan::scan_agent_artifact_dir_list(
+            &root, &artifact, &opts,
+        )
+    });
+    match record {
+        Some(record) => Ok(Some(serialize_to_py(py, &record)?)),
+        None => Ok(None),
+    }
 }
 
 /// Return wall-clock union runtime for clan/agent-session members.
@@ -637,6 +714,53 @@ fn py_query_agent_artifact_index<'py>(
     serialize_to_py(py, &snapshot)
 }
 
+/// Return the compact agent-list wire schema version.
+#[pyfunction(name = "agent_artifact_list_wire_schema_version")]
+fn py_agent_artifact_list_wire_schema_version() -> u32 {
+    sase_core::agent_scan::AGENT_ARTIFACT_LIST_WIRE_SCHEMA_VERSION
+}
+
+/// Query the artifact index and return compact list rows.
+#[pyfunction]
+#[pyo3(
+    name = "query_agent_artifact_index_list",
+    signature = (index_path, projects_root, query = None, options = None)
+)]
+fn py_query_agent_artifact_index_list<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    projects_root: &str,
+    query: Option<&Bound<'py, PyDict>>,
+    options: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let query_wire = match query {
+        Some(dict) => {
+            let json = py_to_json_value(dict)?;
+            serde_json::from_value::<AgentArtifactIndexQueryWire>(json)
+                .map_err(|e| {
+                    PyValueError::new_err(format!(
+                        "query is not a valid AgentArtifactIndexQueryWire dict: {e}"
+                    ))
+                })?
+        }
+        None => AgentArtifactIndexQueryWire::default(),
+    };
+    let opts = match options {
+        Some(dict) => agent_scan_options_from_pydict(dict)?,
+        None => AgentArtifactScanOptionsWire::default(),
+    };
+    let index = PathBuf::from(index_path);
+    let root = PathBuf::from(projects_root);
+    let snapshot = py
+        .allow_threads(|| {
+            sase_core::agent_scan::query_agent_artifact_index_list(
+                &index, &root, query_wire, opts,
+            )
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    serialize_to_py(py, &snapshot)
+}
+
 /// Load full scanner-shaped artifact records by artifact dir.
 #[pyfunction]
 #[pyo3(name = "load_agent_artifact_records")]
@@ -1183,7 +1307,10 @@ fn py_agent_stats_query_activity<'py>(
 
 pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_scan_agent_artifacts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_scan_agent_artifacts_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_agent_artifact_dirs, m)?)?;
+    m.add_function(wrap_pyfunction!(py_scan_agent_artifact_dirs_list, m)?)?;
+    m.add_function(wrap_pyfunction!(py_scan_agent_artifact_dir_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_aggregate_clan_runtime, m)?)?;
     m.add_function(wrap_pyfunction!(py_summarize_agent_models, m)?)?;
     m.add_function(wrap_pyfunction!(py_canonical_agent_artifact_path, m)?)?;
@@ -1229,6 +1356,11 @@ pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_agent_artifact_index_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_vacuum_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_agent_artifact_list_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_query_agent_artifact_index_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_load_agent_artifact_records, m)?)?;
     m.add_function(wrap_pyfunction!(py_find_gate_turn_by_gate_id, m)?)?;
     m.add_function(wrap_pyfunction!(py_lookup_agent_artifacts, m)?)?;

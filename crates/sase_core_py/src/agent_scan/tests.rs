@@ -1015,3 +1015,114 @@ fn artifact_index_reader_bindings_round_trip() {
         assert_eq!(aliases, json!([]));
     });
 }
+
+#[test]
+fn compact_list_bindings_round_trip_scan_and_index() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        let dir = root
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20261117120000");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("agent_meta.json"),
+            r#"{"name":"compact","cl_name":"cl_compact","linked_repos":[{"name":"core"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("done.json"),
+            r#"{"outcome":"completed","name":"compact","traceback":"nope","step_output":{"_raw":"raw","meta_keep":"yes"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(py_agent_artifact_list_wire_schema_version(), 1);
+
+        let snapshot = py_scan_agent_artifacts_list(
+            py,
+            root.to_string_lossy().as_ref(),
+            None,
+        )
+        .unwrap();
+        let snapshot = py_to_json_value(snapshot.bind(py)).unwrap();
+        assert_eq!(snapshot["schema_version"], json!(1));
+        let record = &snapshot["records"][0];
+        assert_eq!(record["record_shape"], json!("compact"));
+        assert_eq!(record["meta"]["name"], json!("compact"));
+        assert!(record.get("agent_meta").is_none());
+        assert!(record["meta"].get("linked_repos").is_none());
+        assert!(record["done"].get("traceback").is_none());
+        assert_eq!(
+            record["done"]["step_output"]["meta"]["meta_keep"],
+            json!("yes")
+        );
+        assert!(record["done"]["step_output"].get("_raw").is_none());
+
+        let dirs = py_scan_agent_artifact_dirs_list(
+            py,
+            root.to_string_lossy().as_ref(),
+            vec![dir.to_string_lossy().into_owned()],
+            None,
+        )
+        .unwrap();
+        let dirs = py_to_json_value(dirs.bind(py)).unwrap();
+        assert_eq!(dirs["records"], snapshot["records"]);
+
+        let one = py_scan_agent_artifact_dir_list(
+            py,
+            root.to_string_lossy().as_ref(),
+            dir.to_string_lossy().as_ref(),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let one = py_to_json_value(one.bind(py)).unwrap();
+        assert_eq!(one, snapshot["records"][0]);
+
+        let missing = py_scan_agent_artifact_dir_list(
+            py,
+            root.to_string_lossy().as_ref(),
+            root.join("missing").to_string_lossy().as_ref(),
+            None,
+        )
+        .unwrap();
+        assert!(missing.is_none());
+
+        let index = temp.path().join("agent_artifact_index.sqlite");
+        sase_core::rebuild_agent_artifact_index(
+            &index,
+            &root,
+            sase_core::AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let query_obj = json_value_to_py(
+            py,
+            &json!({
+                "include_active": true,
+                "include_recent_completed": true,
+                "include_full_history": true,
+                "freshness": "cached",
+                "record_shape": "list"
+            }),
+        )
+        .unwrap();
+        let query = query_obj.bind(py).downcast::<PyDict>().unwrap();
+        let indexed = py_query_agent_artifact_index_list(
+            py,
+            index.to_string_lossy().as_ref(),
+            root.to_string_lossy().as_ref(),
+            Some(query),
+            None,
+        )
+        .unwrap();
+        let indexed = py_to_json_value(indexed.bind(py)).unwrap();
+        assert_eq!(indexed["schema_version"], json!(1));
+        assert_eq!(indexed["records"][0]["record_shape"], json!("compact"));
+        assert_eq!(indexed["records"][0]["meta"]["name"], json!("compact"));
+        assert!(indexed["records"][0].get("agent_meta").is_none());
+        assert!(indexed["records"][0]["done"].get("traceback").is_none());
+    });
+}
