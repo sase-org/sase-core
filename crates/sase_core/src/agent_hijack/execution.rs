@@ -91,6 +91,8 @@ pub struct AgentHijackEffectiveTargetRequestWire {
     pub prompt_model: Option<String>,
     #[serde(default)]
     pub predecessor_provider: Option<String>,
+    #[serde(default)]
+    pub scope: String,
 }
 
 /// Effective-target result with the pinned concrete target.
@@ -346,7 +348,10 @@ pub fn hijack_recovery_effective_target(
         ));
     }
     let action = request.action.trim().to_owned();
-    if !matches!(action.as_str(), "escalate" | "continue" | "instruct") {
+    if !matches!(
+        action.as_str(),
+        "escalate" | "continue" | "instruct" | "rerun"
+    ) {
         return Err(AgentHijackExecutionError::UnsupportedAction(
             request.action.clone(),
         ));
@@ -387,6 +392,20 @@ pub fn hijack_recovery_effective_target(
                     )
                 })?;
             require_concrete_target(pinned, "escalate preview")?
+        }
+        "rerun" => {
+            if request.scope.trim() != "monitor" {
+                return Err(AgentHijackExecutionError::UnsupportedAction(
+                    "Rerun is available only for monitor records".to_owned(),
+                ));
+            }
+            reject_override_options(
+                &action,
+                request.explicit_model_override.as_deref(),
+                request.prompt_model.as_deref(),
+                "Rerun takes no model override or replacement prompt",
+            )?;
+            stalled.clone()
         }
         _ => {
             if let Some(override_value) =

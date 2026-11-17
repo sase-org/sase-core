@@ -18,6 +18,7 @@ const RESOLVING_REASON: &str = "already being resolved";
 const UNKNOWN_MODEL_REASON: &str = "stalled model is unknown";
 const FOLLOWUP_UNAVAILABLE_REASON: &str =
     "recorded follow-up is unavailable; cannot Continue or Escalate";
+#[allow(dead_code)]
 const RERUN_UNAVAILABLE_REASON: &str = "re-run command is not yet available";
 const MONITOR_ESCALATE_FALLBACK: &str =
     "no different model available; use Continue";
@@ -199,15 +200,7 @@ fn monitor_actions(
         keep_reason,
         followup_reason.as_deref(),
     );
-    let rerun = unavailable_action(
-        HIJACK_ACTION_RERUN,
-        "Re-run command",
-        request
-            .rerun_reason
-            .as_deref()
-            .or(keep_reason)
-            .or(Some(RERUN_UNAVAILABLE_REASON)),
-    );
+    let rerun = rerun_action(request, keep_reason);
     let view = access_action(
         HIJACK_ACTION_VIEW,
         "View",
@@ -256,6 +249,26 @@ fn monitor_continue_action(
         return disabled(HIJACK_ACTION_CONTINUE, "Continue", reason, None);
     }
     continue_action(request, None)
+}
+
+fn rerun_action(
+    request: &AgentHijackRecoveryPreviewRequestWire,
+    keep_reason: Option<&str>,
+) -> AgentHijackRecoveryActionWire {
+    if let Some(reason) = keep_reason {
+        return disabled(HIJACK_ACTION_RERUN, "Re-run command", reason, None);
+    }
+    if let Some(reason) = request.rerun_reason.as_deref() {
+        return disabled(HIJACK_ACTION_RERUN, "Re-run command", reason, None);
+    }
+    AgentHijackRecoveryActionWire {
+        action: HIJACK_ACTION_RERUN.to_owned(),
+        available: true,
+        reason: None,
+        label: "Re-run command".to_owned(),
+        detail: "same command in the held workspace".to_owned(),
+        target: None,
+    }
 }
 
 fn monitor_dismiss_action(
@@ -469,6 +482,7 @@ fn default_keep_work_action(
         HIJACK_ACTION_ESCALATE,
         HIJACK_ACTION_CONTINUE,
         HIJACK_ACTION_INSTRUCT,
+        HIJACK_ACTION_RERUN,
     ] {
         if actions
             .iter()
