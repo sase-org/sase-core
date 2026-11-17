@@ -303,6 +303,7 @@ fn held_resolution_actions_settle_once_and_view_returns_to_hold() {
         HIJACK_ACTION_ESCALATE,
         HIJACK_ACTION_CONTINUE,
         HIJACK_ACTION_INSTRUCT,
+        HIJACK_ACTION_RERUN,
         HIJACK_ACTION_RESTART,
         HIJACK_ACTION_EDIT,
         HIJACK_ACTION_DISMISS,
@@ -376,6 +377,7 @@ fn expired_records_allow_release_and_view_but_not_keep_work() {
         HIJACK_ACTION_ESCALATE,
         HIJACK_ACTION_CONTINUE,
         HIJACK_ACTION_INSTRUCT,
+        HIJACK_ACTION_RERUN,
     ] {
         let mut begin = event(HIJACK_EVENT_BEGIN_RESOLUTION);
         begin.action = Some(action.to_string());
