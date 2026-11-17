@@ -1,5 +1,6 @@
 //! Tolerant artifact-file index reading and cross-frontend query semantics.
 
+mod association;
 mod context;
 mod economics;
 mod retention;
@@ -7,7 +8,8 @@ mod trash;
 mod vcs;
 
 use std::collections::BTreeSet;
-use std::fs;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
@@ -19,6 +21,11 @@ use crate::artifact_consumption::{
 };
 use crate::plan::search::{current_date, parse_since_date_bound};
 
+pub use association::{
+    query_artifact_file_associations, ArtifactFileAssociationQueryResultWire,
+    ArtifactFileAssociationQueryWire, ArtifactFileSourceIdentityWire,
+    ARTIFACT_FILE_ASSOCIATION_QUERY_WIRE_SCHEMA_VERSION,
+};
 pub use context::{
     query_artifact_context, ArtifactContextEntryWire,
     ArtifactContextProducerGroupWire,
@@ -141,38 +148,39 @@ struct ArtifactIndexEnvelope {
 ///
 /// Empty and malformed lines, unsupported envelope versions, and rows missing
 /// required `id`/`path` fields are skipped. Unknown JSON fields are ignored by
-/// serde.
+/// serde. The file is scanned line by line so the full document is not held
+/// as one string.
 pub fn read_artifact_file_index(
     index_path: &Path,
 ) -> Result<Vec<ArtifactFileWire>, std::io::Error> {
-    let content = match fs::read_to_string(index_path) {
-        Ok(content) => content,
+    let file = match File::open(index_path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(Vec::new());
         }
         Err(error) => return Err(error),
     };
-    Ok(parse_artifact_file_index(&content))
+    let mut rows = Vec::new();
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if let Some(row) = parse_artifact_file_index_line(line.trim()) {
+            rows.push(row);
+        }
+    }
+    Ok(rows)
 }
 
-fn parse_artifact_file_index(content: &str) -> Vec<ArtifactFileWire> {
-    content
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            let envelope =
-                serde_json::from_str::<ArtifactIndexEnvelope>(line).ok()?;
-            if !artifact_file_index_schema_supported(envelope.schema_version) {
-                return None;
-            }
-            let mut artifact = envelope.artifact;
-            artifact.schema_version = envelope.schema_version;
-            artifact_file_row_is_admissible(&artifact).then_some(artifact)
-        })
-        .collect()
+fn parse_artifact_file_index_line(line: &str) -> Option<ArtifactFileWire> {
+    if line.is_empty() {
+        return None;
+    }
+    let envelope = serde_json::from_str::<ArtifactIndexEnvelope>(line).ok()?;
+    if !artifact_file_index_schema_supported(envelope.schema_version) {
+        return None;
+    }
+    let mut artifact = envelope.artifact;
+    artifact.schema_version = envelope.schema_version;
+    artifact_file_row_is_admissible(&artifact).then_some(artifact)
 }
 
 /// Return whether an artifact-file row is backed by version-control content.
@@ -315,7 +323,7 @@ fn query_artifact_files_at(
     Ok(rows)
 }
 
-fn artifact_file_index_schema_supported(version: u64) -> bool {
+pub(crate) fn artifact_file_index_schema_supported(version: u64) -> bool {
     (ARTIFACT_FILE_INDEX_MIN_SCHEMA_VERSION
         ..=ARTIFACT_FILE_INDEX_MAX_SCHEMA_VERSION)
         .contains(&version)

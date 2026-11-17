@@ -130,6 +130,54 @@ fn artifact_file_query_binding_returns_full_rows_and_handshake() {
 }
 
 #[test]
+fn artifact_file_association_query_binding_returns_matches_and_handshake() {
+    pyo3::prepare_freethreaded_python();
+    let temp = tempfile::tempdir().unwrap();
+    let index = temp.path().join("index.jsonl");
+    fs::write(
+        &index,
+        concat!(
+            "{\"schema_version\":2,\"artifact\":{\"id\":\"keep\",",
+            "\"label\":\"Keep\",\"kind\":\"markdown\",\"path\":\"/keep.md\",",
+            "\"agent_artifacts_dir\":\"/runs/target\",\"project\":\"sase\",",
+            "\"raw_timestamp\":\"20260507123456\"}}\n",
+            "{\"schema_version\":2,\"artifact\":{\"id\":\"other\",",
+            "\"label\":\"Other\",\"kind\":\"markdown\",\"path\":\"/other.md\",",
+            "\"agent_artifacts_dir\":\"/runs/other\",\"project\":\"other\",",
+            "\"raw_timestamp\":\"20260101000000\"}}\n"
+        ),
+    )
+    .unwrap();
+
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        assert!(module.getattr("artifact_file_association_query").is_ok());
+        assert!(module
+            .getattr("artifact_file_association_query_wire_schema_version")
+            .is_ok());
+
+        let query = PyDict::new_bound(py);
+        query
+            .set_item("agent_artifacts_dir", "/runs/target")
+            .unwrap();
+        query.set_item("project", "sase").unwrap();
+        query.set_item("raw_timestamp", "20260507123456").unwrap();
+        let result = py_artifact_file_association_query(
+            py,
+            index.to_str().unwrap(),
+            &query,
+        )
+        .unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(value["rows"][0]["id"], json!("keep"));
+        assert_eq!(value["source"]["missing"], json!(false));
+        assert_eq!(py_artifact_file_association_query_wire_schema_version(), 1);
+    });
+}
+
+#[test]
 fn artifact_context_query_binding_returns_projected_rows_and_handshake() {
     pyo3::prepare_freethreaded_python();
     let temp = tempfile::tempdir().unwrap();

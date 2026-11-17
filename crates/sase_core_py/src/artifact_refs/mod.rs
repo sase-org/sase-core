@@ -879,6 +879,44 @@ fn py_artifact_file_query_wire_schema_version() -> u64 {
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION
 }
 
+/// Query listing-compatible artifact-file rows for one agent association.
+#[pyfunction]
+#[pyo3(name = "artifact_file_association_query")]
+fn py_artifact_file_association_query<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    query: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let query = serde_json::from_value::<ArtifactFileAssociationQueryWire>(
+        py_to_json_value(query.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "query is not a valid ArtifactFileAssociationQueryWire dict: \
+                 {error}"
+        ))
+    })?;
+    let index_path = PathBuf::from(index_path);
+    let result = py
+        .allow_threads(|| {
+            core_query_artifact_file_associations(&index_path, &query)
+        })
+        .map_err(artifact_file_query_error_to_pyerr)?;
+    let value = serde_json::to_value(result).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal artifact-file association query serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the artifact-file association query result wire version.
+#[pyfunction]
+#[pyo3(name = "artifact_file_association_query_wire_schema_version")]
+fn py_artifact_file_association_query_wire_schema_version() -> u64 {
+    ARTIFACT_FILE_ASSOCIATION_QUERY_WIRE_SCHEMA_VERSION
+}
+
 /// Batch-query non-chat artifact metadata for waited producers' exact
 /// artifact directories.
 ///
@@ -1346,6 +1384,11 @@ pub(crate) fn register_artifact_refs(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_files_query, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_file_association_query, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_file_association_query_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_file_materialize_vcs, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_file_store_economics, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_file_retention_plan, m)?)?;
