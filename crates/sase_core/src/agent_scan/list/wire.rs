@@ -32,8 +32,8 @@ pub enum AgentArtifactListShapeWire {
 
 /// List-time facts extracted from a step or done output map.
 ///
-/// Only `meta_*` keys and `diff_path` survive. `_raw`, `_data`, and other
-/// detail payloads are dropped.
+/// Only bounded, typed list/action facts and `diff_path` survive. Commit
+/// collections and arbitrary nested output payloads stay in selected detail.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentArtifactListOutputFactsWire {
     #[serde(default)]

@@ -17,6 +17,7 @@ use super::wire::{
     AGENT_ARTIFACT_LIST_WIRE_SCHEMA_VERSION,
 };
 use crate::agent_auto_restart::AgentRecoveryWire;
+use crate::agent_runtime::is_real_monitor_member_record;
 use crate::agent_scan::wire::{
     AgentArtifactRecordWire, AgentArtifactScanWire, AgentMetaWire,
     AgentSessionTurnWire, DoneMarkerWire, FinalizerStatusSummaryWire,
@@ -64,7 +65,10 @@ pub fn project_record_for_list_compact(
         timestamp: record.timestamp.clone(),
         has_done_marker: record.has_done_marker,
         record_shape: AgentArtifactListShapeWire::Compact,
-        meta: record.agent_meta.as_ref().map(project_meta),
+        meta: record
+            .agent_meta
+            .as_ref()
+            .map(|meta| project_meta(record, meta)),
         done: record.done.as_ref().map(project_done),
         running: record.running.as_ref().map(project_running),
         waiting: record.waiting.as_ref().map(project_waiting),
@@ -85,11 +89,14 @@ pub fn project_record_for_list_compact(
     }
 }
 
-fn project_meta(meta: &AgentMetaWire) -> AgentArtifactListMetaWire {
+fn project_meta(
+    record: &AgentArtifactRecordWire,
+    meta: &AgentMetaWire,
+) -> AgentArtifactListMetaWire {
     AgentArtifactListMetaWire {
         name: meta.name.clone(),
         cl_name: meta.cl_name.clone(),
-        process_identity: meta.process_identity.clone(),
+        process_identity: compact_process_identity(record, meta),
         runner_claim_owner_key: meta.runner_claim_owner_key.clone(),
         pid: meta.pid,
         model: meta.model.clone(),
@@ -166,6 +173,25 @@ fn project_meta(meta: &AgentMetaWire) -> AgentArtifactListMetaWire {
         auto_restart: meta.auto_restart.clone(),
         agent_session_turn: meta.agent_session_turn.as_ref().map(project_turn),
     }
+}
+
+/// Keep the full loader's monitor PID-reuse precedence in the compact row.
+/// A supervisor stamp is authoritative when present, including an empty
+/// string; a missing stamp falls back to the ordinary metadata identity.
+fn compact_process_identity(
+    record: &AgentArtifactRecordWire,
+    meta: &AgentMetaWire,
+) -> Option<String> {
+    if !is_real_monitor_member_record(record) {
+        return meta.process_identity.clone();
+    }
+
+    meta.agent_session_turn
+        .as_ref()
+        .filter(|turn| turn.kind == "monitor")
+        .and_then(|turn| turn.monitor.as_ref())
+        .and_then(|monitor| monitor.supervisor_identity.clone())
+        .or_else(|| meta.process_identity.clone())
 }
 
 fn project_done(done: &DoneMarkerWire) -> AgentArtifactListDoneWire {
@@ -372,13 +398,39 @@ fn project_output_facts(
     let output = output?;
     let mut meta = BTreeMap::new();
     for (key, value) in output {
-        if key.starts_with("meta_") {
+        if list_output_meta_fact(key, value) {
             meta.insert(key.clone(), value.clone());
         }
     }
     let diff_path = match output.get("diff_path") {
-        Some(Value::String(path)) => Some(path.clone()),
+        Some(Value::String(path))
+            if path.len() <= MAX_LIST_FACT_STRING_BYTES =>
+        {
+            Some(path.clone())
+        }
         _ => None,
     };
     Some(AgentArtifactListOutputFactsWire { meta, diff_path })
+}
+
+const MAX_LIST_FACT_STRING_BYTES: usize = 4096;
+
+/// Return whether one output value is a bounded, inventoried list/action fact.
+fn list_output_meta_fact(key: &str, value: &Value) -> bool {
+    match key {
+        "meta_workspace" => {
+            value.as_i64().is_some()
+                || value.as_u64().is_some()
+                || bounded_output_string(value)
+        }
+        "meta_project" | "meta_patch" | "meta_changespec" | "meta_new_cl"
+        | "meta_new_pr" => bounded_output_string(value),
+        _ => false,
+    }
+}
+
+fn bounded_output_string(value: &Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|text| text.len() <= MAX_LIST_FACT_STRING_BYTES)
 }

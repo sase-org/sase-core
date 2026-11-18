@@ -98,7 +98,7 @@ fn write_heavy_record(dir: &Path) {
             "step_output": {
                 "_raw": "done raw ".repeat(500),
                 "_data": {"body": "done data ".repeat(500)},
-                "meta_commit_message": "keep",
+                "meta_patch": "keep",
                 "diff_path": "/tmp/keep.diff"
             }
         }),
@@ -239,21 +239,19 @@ fn compact_serialized_payload_excludes_deferred_detail() {
     assert_eq!(value["meta"]["name"], json!("heavy"));
     assert!(value["meta"].get("linked_repos").is_none());
     assert_eq!(
-        value["done"]["step_output"]["meta"]["meta_commit_message"],
+        value["done"]["step_output"]["meta"]["meta_patch"],
         json!("keep")
     );
     assert_eq!(
         value["done"]["step_output"]["diff_path"],
         json!("/tmp/keep.diff")
     );
-    assert_eq!(
-        value["prompt_steps"][0]["output"]["meta"]["meta_prompt"],
-        json!("keep")
-    );
-    assert_eq!(
-        value["workflow"]["steps"][0]["output"]["meta"]["meta_workflow"],
-        json!("keep")
-    );
+    assert!(value["prompt_steps"][0]["output"]["meta"]
+        .get("meta_prompt")
+        .is_none());
+    assert!(value["workflow"]["steps"][0]["output"]["meta"]
+        .get("meta_workflow")
+        .is_none());
     let encoded = serde_json::to_string(&compact.records[0]).unwrap();
     assert!(!encoded.contains("done raw"));
     assert!(!encoded.contains("long traceback"));
@@ -690,6 +688,182 @@ fn compact_source_scans_project_before_returning() {
         scan.records[0],
         project_record_for_list_compact(&full_scan.records[0])
     );
+}
+
+#[test]
+fn compact_projection_preserves_monitor_identity_and_bounds_output_facts() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+
+    let nested = artifact(&projects, "20260831110000");
+    write_json(
+        &nested.join("agent_meta.json"),
+        json!({
+            "name": "nested-monitor",
+            "agent_session_role": "monitor",
+            "process_identity": "boot:1",
+            "agent_session_turn": {
+                "kind": "monitor",
+                "id": "nested-id",
+                "monitor": {"supervisor_identity": "boot:9"}
+            }
+        }),
+    );
+    write_json(
+        &nested.join("done.json"),
+        json!({
+            "outcome": "completed",
+            "step_output": {
+                "meta_workspace": 3,
+                "meta_project": "project-name",
+                "meta_patch": "patch-name",
+                "meta_changespec": "legacy-change",
+                "meta_new_cl": "legacy-cl",
+                "meta_new_pr": "legacy-pr",
+                "meta_commits": [{"diff": "y".repeat(100_000)}],
+                "meta_details": {"_raw": "x".repeat(100_000)},
+                "meta_unknown": {"nested": [1, 2, 3]}
+            }
+        }),
+    );
+
+    let flat = artifact(&projects, "20260831110001");
+    write_json(
+        &flat.join("agent_meta.json"),
+        json!({
+            "name": "flat-monitor",
+            "agent_session_role": "monitor",
+            "process_identity": "boot:2",
+            "monitor_id": "flat-id",
+            "monitor_state": "running",
+            "monitor_supervisor_identity": "boot:10"
+        }),
+    );
+
+    let missing = artifact(&projects, "20260831110002");
+    write_json(
+        &missing.join("agent_meta.json"),
+        json!({
+            "name": "missing-monitor",
+            "agent_session_role": "monitor",
+            "process_identity": "boot:3",
+            "agent_session_turn": {
+                "kind": "monitor",
+                "id": "missing-id",
+                "monitor": {}
+            }
+        }),
+    );
+
+    let empty = artifact(&projects, "20260831110003");
+    write_json(
+        &empty.join("agent_meta.json"),
+        json!({
+            "name": "empty-monitor",
+            "agent_session_role": "monitor",
+            "process_identity": "boot:4",
+            "agent_session_turn": {
+                "kind": "monitor",
+                "id": "empty-id",
+                "monitor": {"supervisor_identity": ""}
+            }
+        }),
+    );
+
+    let ordinary = artifact(&projects, "20260831110004");
+    write_json(
+        &ordinary.join("agent_meta.json"),
+        json!({
+            "name": "ordinary",
+            "agent_session_role": "worker",
+            "process_identity": "boot:5",
+            "agent_session_turn": {
+                "kind": "monitor",
+                "id": "not-a-monitor-member",
+                "monitor": {"supervisor_identity": "boot:11"}
+            }
+        }),
+    );
+
+    let snapshot = scan_agent_artifacts_list(
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    );
+    let by_timestamp = |timestamp: &str| {
+        snapshot
+            .records
+            .iter()
+            .find(|record| record.timestamp == timestamp)
+            .unwrap()
+    };
+
+    assert_eq!(
+        by_timestamp("20260831110000")
+            .meta
+            .as_ref()
+            .unwrap()
+            .process_identity
+            .as_deref(),
+        Some("boot:9")
+    );
+    assert_eq!(
+        by_timestamp("20260831110001")
+            .meta
+            .as_ref()
+            .unwrap()
+            .process_identity
+            .as_deref(),
+        Some("boot:10")
+    );
+    assert_eq!(
+        by_timestamp("20260831110002")
+            .meta
+            .as_ref()
+            .unwrap()
+            .process_identity
+            .as_deref(),
+        Some("boot:3")
+    );
+    assert_eq!(
+        by_timestamp("20260831110003")
+            .meta
+            .as_ref()
+            .unwrap()
+            .process_identity
+            .as_deref(),
+        Some("")
+    );
+    assert_eq!(
+        by_timestamp("20260831110004")
+            .meta
+            .as_ref()
+            .unwrap()
+            .process_identity
+            .as_deref(),
+        Some("boot:5")
+    );
+
+    let output = by_timestamp("20260831110000")
+        .done
+        .as_ref()
+        .unwrap()
+        .step_output
+        .as_ref()
+        .unwrap();
+    assert_eq!(output.meta.get("meta_workspace"), Some(&json!(3)));
+    for key in [
+        "meta_project",
+        "meta_patch",
+        "meta_changespec",
+        "meta_new_cl",
+        "meta_new_pr",
+    ] {
+        assert!(output.meta.contains_key(key), "missing {key}");
+    }
+    assert!(!output.meta.contains_key("meta_commits"));
+    assert!(!output.meta.contains_key("meta_details"));
+    assert!(!output.meta.contains_key("meta_unknown"));
+    assert!(serde_json::to_vec(output).unwrap().len() < 4096);
 }
 
 #[test]

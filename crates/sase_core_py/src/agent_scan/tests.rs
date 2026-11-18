@@ -1035,7 +1035,7 @@ fn compact_list_bindings_round_trip_scan_and_index() {
         .unwrap();
         fs::write(
             dir.join("done.json"),
-            r#"{"outcome":"completed","name":"compact","traceback":"nope","step_output":{"_raw":"raw","meta_keep":"yes"}}"#,
+            r#"{"outcome":"completed","name":"compact","traceback":"nope","step_output":{"_raw":"raw","meta_patch":"yes"}}"#,
         )
         .unwrap();
 
@@ -1056,7 +1056,7 @@ fn compact_list_bindings_round_trip_scan_and_index() {
         assert!(record["meta"].get("linked_repos").is_none());
         assert!(record["done"].get("traceback").is_none());
         assert_eq!(
-            record["done"]["step_output"]["meta"]["meta_keep"],
+            record["done"]["step_output"]["meta"]["meta_patch"],
             json!("yes")
         );
         assert!(record["done"]["step_output"].get("_raw").is_none());
@@ -1124,5 +1124,133 @@ fn compact_list_bindings_round_trip_scan_and_index() {
         assert_eq!(indexed["records"][0]["meta"]["name"], json!("compact"));
         assert!(indexed["records"][0].get("agent_meta").is_none());
         assert!(indexed["records"][0]["done"].get("traceback").is_none());
+    });
+}
+
+#[test]
+fn compact_list_binding_keeps_monitor_identity_and_only_typed_output_facts() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        let cases = [
+            (
+                "20261117121000",
+                json!({
+                    "name": "nested-monitor",
+                    "agent_session_role": "monitor",
+                    "process_identity": "boot:1",
+                    "agent_session_turn": {
+                        "kind": "monitor",
+                        "id": "nested-id",
+                        "monitor": {"supervisor_identity": "boot:9"}
+                    }
+                }),
+            ),
+            (
+                "20261117121001",
+                json!({
+                    "name": "missing-monitor",
+                    "agent_session_role": "monitor",
+                    "process_identity": "boot:2",
+                    "agent_session_turn": {
+                        "kind": "monitor",
+                        "id": "missing-id",
+                        "monitor": {}
+                    }
+                }),
+            ),
+            (
+                "20261117121002",
+                json!({
+                    "name": "empty-monitor",
+                    "agent_session_role": "monitor",
+                    "process_identity": "boot:3",
+                    "agent_session_turn": {
+                        "kind": "monitor",
+                        "id": "empty-id",
+                        "monitor": {"supervisor_identity": ""}
+                    }
+                }),
+            ),
+            (
+                "20261117121003",
+                json!({
+                    "name": "ordinary",
+                    "agent_session_role": "worker",
+                    "process_identity": "boot:4",
+                    "agent_session_turn": {
+                        "kind": "monitor",
+                        "id": "not-a-monitor-member",
+                        "monitor": {"supervisor_identity": "boot:10"}
+                    }
+                }),
+            ),
+        ];
+
+        for (timestamp, meta) in cases {
+            let dir = root
+                .join("proj")
+                .join("artifacts")
+                .join("ace-run")
+                .join(timestamp);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("agent_meta.json"),
+                serde_json::to_vec(&meta).unwrap(),
+            )
+            .unwrap();
+            if timestamp == "20261117121000" {
+                fs::write(
+                    dir.join("done.json"),
+                    serde_json::to_vec(&json!({
+                        "outcome": "completed",
+                        "step_output": {
+                            "meta_workspace": 3,
+                            "meta_project": "project-name",
+                            "meta_patch": "patch-name",
+                            "meta_commits": [{"diff": "z".repeat(100_000)}],
+                            "meta_details": {"_raw": "x".repeat(100_000)}
+                        }
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+        }
+
+        let snapshot = py_scan_agent_artifacts_list(
+            py,
+            root.to_string_lossy().as_ref(),
+            None,
+        )
+        .unwrap();
+        let snapshot = py_to_json_value(snapshot.bind(py)).unwrap();
+        let by_timestamp = |timestamp: &str| {
+            snapshot["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|record| record["timestamp"] == json!(timestamp))
+                .unwrap()
+        };
+        for (timestamp, identity) in [
+            ("20261117121000", "boot:9"),
+            ("20261117121001", "boot:2"),
+            ("20261117121002", ""),
+            ("20261117121003", "boot:4"),
+        ] {
+            assert_eq!(
+                by_timestamp(timestamp)["meta"]["process_identity"],
+                json!(identity)
+            );
+        }
+        let output = &by_timestamp("20261117121000")["done"]["step_output"];
+        assert_eq!(output["meta"]["meta_workspace"], json!(3));
+        assert_eq!(output["meta"]["meta_project"], json!("project-name"));
+        assert_eq!(output["meta"]["meta_patch"], json!("patch-name"));
+        assert!(output["meta"].get("meta_commits").is_none());
+        assert!(output["meta"].get("meta_details").is_none());
+        assert!(serde_json::to_vec(output).unwrap().len() < 4096);
     });
 }
