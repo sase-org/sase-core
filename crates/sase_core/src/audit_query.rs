@@ -678,6 +678,14 @@ pub(crate) fn source_identity_for(
     }
 }
 
+/// Capture identity from the already-open source, so a concurrent atomic
+/// replacement cannot make a query report metadata for a different file.
+pub(crate) fn source_identity_for_file(
+    file: &File,
+) -> Result<AuditSourceIdentityWire, AuditQueryError> {
+    Ok(source_identity(&file.metadata()?))
+}
+
 fn source_identity(meta: &std::fs::Metadata) -> AuditSourceIdentityWire {
     AuditSourceIdentityWire {
         missing: false,

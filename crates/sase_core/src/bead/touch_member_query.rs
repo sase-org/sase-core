@@ -37,15 +37,19 @@
 //! hashing the source per lookup.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::agent_identity::{globalize_owned_agent_name, AgentOwnerIdentity};
-use crate::audit_query::{source_identity_for, AuditSourceIdentityWire};
+use crate::audit_query::{
+    source_identity_for, source_identity_for_file, AuditSourceIdentityWire,
+};
 use crate::bead::touch_index::{
     instant_or_min, BeadTouchWire, BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION,
 };
@@ -125,18 +129,153 @@ pub struct BeadViewMemberQueryResultWire {
     pub complete: bool,
 }
 
-/// Touch-index document as a query sees it: version, generation, touches.
-///
-/// The per-stream signature map is refresh bookkeeping, not query state, so
-/// it is not decoded here at all.
-#[derive(Debug, Deserialize)]
+/// Query document after selecting matching touches during deserialization.
 struct TouchIndexQueryDoc {
-    #[serde(default)]
     schema_version: Option<u64>,
-    #[serde(default)]
     generation: String,
-    #[serde(default)]
-    touches: Vec<BeadTouchWire>,
+    rows: Vec<BeadTouchMatchWire>,
+}
+
+struct TouchIndexQuerySeed<'a> {
+    query: &'a BeadTouchMemberQueryWire,
+    owner: Option<&'a AgentOwnerIdentity>,
+}
+
+impl<'de> DeserializeSeed<'de> for TouchIndexQuerySeed<'_> {
+    type Value = TouchIndexQueryDoc;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct DocVisitor<'a> {
+            query: &'a BeadTouchMemberQueryWire,
+            owner: Option<&'a AgentOwnerIdentity>,
+        }
+
+        impl<'de> Visitor<'de> for DocVisitor<'_> {
+            type Value = TouchIndexQueryDoc;
+
+            fn expecting(
+                &self,
+                formatter: &mut fmt::Formatter<'_>,
+            ) -> fmt::Result {
+                formatter.write_str("a bead touch index object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut schema_version = None;
+                let mut saw_schema_version = false;
+                let mut generation = String::new();
+                let mut saw_generation = false;
+                let mut rows = Vec::new();
+                let mut saw_touches = false;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "schema_version" => {
+                            if saw_schema_version {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "schema_version",
+                                ));
+                            }
+                            saw_schema_version = true;
+                            schema_version = Some(map.next_value()?);
+                        }
+                        "generation" => {
+                            if saw_generation {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "generation",
+                                ));
+                            }
+                            saw_generation = true;
+                            generation = map.next_value()?;
+                        }
+                        "touches" => {
+                            if saw_touches {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "touches",
+                                ));
+                            }
+                            saw_touches = true;
+                            rows = map.next_value_seed(TouchSequenceSeed {
+                                query: self.query,
+                                owner: self.owner,
+                            })?;
+                        }
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(TouchIndexQueryDoc {
+                    schema_version,
+                    generation,
+                    rows,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(DocVisitor {
+            query: self.query,
+            owner: self.owner,
+        })
+    }
+}
+
+struct TouchSequenceSeed<'a> {
+    query: &'a BeadTouchMemberQueryWire,
+    owner: Option<&'a AgentOwnerIdentity>,
+}
+
+impl<'de> DeserializeSeed<'de> for TouchSequenceSeed<'_> {
+    type Value = Vec<BeadTouchMatchWire>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct TouchSequenceVisitor<'a> {
+            query: &'a BeadTouchMemberQueryWire,
+            owner: Option<&'a AgentOwnerIdentity>,
+        }
+
+        impl<'de> Visitor<'de> for TouchSequenceVisitor<'_> {
+            type Value = Vec<BeadTouchMatchWire>;
+
+            fn expecting(
+                &self,
+                formatter: &mut fmt::Formatter<'_>,
+            ) -> fmt::Result {
+                formatter.write_str("a sequence of bead touches")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut rows = Vec::new();
+                while let Some(touch) = seq.next_element::<BeadTouchWire>()? {
+                    if let Some(member_index) =
+                        match_member_index(&touch.actor, self.query, self.owner)
+                    {
+                        rows.push(BeadTouchMatchWire {
+                            member_index,
+                            touch,
+                        });
+                    }
+                }
+                Ok(rows)
+            }
+        }
+
+        deserializer.deserialize_seq(TouchSequenceVisitor {
+            query: self.query,
+            owner: self.owner,
+        })
+    }
 }
 
 fn resolve_owner(
@@ -202,19 +341,28 @@ pub fn query_bead_touches_for_members(
             source,
             rows: Vec::new(),
         };
-    let source = match source_identity_for(index_path) {
+    let file = match File::open(index_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return miss(AuditSourceIdentityWire::missing());
+        }
+        Err(_) => return miss(AuditSourceIdentityWire::missing()),
+    };
+    let source = match source_identity_for_file(&file) {
         Ok(source) => source,
         Err(_) => return miss(AuditSourceIdentityWire::missing()),
     };
-    if source.missing {
-        return miss(source);
-    }
-    let bytes = match std::fs::read(index_path) {
-        Ok(bytes) => bytes,
-        Err(_) => return miss(source),
-    };
-    let doc: TouchIndexQueryDoc = match serde_json::from_slice(&bytes) {
-        Ok(doc) => doc,
+    let owner = resolve_owner(query);
+    let mut deserializer =
+        serde_json::Deserializer::from_reader(BufReader::new(file));
+    let doc: TouchIndexQueryDoc = match (TouchIndexQuerySeed {
+        query,
+        owner: owner.as_ref(),
+    })
+    .deserialize(&mut deserializer)
+    {
+        Ok(doc) if deserializer.end().is_ok() => doc,
+        Ok(_) => return miss(source),
         Err(_) => return miss(source),
     };
     if doc.schema_version
@@ -222,19 +370,7 @@ pub fn query_bead_touches_for_members(
     {
         return miss(source);
     }
-    let owner = resolve_owner(query);
-    let mut rows: Vec<BeadTouchMatchWire> = doc
-        .touches
-        .into_iter()
-        .filter_map(|touch| {
-            match_member_index(&touch.actor, query, owner.as_ref()).map(
-                |member_index| BeadTouchMatchWire {
-                    member_index,
-                    touch,
-                },
-            )
-        })
-        .collect();
+    let mut rows = doc.rows;
     rows.sort_by(|a, b| {
         instant_or_min(&b.touch.last_at)
             .cmp(&instant_or_min(&a.touch.last_at))
@@ -653,6 +789,118 @@ mod tests {
         .unwrap();
         let out = query_bead_touches_for_members(&wrong_schema, &query);
         assert!(out.rows.is_empty() && out.generation.is_empty());
+    }
+
+    #[test]
+    fn schema_version_may_follow_touches() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("late-schema.json");
+        let touch = touch("coder", "sase-1.1", "2026-06-01T00:00:00Z");
+        let encoded_touch = serde_json::to_string(&touch).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"generation\":\"gen-late\",\"touches\":[{encoded_touch}],\"schema_version\":{}}}",
+                BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION
+            ),
+        )
+        .unwrap();
+
+        let out = query_bead_touches_for_members(
+            &path,
+            &query_for(member("bbugyi200.athena.coder", Some("coder"))),
+        );
+        assert_eq!(out.generation, "gen-late");
+        assert_eq!(out.rows.len(), 1);
+    }
+
+    #[test]
+    fn truncated_index_discards_matches_seen_before_the_truncation() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("claimed-then-truncated.json");
+        let encoded_touch = serde_json::to_string(&touch(
+            "coder",
+            "sase-1.1",
+            "2026-06-01T00:00:00Z",
+        ))
+        .unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"schema_version\":{},\"generation\":\"partial\",\"touches\":[{encoded_touch},{{",
+                BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION
+            ),
+        )
+        .unwrap();
+
+        let out = query_bead_touches_for_members(
+            &path,
+            &query_for(member("bbugyi200.athena.coder", Some("coder"))),
+        );
+        assert!(out.rows.is_empty());
+        assert!(out.generation.is_empty());
+    }
+
+    #[test]
+    fn streamed_selection_matches_naive_decode_with_large_unrelated_sections() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("large-index.json");
+        let mut touches = Vec::new();
+        for index in 0..20_000 {
+            touches.push(touch(
+                &format!("unclaimed.agent{index}"),
+                &format!("sase-{index}"),
+                &format!("2026-06-{:02}T00:00:00Z", index % 28 + 1),
+            ));
+        }
+        touches.extend([
+            touch("coder", "sase-claimed-b", "2026-06-03T00:00:00Z"),
+            touch(
+                "bbugyi200.athena.coder",
+                "sase-claimed-a",
+                "2026-06-03T00:00:00Z",
+            ),
+            touch("other", "sase-unclaimed", "2026-06-04T00:00:00Z"),
+        ]);
+        let signatures: serde_json::Map<String, serde_json::Value> = (0..2_000)
+            .map(|index| (format!("stream-{index}"), json!([index, index + 1])))
+            .collect();
+        let index = json!({
+            "schema_version": BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION,
+            "generation": "large-gen",
+            "streams": signatures,
+            "touches": touches,
+        });
+        let bytes = serde_json::to_vec(&index).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+
+        let query = query_for(member("bbugyi200.athena.coder", Some("coder")));
+        let naive: BeadTouchIndexWire = serde_json::from_slice(&bytes).unwrap();
+        let owner = resolve_owner(&query);
+        let mut expected: Vec<BeadTouchMatchWire> = naive
+            .touches
+            .into_iter()
+            .filter_map(|touch| {
+                match_member_index(&touch.actor, &query, owner.as_ref()).map(
+                    |member_index| BeadTouchMatchWire {
+                        member_index,
+                        touch,
+                    },
+                )
+            })
+            .collect();
+        expected.sort_by(|a, b| {
+            instant_or_min(&b.touch.last_at)
+                .cmp(&instant_or_min(&a.touch.last_at))
+                .then_with(|| a.touch.bead_id.cmp(&b.touch.bead_id))
+                .then_with(|| a.touch.actor.cmp(&b.touch.actor))
+        });
+
+        let out = query_bead_touches_for_members(&path, &query);
+        assert_eq!(out.rows, expected);
+        assert_eq!(out.rows.len(), 2);
+        assert_eq!(out.rows[0].touch.bead_id, "sase-claimed-a");
+        assert_eq!(out.rows[1].touch.bead_id, "sase-claimed-b");
     }
 
     #[test]
