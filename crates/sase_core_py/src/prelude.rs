@@ -684,6 +684,8 @@ pub(crate) use sase_core::finalizer::{
     project_finalizer_node_view as core_project_finalizer_node_view,
     resolve_finalizer_plan as core_resolve_finalizer_plan,
     select_remaining_commit_obligations as core_select_remaining_commit_obligations,
+    select_unscanned_coverage as core_select_unscanned_coverage,
+    suggest_unscanned_repair as core_suggest_unscanned_repair,
     validate_finalizer_context as core_validate_finalizer_context,
     validate_finalizer_handoff as core_validate_finalizer_handoff,
     validate_finalizer_instance_spec as core_validate_finalizer_instance_spec,
@@ -696,7 +698,8 @@ pub(crate) use sase_core::finalizer::{
     FinalizerPlanInputWire, FinalizerPlanWire, FinalizerProviderSpecWire,
     FinalizerSubmissionEnvelopeWire, RemainingCommitWorkRequestWire,
     RepositoryActionCheckRequestWire, RepositoryLandingProofRequestWire,
-    RunViewError, FINALIZER_WIRE_SCHEMA_VERSION,
+    RunViewError, UnscannedCoverageRequestWire, UnscannedRepairRequestWire,
+    FINALIZER_WIRE_SCHEMA_VERSION, UNSCANNED_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::fleet_attention::{
     self as core_fleet_attention, FleetAttentionEntryWire,

@@ -1210,3 +1210,86 @@ fn handoff_and_repository_action_bindings_round_trip() {
         assert_eq!(value["code"], json!("unknown_repository_action"));
     });
 }
+
+#[test]
+fn unscanned_policy_bindings_cover_shadowed_and_cross_project_cases() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        for name in [
+            "unscanned_wire_schema_version",
+            "select_unscanned_coverage",
+            "suggest_unscanned_repair",
+        ] {
+            assert!(module.getattr(name).is_ok(), "missing {name}");
+        }
+        assert_eq!(py_unscanned_wire_schema_version(), 1);
+
+        // Duplicate sibling name: dirty A shadows configured fallback B.
+        let coverage = json!({
+            "schema_version": 1,
+            "candidates": [
+                {"name": "research", "path": "/a", "kind": "sibling"},
+                {"name": "research", "path": "/b", "kind": "sibling"},
+            ],
+            "dirty_paths": ["/a", "/b"],
+            "known_sdd_paths": [],
+        });
+        let obj = json_value_to_py(py, &coverage).unwrap();
+        let dict = obj.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_select_unscanned_coverage(py, dict).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["covered_paths"], json!(["/a"]));
+
+        // Clean A leaves the configured fallback eligible.
+        let coverage = json!({
+            "schema_version": 1,
+            "candidates": [
+                {"name": "research", "path": "/a", "kind": "sibling"},
+                {"name": "research", "path": "/b", "kind": "sibling"},
+            ],
+            "dirty_paths": ["/b"],
+            "known_sdd_paths": [],
+        });
+        let obj = json_value_to_py(py, &coverage).unwrap();
+        let dict = obj.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_select_unscanned_coverage(py, dict).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["covered_paths"], json!(["/b"]));
+
+        // Cross-project research never uses a bare open.
+        let repair = json!({
+            "schema_version": 1,
+            "toplevel": "/bob",
+            "relpath": "202611/report.md",
+            "current_project": "sase",
+            "current_project_key": "gh_sase-org__sase",
+            "workspace_num": 0,
+            "records": [
+                {
+                    "name": "research",
+                    "project": "bob-cli",
+                    "project_key": "gh_bobs-org__bob-cli",
+                    "path": "/bob",
+                    "clones": [{"workspace_num": 0, "path": "/bob"}],
+                    "remote_url": "git@github.com:bobs-org/bob-cli--research.git",
+                }
+            ],
+        });
+        let obj = json_value_to_py(py, &repair).unwrap();
+        let dict = obj.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_suggest_unscanned_repair(py, dict).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["action"], json!("open_and_move"));
+        assert!(
+            value["instruction"]
+                .as_str()
+                .unwrap()
+                .contains("sase repo open gh:bobs-org/bob-cli--research"),
+            "{}",
+            value["instruction"]
+        );
+        assert_eq!(value["target"], json!("gh:bobs-org/bob-cli--research"));
+    });
+}

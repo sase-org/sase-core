@@ -13,6 +13,7 @@ pub mod remaining;
 pub mod run_view;
 pub mod selection;
 pub mod submission;
+pub mod unscanned;
 pub mod wire;
 
 pub use digest::{
@@ -65,6 +66,13 @@ pub use selection::{
 pub use submission::{
     finalizer_context_digest, validate_finalizer_context,
     validate_finalizer_deferral, validate_finalizer_submission,
+};
+pub use unscanned::{
+    select_unscanned_coverage, suggest_unscanned_repair,
+    UnscannedCandidateWire, UnscannedCloneWire, UnscannedCoverageRequestWire,
+    UnscannedCoverageResponseWire, UnscannedRepairRecordWire,
+    UnscannedRepairRequestWire, UnscannedRepairResponseWire,
+    UNSCANNED_WIRE_SCHEMA_VERSION,
 };
 pub use wire::{
     FinalizerAggregateResultWire, FinalizerAggregateStatusWire,

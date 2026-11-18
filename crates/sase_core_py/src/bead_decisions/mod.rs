@@ -403,6 +403,45 @@ fn py_aggregate_finalizer_outcomes<'py>(
     )
 }
 
+/// Return the unscanned-write policy wire schema version.
+#[pyfunction]
+#[pyo3(name = "unscanned_wire_schema_version")]
+fn py_unscanned_wire_schema_version() -> u64 {
+    UNSCANNED_WIRE_SCHEMA_VERSION
+}
+
+/// Select effective covered checkouts from ordered candidates and dirty facts.
+#[pyfunction]
+#[pyo3(name = "select_unscanned_coverage")]
+fn py_select_unscanned_coverage<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: UnscannedCoverageRequestWire =
+        finalizer_wire_from_pydict(request, "unscanned coverage request")?;
+    finalizer_result_to_py(
+        py,
+        core_select_unscanned_coverage(&request),
+        "unscanned coverage",
+    )
+}
+
+/// Suggest a project-qualified repair for one unscanned checkout.
+#[pyfunction]
+#[pyo3(name = "suggest_unscanned_repair")]
+fn py_suggest_unscanned_repair<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: UnscannedRepairRequestWire =
+        finalizer_wire_from_pydict(request, "unscanned repair request")?;
+    finalizer_result_to_py(
+        py,
+        core_suggest_unscanned_repair(&request),
+        "unscanned repair",
+    )
+}
+
 fn bead_action_error_to_pyerr(error: BeadActionError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
@@ -812,6 +851,9 @@ pub(crate) fn register_bead_decisions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_finalizer_json_digest, m)?)?;
     m.add_function(wrap_pyfunction!(py_aggregate_finalizer_outcomes, m)?)?;
     m.add_function(wrap_pyfunction!(py_project_finalizer_node_view, m)?)?;
+    m.add_function(wrap_pyfunction!(py_unscanned_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_select_unscanned_coverage, m)?)?;
+    m.add_function(wrap_pyfunction!(py_suggest_unscanned_repair, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_action_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_bead_action_field, m)?)?;
     m.add_function(wrap_pyfunction!(py_decide_bead_action, m)?)?;
