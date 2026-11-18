@@ -560,6 +560,7 @@ pub enum LaunchOutcomeWire {
     Eligible,
     Launched,
     Skipped,
+    Cancelled,
     ConditionError,
     LaunchError,
 }

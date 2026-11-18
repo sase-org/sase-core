@@ -298,7 +298,18 @@ pub fn apply_chop_batch_transition(
         }
         ChopBatchEventKindWire::AcknowledgeLaunch => {
             let index = require_member(request)?;
-            require_batch_dispatchable(&manifest, "acknowledge_launch")?;
+            let may_settle_crossing_launch = manifest.status
+                == ChopBatchStatusWire::Cancelled
+                && manifest.members.get(index).is_some_and(|member| {
+                    matches!(
+                        member.status,
+                        ChopBatchMemberStatusWire::Dispatching
+                            | ChopBatchMemberStatusWire::Launched
+                    )
+                });
+            if !may_settle_crossing_launch {
+                require_batch_dispatchable(&manifest, "acknowledge_launch")?;
+            }
             let member = require_member_mut(&mut manifest, index)?;
             match member.status {
                 ChopBatchMemberStatusWire::Dispatching
@@ -420,7 +431,6 @@ pub fn apply_chop_batch_transition(
                     for member in &mut manifest.members {
                         match member.status {
                             ChopBatchMemberStatusWire::Pending
-                            | ChopBatchMemberStatusWire::Dispatching
                             | ChopBatchMemberStatusWire::Blocked => {
                                 member.status =
                                     ChopBatchMemberStatusWire::Cancelled;

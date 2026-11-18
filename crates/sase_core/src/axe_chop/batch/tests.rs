@@ -296,9 +296,30 @@ fn cancellation_wins_over_inflight_dispatch() {
     )
     .expect("cancel must succeed");
     assert_eq!(next.status, ChopBatchStatusWire::Cancelled);
-    // The in-flight dispatch is discarded; the settled launch is preserved.
-    assert_eq!(next.members[0].status, ChopBatchMemberStatusWire::Cancelled);
+    // A launch already crossing the spawn boundary remains dispatching until
+    // its real process is acknowledged. Pending work is cancelled immediately.
+    assert_eq!(
+        next.members[0].status,
+        ChopBatchMemberStatusWire::Dispatching
+    );
     assert_eq!(next.members[1].status, ChopBatchMemberStatusWire::Cancelled);
+
+    let settled = transition(
+        &next,
+        ChopBatchEventKindWire::AcknowledgeLaunch,
+        Some(0),
+        None,
+    )
+    .expect("the crossing launch must settle after clan cancellation");
+    assert_eq!(settled.status, ChopBatchStatusWire::Cancelled);
+    assert_eq!(
+        settled.members[0].status,
+        ChopBatchMemberStatusWire::Launched
+    );
+    assert_eq!(
+        settled.members[1].status,
+        ChopBatchMemberStatusWire::Cancelled
+    );
 
     let error =
         transition(&next, ChopBatchEventKindWire::BeginDispatch, Some(0), None)

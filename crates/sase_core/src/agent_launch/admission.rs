@@ -52,10 +52,9 @@ impl LaunchUnitPhaseWire {
             Self::Eligible => Some(LaunchOutcomeWire::Eligible),
             Self::Launched => Some(LaunchOutcomeWire::Launched),
             Self::Skipped => Some(LaunchOutcomeWire::Skipped),
+            Self::Cancelled => Some(LaunchOutcomeWire::Cancelled),
             Self::ConditionError => Some(LaunchOutcomeWire::ConditionError),
-            Self::LaunchError | Self::Cancelled => {
-                Some(LaunchOutcomeWire::LaunchError)
-            }
+            Self::LaunchError => Some(LaunchOutcomeWire::LaunchError),
             Self::Reserved
             | Self::Waiting
             | Self::Checking
@@ -398,12 +397,13 @@ pub fn summarize_admission(
                 summary.eligible += 1;
                 summary.launched += 1;
             }
-            LaunchUnitPhaseWire::Skipped => summary.skipped += 1,
+            LaunchUnitPhaseWire::Skipped | LaunchUnitPhaseWire::Cancelled => {
+                summary.skipped += 1
+            }
             LaunchUnitPhaseWire::ConditionError => {
                 summary.condition_errors += 1
             }
-            LaunchUnitPhaseWire::LaunchError
-            | LaunchUnitPhaseWire::Cancelled => summary.launch_errors += 1,
+            LaunchUnitPhaseWire::LaunchError => summary.launch_errors += 1,
             LaunchUnitPhaseWire::Reserved
             | LaunchUnitPhaseWire::Waiting
             | LaunchUnitPhaseWire::Checking => {}
@@ -1085,6 +1085,7 @@ mod tests {
             agent_unit("unit-2", 1),
             agent_unit("unit-3", 2),
             agent_unit("unit-4", 3),
+            agent_unit("unit-5", 4),
         ]);
         let mut states = BTreeMap::new();
         for (id, phase) in [
@@ -1092,6 +1093,7 @@ mod tests {
             ("unit-2", LaunchUnitPhaseWire::Skipped),
             ("unit-3", LaunchUnitPhaseWire::ConditionError),
             ("unit-4", LaunchUnitPhaseWire::LaunchError),
+            ("unit-5", LaunchUnitPhaseWire::Cancelled),
         ] {
             states.insert(
                 id.to_string(),
@@ -1107,15 +1109,17 @@ mod tests {
         assert_eq!(
             summary,
             LaunchAdmissionSummaryWire {
-                total: 4,
+                total: 5,
                 eligible: 1,
                 launched: 1,
-                skipped: 1,
+                skipped: 2,
                 condition_errors: 1,
                 launch_errors: 1,
             }
         );
-        assert_eq!(admission_unit_results(&plan, &states).len(), 4);
+        let results = admission_unit_results(&plan, &states);
+        assert_eq!(results.len(), 5);
+        assert_eq!(results[4].outcome, LaunchOutcomeWire::Cancelled);
     }
 
     #[test]
