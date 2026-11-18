@@ -29,6 +29,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 pub const MEMORY_AUDIT_QUERY_WIRE_SCHEMA_VERSION: u64 = 1;
+pub const ARTIFACT_READ_AUDIT_QUERY_WIRE_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Error)]
 pub enum AuditQueryError {
@@ -47,9 +48,9 @@ pub struct AuditMemberWire {
     pub agent_name: Option<String>,
 }
 
-/// Targeted memory-audit query: ordered members, result cap, duplicate policy.
+/// Targeted audit query: ordered members, result cap, duplicate policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MemoryAuditQueryWire {
+pub struct AuditQueryWire {
     #[serde(default)]
     pub members: Vec<AuditMemberWire>,
     #[serde(default)]
@@ -57,6 +58,9 @@ pub struct MemoryAuditQueryWire {
     #[serde(default)]
     pub deduplicate: bool,
 }
+
+/// Backwards-compatible name for the original memory audit query contract.
+pub type MemoryAuditQueryWire = AuditQueryWire;
 
 /// Identity of the log file actually read, including inode so an atomic
 /// replacement with equal size and mtime cannot reuse a stale answer.
@@ -135,6 +139,81 @@ pub struct MemoryAuditQueryResultWire {
     pub source: AuditSourceIdentityWire,
 }
 
+/// One validated artifact-read event in wire form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactReadWire {
+    pub schema_version: u64,
+    pub id: String,
+    pub timestamp: String,
+    pub project: String,
+    pub cwd: String,
+    pub r#ref: String,
+    pub reason: String,
+    pub agent_name: String,
+    pub agent_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts_dir: Option<String>,
+    pub recorded_link: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_path: Option<String>,
+}
+
+/// One matched artifact-read row plus the member that claimed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactReadAuditRowWire {
+    pub event: ArtifactReadWire,
+    pub member_index: usize,
+}
+
+/// Matching artifact-read rows plus the source identity they were read from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactReadAuditQueryResultWire {
+    pub rows: Vec<ArtifactReadAuditRowWire>,
+    pub source: AuditSourceIdentityWire,
+}
+
+trait AuditEvent {
+    fn audit_id(&self) -> &str;
+    fn audit_timestamp(&self) -> &str;
+    fn audit_artifacts_dir(&self) -> Option<&str>;
+    fn audit_agent_name(&self) -> &str;
+}
+
+impl AuditEvent for MemoryReadWire {
+    fn audit_id(&self) -> &str {
+        &self.id
+    }
+    fn audit_timestamp(&self) -> &str {
+        &self.timestamp
+    }
+    fn audit_artifacts_dir(&self) -> Option<&str> {
+        self.artifacts_dir.as_deref()
+    }
+    fn audit_agent_name(&self) -> &str {
+        &self.agent_name
+    }
+}
+
+impl AuditEvent for ArtifactReadWire {
+    fn audit_id(&self) -> &str {
+        &self.id
+    }
+    fn audit_timestamp(&self) -> &str {
+        &self.timestamp
+    }
+    fn audit_artifacts_dir(&self) -> Option<&str> {
+        self.artifacts_dir.as_deref()
+    }
+    fn audit_agent_name(&self) -> &str {
+        &self.agent_name
+    }
+}
+
+struct MatchedAuditEvent<T> {
+    event: T,
+    member_index: usize,
+}
+
 /// Stream the log and return matching rows for the ordered members.
 ///
 /// File order is scanned; final rows are stable timestamp-descending and
@@ -145,6 +224,47 @@ pub fn query_memory_audit(
     log_path: &Path,
     query: &MemoryAuditQueryWire,
 ) -> Result<MemoryAuditQueryResultWire, AuditQueryError> {
+    let (matched, source) =
+        query_audit_rows(log_path, query, memory_row_from_line)?;
+    Ok(MemoryAuditQueryResultWire {
+        rows: matched
+            .into_iter()
+            .map(|row| MemoryAuditRowWire {
+                event: row.event,
+                member_index: row.member_index,
+            })
+            .collect(),
+        source,
+    })
+}
+
+/// Stream the artifact-read audit log using the shared targeted query contract.
+pub fn query_artifact_read_audit(
+    log_path: &Path,
+    query: &AuditQueryWire,
+) -> Result<ArtifactReadAuditQueryResultWire, AuditQueryError> {
+    let (matched, source) =
+        query_audit_rows(log_path, query, artifact_read_row_from_line)?;
+    Ok(ArtifactReadAuditQueryResultWire {
+        rows: matched
+            .into_iter()
+            .map(|row| ArtifactReadAuditRowWire {
+                event: row.event,
+                member_index: row.member_index,
+            })
+            .collect(),
+        source,
+    })
+}
+
+fn query_audit_rows<T>(
+    log_path: &Path,
+    query: &AuditQueryWire,
+    parse_row: fn(&str) -> Option<T>,
+) -> Result<(Vec<MatchedAuditEvent<T>>, AuditSourceIdentityWire), AuditQueryError>
+where
+    T: AuditEvent,
+{
     let normalized_members: Vec<(Option<String>, Option<String>)> = query
         .members
         .iter()
@@ -156,25 +276,18 @@ pub fn query_memory_audit(
         })
         .collect();
     if normalized_members.is_empty() {
-        let source = source_identity_for(log_path)?;
-        return Ok(MemoryAuditQueryResultWire {
-            rows: Vec::new(),
-            source,
-        });
+        return Ok((Vec::new(), source_identity_for(log_path)?));
     }
     let file = match File::open(log_path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(MemoryAuditQueryResultWire {
-                rows: Vec::new(),
-                source: AuditSourceIdentityWire::missing(),
-            });
+            return Ok((Vec::new(), AuditSourceIdentityWire::missing()));
         }
         Err(error) => return Err(error.into()),
     };
     let source = source_identity(&file.metadata()?);
     let reader = BufReader::new(file);
-    let mut matched: Vec<MemoryAuditRowWire> = Vec::new();
+    let mut matched: Vec<MatchedAuditEvent<T>> = Vec::new();
     let mut seen_ids: HashSet<String> = HashSet::new();
     for line in reader.lines() {
         let line = line?;
@@ -182,33 +295,31 @@ pub fn query_memory_audit(
         if trimmed.is_empty() {
             continue;
         }
-        let Some(event) = memory_row_from_line(trimmed) else {
+        let Some(event) = parse_row(trimmed) else {
             continue;
         };
-        if query.deduplicate && seen_ids.contains(&event.id) {
+        if query.deduplicate && seen_ids.contains(event.audit_id()) {
             continue;
         }
-        let Some(member_index) =
-            match_audit_member(&normalized_members, &event)
+        let Some(member_index) = match_audit_event(&normalized_members, &event)
         else {
             continue;
         };
         if query.deduplicate {
-            seen_ids.insert(event.id.clone());
+            seen_ids.insert(event.audit_id().to_string());
         }
-        matched.push(MemoryAuditRowWire {
+        matched.push(MatchedAuditEvent {
             event,
             member_index,
         });
     }
-    matched.sort_by(|a, b| b.event.timestamp.cmp(&a.event.timestamp));
+    matched.sort_by(|a, b| {
+        b.event.audit_timestamp().cmp(a.event.audit_timestamp())
+    });
     if query.limit > 0 && matched.len() > query.limit {
         matched.truncate(query.limit);
     }
-    Ok(MemoryAuditQueryResultWire {
-        rows: matched,
-        source,
-    })
+    Ok((matched, source))
 }
 
 /// Match Python `match_event_label` precedence without labels.
@@ -220,7 +331,14 @@ pub fn match_audit_member(
     members: &[(Option<String>, Option<String>)],
     event: &MemoryReadWire,
 ) -> Option<usize> {
-    let normalized_event = normalize_audit_dir(event.artifacts_dir.as_deref());
+    match_audit_event(members, event)
+}
+
+fn match_audit_event<T: AuditEvent>(
+    members: &[(Option<String>, Option<String>)],
+    event: &T,
+) -> Option<usize> {
+    let normalized_event = normalize_audit_dir(event.audit_artifacts_dir());
     if let Some(event_dir) = normalized_event {
         for (index, (member_dir, _)) in members.iter().enumerate() {
             if let Some(member_dir) = member_dir {
@@ -231,12 +349,12 @@ pub fn match_audit_member(
         }
         return None;
     }
-    if event.agent_name.is_empty() {
+    if event.audit_agent_name().is_empty() {
         return None;
     }
     for (index, (_, member_name)) in members.iter().enumerate() {
         if let Some(member_name) = member_name {
-            if *member_name == event.agent_name {
+            if *member_name == event.audit_agent_name() {
                 return Some(index);
             }
         }
@@ -248,6 +366,56 @@ fn memory_row_from_line(line: &str) -> Option<MemoryReadWire> {
     let value = serde_json::from_str::<Value>(line).ok()?;
     let envelope = value.as_object()?;
     memory_row_from_mapping(envelope)
+}
+
+fn artifact_read_row_from_line(line: &str) -> Option<ArtifactReadWire> {
+    let value = serde_json::from_str::<Value>(line).ok()?;
+    let envelope = value.as_object()?;
+    artifact_read_row_from_mapping(envelope)
+}
+
+fn artifact_read_row_from_mapping(
+    data: &serde_json::Map<String, Value>,
+) -> Option<ArtifactReadWire> {
+    let schema_version = json_u64(data.get("schema_version")?)?;
+    if schema_version != 1 {
+        return None;
+    }
+    let id = json_string(data.get("id")?)?;
+    let timestamp = json_string(data.get("timestamp")?)?;
+    let project = json_string(data.get("project")?)?;
+    let cwd = json_string(data.get("cwd")?)?;
+    let r#ref = json_string(data.get("ref")?)?;
+    let reason = json_string(data.get("reason")?)?;
+    let agent_name = json_string(data.get("agent_name")?)?;
+    let agent_source = json_string(data.get("agent_source")?)?;
+    let artifacts_dir = match data.get("artifacts_dir") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(_) => return None,
+    };
+    let recorded_link = data.get("recorded_link")?.as_bool()?;
+    let resolved_path = match data.get("resolved_path") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => {
+            nonempty_opt(Some(text.trim().to_string()))
+        }
+        Some(_) => return None,
+    };
+    Some(ArtifactReadWire {
+        schema_version,
+        id,
+        timestamp,
+        project,
+        cwd,
+        r#ref,
+        reason,
+        agent_name,
+        agent_source,
+        artifacts_dir,
+        recorded_link,
+        resolved_path,
+    })
 }
 
 fn memory_row_from_mapping(
@@ -620,6 +788,28 @@ mod tests {
         event
     }
 
+    fn artifact_read_event(
+        id: &str,
+        timestamp: &str,
+        artifacts_dir: Option<&str>,
+        agent_name: &str,
+    ) -> Value {
+        json!({
+            "schema_version": 1,
+            "id": id,
+            "timestamp": timestamp,
+            "project": "sase",
+            "cwd": "/tmp/demo",
+            "ref": "research:report.md",
+            "reason": "Need report",
+            "agent_name": agent_name,
+            "agent_source": "SASE_AGENT_NAME",
+            "artifacts_dir": artifacts_dir,
+            "recorded_link": false,
+            "resolved_path": "/tmp/demo/report.md",
+        })
+    }
+
     fn query_for(
         dirs: &[&str],
         names: &[&str],
@@ -647,6 +837,155 @@ mod tests {
             limit,
             deduplicate,
         }
+    }
+
+    #[test]
+    fn artifact_reads_match_directory_precedence_and_name_fallback() {
+        let temp = tempdir().unwrap();
+        let log = write_lines(
+            temp.path(),
+            "artifact_reads.jsonl",
+            &[
+                artifact_read_event(
+                    "match-dir",
+                    "2026-05-24T10:00:00+00:00",
+                    Some("/runs/target"),
+                    "other",
+                ),
+                artifact_read_event(
+                    "wrong-dir-same-name",
+                    "2026-05-24T10:01:00+00:00",
+                    Some("/runs/other"),
+                    "alpha",
+                ),
+                artifact_read_event(
+                    "no-dir-same-name",
+                    "2026-05-24T10:02:00+00:00",
+                    None,
+                    "alpha",
+                ),
+            ],
+        );
+        let result = query_artifact_read_audit(
+            &log,
+            &query_for(&["/runs/target"], &["alpha"], 50, false),
+        )
+        .unwrap();
+        assert_eq!(
+            result
+                .rows
+                .iter()
+                .map(|row| row.event.id.as_str())
+                .collect::<Vec<_>>(),
+            ["no-dir-same-name", "match-dir"]
+        );
+    }
+
+    #[test]
+    fn artifact_read_context_deduplicates_after_matching_and_caps_after_sort() {
+        let temp = tempdir().unwrap();
+        let log = write_lines(
+            temp.path(),
+            "artifact_reads.jsonl",
+            &[
+                artifact_read_event(
+                    "unmatched-first",
+                    "2026-05-24T10:00:00+00:00",
+                    Some("/runs/outside"),
+                    "outside",
+                ),
+                artifact_read_event(
+                    "dup",
+                    "2026-05-24T10:02:00+00:00",
+                    Some("/runs/a"),
+                    "alpha",
+                ),
+                artifact_read_event(
+                    "dup",
+                    "2026-05-24T10:05:00+00:00",
+                    Some("/runs/b"),
+                    "beta",
+                ),
+                artifact_read_event(
+                    "equal-time",
+                    "2026-05-24T10:02:00+00:00",
+                    Some("/runs/b"),
+                    "beta",
+                ),
+            ],
+        );
+        let result = query_artifact_read_audit(
+            &log,
+            &query_for(&["/runs/a", "/runs/b"], &["alpha", "beta"], 2, true),
+        )
+        .unwrap();
+        assert_eq!(
+            result
+                .rows
+                .iter()
+                .map(|row| (row.event.id.as_str(), row.member_index))
+                .collect::<Vec<_>>(),
+            [("dup", 0), ("equal-time", 1)]
+        );
+    }
+
+    #[test]
+    fn artifact_read_query_skips_invalid_envelopes_and_accepts_legacy_path() {
+        let temp = tempdir().unwrap();
+        let mut legacy = artifact_read_event(
+            "legacy",
+            "2026-05-24T10:00:00+00:00",
+            None,
+            "alpha",
+        );
+        legacy.as_object_mut().unwrap().remove("resolved_path");
+        let mut wrong_boolean = artifact_read_event(
+            "wrong-bool",
+            "2026-05-24T10:01:00+00:00",
+            None,
+            "alpha",
+        );
+        wrong_boolean["recorded_link"] = json!("false");
+        let mut wrong_schema = artifact_read_event(
+            "wrong-schema",
+            "2026-05-24T10:02:00+00:00",
+            None,
+            "alpha",
+        );
+        wrong_schema["schema_version"] = json!(2);
+        let mut non_integer_schema = artifact_read_event(
+            "non-integer-schema",
+            "2026-05-24T10:03:00+00:00",
+            None,
+            "alpha",
+        );
+        non_integer_schema["schema_version"] = json!(1.0);
+        let mut boolean_schema = artifact_read_event(
+            "boolean-schema",
+            "2026-05-24T10:04:00+00:00",
+            None,
+            "alpha",
+        );
+        boolean_schema["schema_version"] = json!(true);
+        let log = write_lines(
+            temp.path(),
+            "artifact_reads.jsonl",
+            &[
+                legacy,
+                wrong_boolean,
+                wrong_schema,
+                non_integer_schema,
+                boolean_schema,
+            ],
+        );
+        let result = query_artifact_read_audit(
+            &log,
+            &query_for(&[""], &["alpha"], 50, false),
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].event.id, "legacy");
+        assert_eq!(result.rows[0].event.resolved_path, None);
     }
 
     #[test]

@@ -57,11 +57,70 @@ fn memory_history_bindings_are_registered() {
             "memory_history_mark_reviewed",
             "memory_audit_query",
             "memory_audit_query_wire_schema_version",
+            "artifact_read_audit_query",
+            "artifact_read_audit_query_wire_schema_version",
         ] {
             assert!(module.getattr(name).is_ok(), "missing {name}");
         }
         assert_eq!(py_memory_history_wire_schema_version(), 1);
         assert_eq!(py_memory_audit_query_wire_schema_version(), 1);
+        assert_eq!(py_artifact_read_audit_query_wire_schema_version(), 1);
+    });
+}
+
+#[test]
+fn artifact_read_audit_query_binding_returns_typed_matches_and_handshake() {
+    pyo3::prepare_freethreaded_python();
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("artifact_reads.jsonl");
+    std::fs::write(
+        &log,
+        concat!(
+            "{\"schema_version\":1,\"id\":\"keep\",\"timestamp\":",
+            "\"2026-05-24T10:00:00+00:00\",\"project\":\"sase\",",
+            "\"cwd\":\"/tmp/demo\",\"ref\":\"research:report.md\",",
+            "\"reason\":\"Need report\",\"agent_name\":\"alpha\",",
+            "\"agent_source\":\"SASE_AGENT_NAME\",",
+            "\"artifacts_dir\":\"/runs/target\",",
+            "\"recorded_link\":false,\"resolved_path\":\"/tmp/report.md\"}\n",
+            "{\"schema_version\":1,\"id\":\"other\",\"timestamp\":",
+            "\"2026-05-24T10:01:00+00:00\",\"project\":\"sase\",",
+            "\"cwd\":\"/tmp/demo\",\"ref\":\"research:other.md\",",
+            "\"reason\":\"Need other\",\"agent_name\":\"beta\",",
+            "\"agent_source\":\"SASE_AGENT_NAME\",",
+            "\"artifacts_dir\":\"/runs/other\",",
+            "\"recorded_link\":true,\"resolved_path\":null}\n",
+        ),
+    )
+    .unwrap();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        register_memory_history(&module).unwrap();
+        let query = json_value_to_py(
+            py,
+            &json!({
+                "members": [
+                    {"artifacts_dir": "/runs/target", "agent_name": "alpha"}
+                ],
+                "limit": 50,
+                "deduplicate": false,
+            }),
+        )
+        .unwrap();
+        let query = query.bind(py).downcast::<PyDict>().unwrap();
+        let result =
+            py_artifact_read_audit_query(py, log.to_str().unwrap(), query)
+                .unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(value["rows"][0]["event"]["id"], json!("keep"));
+        assert_eq!(
+            value["rows"][0]["event"]["ref"],
+            json!("research:report.md")
+        );
+        assert_eq!(value["rows"][0]["member_index"], json!(0));
+        assert_eq!(value["source"]["missing"], json!(false));
+        assert_eq!(py_artifact_read_audit_query_wire_schema_version(), 1);
     });
 }
 
