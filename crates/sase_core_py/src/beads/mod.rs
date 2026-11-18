@@ -637,6 +637,23 @@ fn py_bead_statuses_for_ids<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_stranded_snapshot")]
+#[pyo3(signature = (beads_dir, bead_ids=None))]
+fn py_bead_stranded_snapshot<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    bead_ids: Option<Vec<String>>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            sase_core::bead::stranded_snapshot(&beads_dir, bead_ids.as_deref())
+        }),
+    )
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_parse_epic_symbol_entries")]
 fn py_bead_parse_epic_symbol_entries(
     py: Python<'_>,
@@ -1729,6 +1746,7 @@ pub(crate) fn register_beads(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_list_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_statuses_for_ids, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_stranded_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_parse_epic_symbol_entries, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_assess_epic_symbol_freshness, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_closed_ids, m)?)?;

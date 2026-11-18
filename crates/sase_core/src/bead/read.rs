@@ -18,7 +18,8 @@ use super::jsonl::{
     import_issues_from_jsonl, read_event_store,
 };
 use super::wire::{
-    BeadError, BeadTierWire, IssueTypeWire, IssueWire, StatusWire,
+    BeadCompletionFailureWire, BeadError, BeadTierWire, IssueTypeWire,
+    IssueWire, StatusWire,
 };
 use crate::artifact_link::{
     ArtifactLinkRowWire, BeadLinkDirectionWire,
@@ -61,6 +62,41 @@ pub struct BeadIssueDetailWire {
     /// outbound `issue.links` storage projection used by list/search.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_links: Vec<ArtifactLinkRowWire>,
+}
+
+/// One bead row projected for stranded-work collection.
+///
+/// Only the fields the stranded reducer/fact collector consumes: identity,
+/// title, status, kind, ownership, and completion-failure provenance. Heavy
+/// free text (description, design), note histories, refs, links, and
+/// plus-one evidence never cross this projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrandedBeadWire {
+    pub id: String,
+    pub title: String,
+    pub status: StatusWire,
+    pub issue_type: IssueTypeWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<BeadTierWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub assignee: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_failure: Option<BeadCompletionFailureWire>,
+}
+
+/// Slim candidate/context snapshot behind one stranded-work report.
+///
+/// `candidates` are the open stranded-report contenders; `context` holds
+/// the child plans of candidate phases the reducer needs for blocking
+/// semantics. Both arrive in replay (`created_at`) order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrandedSnapshotWire {
+    pub candidates: Vec<StrandedBeadWire>,
+    pub context: Vec<StrandedBeadWire>,
 }
 
 pub fn read_store_issues(
@@ -434,6 +470,123 @@ pub fn statuses_for_ids(
         }
     }
     Ok(statuses)
+}
+
+/// Slim stranded-work snapshot: candidates plus child-plan context.
+///
+/// Candidates are open or in-progress beads the stranded collector claims
+/// (in-progress phases/tasks/epics, or open ones carrying a completion
+/// failure), optionally scoped to `bead_ids`. Context holds every plan
+/// parented to a candidate phase, regardless of status or scope, so the
+/// reducer keeps its dependency context. The indexed lane answers from the
+/// read-model tables; the replay below owns the fallback and the legacy
+/// layout.
+pub fn stranded_snapshot(
+    beads_dir: &Path,
+    bead_ids: Option<&[String]>,
+) -> Result<StrandedSnapshotWire, BeadError> {
+    if let Some(cached) =
+        super::read_model::cached_stranded_snapshot(beads_dir, bead_ids)?
+    {
+        return cached;
+    }
+    Ok(stranded_snapshot_in_issues(
+        read_store_issues(beads_dir)?,
+        bead_ids,
+    ))
+}
+
+pub(crate) fn stranded_snapshot_in_issues(
+    mut issues: Vec<IssueWire>,
+    bead_ids: Option<&[String]>,
+) -> StrandedSnapshotWire {
+    let wanted: Option<BTreeSet<&str>> = bead_ids.map(|ids| {
+        ids.iter()
+            .filter(|id| !id.is_empty())
+            .map(String::as_str)
+            .collect()
+    });
+    sort_by_created_at(&mut issues);
+    let mut candidates = Vec::new();
+    for issue in &issues {
+        if !matches!(issue.status, StatusWire::Open | StatusWire::InProgress) {
+            continue;
+        }
+        if !is_stranded_candidate(issue) {
+            continue;
+        }
+        if wanted
+            .as_ref()
+            .is_some_and(|ids| !ids.contains(issue.id.as_str()))
+        {
+            continue;
+        }
+        candidates.push(stranded_bead_from_issue(issue));
+    }
+    let candidate_ids: BTreeSet<&str> = candidates
+        .iter()
+        .map(|candidate| candidate.id.as_str())
+        .collect();
+    let phase_ids: BTreeSet<&str> = candidates
+        .iter()
+        .filter(|candidate| candidate.issue_type == IssueTypeWire::Phase)
+        .map(|candidate| candidate.id.as_str())
+        .collect();
+    let mut context = Vec::new();
+    if !phase_ids.is_empty() {
+        for issue in &issues {
+            if issue.issue_type != IssueTypeWire::Plan {
+                continue;
+            }
+            let Some(parent_id) = issue.parent_id.as_deref() else {
+                continue;
+            };
+            if !phase_ids.contains(parent_id) {
+                continue;
+            }
+            if candidate_ids.contains(issue.id.as_str()) {
+                continue;
+            }
+            context.push(stranded_bead_from_issue(issue));
+        }
+    }
+    StrandedSnapshotWire {
+        candidates,
+        context,
+    }
+}
+
+/// Mirror the stranded collector's contender rule: phases and tasks contend
+/// while open or in progress, epics contend the same way, and an open bead
+/// without a completion failure is ordinary backlog.
+pub(crate) fn is_stranded_candidate(issue: &IssueWire) -> bool {
+    match issue.issue_type {
+        IssueTypeWire::Phase | IssueTypeWire::Task => {}
+        IssueTypeWire::Plan => {
+            if issue.tier != Some(BeadTierWire::Epic) {
+                return false;
+            }
+        }
+    }
+    match issue.status {
+        StatusWire::InProgress => true,
+        StatusWire::Open => issue.completion_failure.is_some(),
+        _ => false,
+    }
+}
+
+pub(crate) fn stranded_bead_from_issue(issue: &IssueWire) -> StrandedBeadWire {
+    StrandedBeadWire {
+        id: issue.id.clone(),
+        title: issue.title.clone(),
+        status: issue.status.clone(),
+        issue_type: issue.issue_type.clone(),
+        tier: issue.tier.clone(),
+        parent_id: issue.parent_id.clone(),
+        assignee: issue.assignee.clone(),
+        closed_at: issue.closed_at.clone(),
+        completion_failure: issue.completion_failure.clone(),
+    }
 }
 
 pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
@@ -1734,5 +1887,279 @@ mod tests {
         .unwrap();
 
         assert_eq!(doctor(&beads_dir).unwrap(), vec!["OK: no issues found"]);
+    }
+
+    fn stranded_issue(
+        id: &str,
+        issue_type: IssueTypeWire,
+        status: StatusWire,
+        created_at: &str,
+    ) -> IssueWire {
+        let mut issue = phase(id, status);
+        issue.issue_type = issue_type;
+        issue.parent_id = None;
+        issue.created_at = created_at.to_string();
+        issue
+    }
+
+    fn stranded_failure() -> BeadCompletionFailureWire {
+        BeadCompletionFailureWire {
+            close_event_id: "evt-1".to_string(),
+            run_id: "run-1".to_string(),
+            agent_name: "sase-x".to_string(),
+            artifact_dir: "/tmp/x".to_string(),
+            failed_at: "2026-01-02T00:00:00Z".to_string(),
+            evidence_locations: Vec::new(),
+            failure_code: "failed".to_string(),
+        }
+    }
+
+    fn stranded_fixture() -> Vec<IssueWire> {
+        let at = "2026-01-01T00:00:00Z";
+        let mut epic = stranded_issue(
+            "s.epic",
+            IssueTypeWire::Plan,
+            StatusWire::InProgress,
+            "2026-01-01T00:00:03Z",
+        );
+        epic.tier = Some(BeadTierWire::Epic);
+        epic.description = "heavy".to_string();
+        epic.design = "heavy".to_string();
+        epic.notes = vec![crate::bead::wire::BeadNoteWire {
+            id: "n1".to_string(),
+            timestamp: at.to_string(),
+            author: "a".to_string(),
+            text: "heavy".to_string(),
+            edited_at: None,
+            edited_by: None,
+            attachments: Vec::new(),
+        }];
+
+        let mut ph1 = stranded_issue(
+            "s.ph1",
+            IssueTypeWire::Phase,
+            StatusWire::InProgress,
+            "2026-01-01T00:00:01Z",
+        );
+        ph1.parent_id = Some("s.epic".to_string());
+        ph1.assignee = "s.ph1".to_string();
+
+        let mut ph2 = stranded_issue(
+            "s.ph2",
+            IssueTypeWire::Phase,
+            StatusWire::Open,
+            "2026-01-01T00:00:02Z",
+        );
+        ph2.parent_id = Some("s.epic".to_string());
+        ph2.completion_failure = Some(stranded_failure());
+
+        let mut ph3 = stranded_issue(
+            "s.ph3",
+            IssueTypeWire::Phase,
+            StatusWire::Open,
+            "2026-01-01T00:00:09Z",
+        );
+        ph3.parent_id = Some("s.epic".to_string());
+
+        let t1 = stranded_issue(
+            "s.t1",
+            IssueTypeWire::Task,
+            StatusWire::InProgress,
+            "2026-01-01T00:00:04Z",
+        );
+
+        let mut t2 = stranded_issue(
+            "s.t2",
+            IssueTypeWire::Task,
+            StatusWire::Open,
+            "2026-01-01T00:00:05Z",
+        );
+        t2.completion_failure = Some(stranded_failure());
+
+        let t3 = stranded_issue(
+            "s.t3",
+            IssueTypeWire::Task,
+            StatusWire::Closed,
+            "2026-01-01T00:00:11Z",
+        );
+
+        let mut plain = stranded_issue(
+            "s.plain",
+            IssueTypeWire::Plan,
+            StatusWire::InProgress,
+            "2026-01-01T00:00:06Z",
+        );
+        plain.tier = Some(BeadTierWire::Plan);
+
+        let mut ctx1 = stranded_issue(
+            "s.ctx1",
+            IssueTypeWire::Plan,
+            StatusWire::Closed,
+            "2026-01-01T00:00:07Z",
+        );
+        ctx1.tier = Some(BeadTierWire::Plan);
+        ctx1.parent_id = Some("s.ph1".to_string());
+
+        let mut ctx2 = stranded_issue(
+            "s.ctx2",
+            IssueTypeWire::Plan,
+            StatusWire::Open,
+            "2026-01-01T00:00:08Z",
+        );
+        ctx2.tier = Some(BeadTierWire::Plan);
+        ctx2.parent_id = Some("s.ph1".to_string());
+
+        let mut epic2 = stranded_issue(
+            "s.epic2",
+            IssueTypeWire::Plan,
+            StatusWire::InProgress,
+            "2026-01-01T00:00:10Z",
+        );
+        epic2.tier = Some(BeadTierWire::Epic);
+        epic2.parent_id = Some("s.ph1".to_string());
+
+        let mut orphan = stranded_issue(
+            "s.orph",
+            IssueTypeWire::Plan,
+            StatusWire::Open,
+            "2026-01-01T00:00:12Z",
+        );
+        orphan.tier = Some(BeadTierWire::Plan);
+        orphan.parent_id = Some("s.missing".to_string());
+
+        vec![
+            epic, ph1, ph2, ph3, t1, t2, t3, plain, ctx1, ctx2, epic2, orphan,
+        ]
+    }
+
+    #[test]
+    fn stranded_snapshot_selects_candidates_and_child_plan_context() {
+        let snapshot = stranded_snapshot_in_issues(stranded_fixture(), None);
+
+        let candidate_ids: Vec<&str> = snapshot
+            .candidates
+            .iter()
+            .map(|candidate| candidate.id.as_str())
+            .collect();
+        assert_eq!(
+            candidate_ids,
+            vec!["s.ph1", "s.ph2", "s.epic", "s.t1", "s.t2", "s.epic2"]
+        );
+        let context_ids: Vec<&str> = snapshot
+            .context
+            .iter()
+            .map(|issue| issue.id.as_str())
+            .collect();
+        // Closed child plans stay in context; the candidate epic parented
+        // to a candidate phase is a candidate, never context.
+        assert_eq!(context_ids, vec!["s.ctx1", "s.ctx2"]);
+
+        let ph1 = snapshot
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == "s.ph1")
+            .unwrap();
+        assert_eq!(ph1.assignee, "s.ph1");
+        assert_eq!(ph1.parent_id.as_deref(), Some("s.epic"));
+        let ph2 = snapshot
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == "s.ph2")
+            .unwrap();
+        assert_eq!(
+            ph2.completion_failure
+                .as_ref()
+                .map(|failure| failure.agent_name.as_str()),
+            Some("sase-x")
+        );
+
+        // Heavy free text never crosses the projection.
+        let value = serde_json::to_value(&snapshot).unwrap();
+        for row in value["candidates"].as_array().unwrap() {
+            for key in ["description", "design", "notes", "refs", "links"] {
+                assert!(row.get(key).is_none(), "leaked {key}");
+            }
+        }
+        assert!(value["candidates"][2]["title"].is_string());
+    }
+
+    #[test]
+    fn stranded_snapshot_scopes_candidates_but_keeps_context() {
+        let snapshot = stranded_snapshot_in_issues(
+            stranded_fixture(),
+            Some(&["s.ph1".to_string(), String::new()]),
+        );
+
+        let candidate_ids: Vec<&str> = snapshot
+            .candidates
+            .iter()
+            .map(|candidate| candidate.id.as_str())
+            .collect();
+        assert_eq!(candidate_ids, vec!["s.ph1"]);
+        let context_ids: Vec<&str> = snapshot
+            .context
+            .iter()
+            .map(|issue| issue.id.as_str())
+            .collect();
+        // The scoped-out epic parented to the in-scope phase still arrives
+        // as dependency context, mirroring the collector's unscoped plan
+        // lookup.
+        assert_eq!(context_ids, vec!["s.ctx1", "s.ctx2", "s.epic2"]);
+
+        let empty = stranded_snapshot_in_issues(stranded_fixture(), Some(&[]));
+        assert!(empty.candidates.is_empty());
+        assert!(empty.context.is_empty());
+    }
+
+    #[test]
+    fn stranded_snapshot_indexed_lane_matches_replay() {
+        use crate::bead::events::import_issues_to_event_streams;
+        use crate::bead::jsonl::{parse_issues_jsonl, write_event_store};
+        use crate::bead::read_model::{
+            cached_stranded_snapshot, read_model_cache_path_for_store,
+            rebuild_read_model_at,
+        };
+
+        let temp = tempdir().unwrap();
+        fs::create_dir_all(temp.path().join(".git")).unwrap();
+        let beads_dir = temp.path().join("beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        fs::write(beads_dir.join("config.json"), "{}\n").unwrap();
+        let jsonl = concat!(
+            "{\"id\":\"s.epic\",\"title\":\"Epic\",\"status\":\"in_progress\",\"issue_type\":\"plan\",\"tier\":\"epic\",\"created_at\":\"2026-01-01T00:00:03Z\",\"updated_at\":\"2026-01-01T00:00:03Z\"}\n",
+            "{\"id\":\"s.ph1\",\"title\":\"Phase\",\"status\":\"in_progress\",\"issue_type\":\"phase\",\"parent_id\":\"s.epic\",\"assignee\":\"s.ph1\",\"created_at\":\"2026-01-01T00:00:01Z\",\"updated_at\":\"2026-01-01T00:00:01Z\"}\n",
+            "{\"id\":\"s.ctx1\",\"title\":\"Child\",\"status\":\"closed\",\"issue_type\":\"plan\",\"tier\":\"plan\",\"parent_id\":\"s.ph1\",\"created_at\":\"2026-01-01T00:00:07Z\",\"updated_at\":\"2026-01-01T00:00:07Z\"}\n",
+            "{\"id\":\"s.shut\",\"title\":\"Shut\",\"status\":\"closed\",\"issue_type\":\"phase\",\"parent_id\":\"s.epic\",\"created_at\":\"2026-01-01T00:00:09Z\",\"updated_at\":\"2026-01-01T00:00:09Z\"}\n",
+        );
+        let outcome = parse_issues_jsonl(jsonl);
+        assert_eq!(outcome.loaded_rows, 4);
+        let streams = import_issues_to_event_streams(&outcome.issues).unwrap();
+        write_event_store(&beads_dir, &streams).unwrap();
+
+        let cache_path = read_model_cache_path_for_store(&beads_dir).unwrap();
+        rebuild_read_model_at(&beads_dir, &cache_path).unwrap();
+
+        let indexed = cached_stranded_snapshot(&beads_dir, None)
+            .unwrap()
+            .expect("fresh cache serves the snapshot")
+            .unwrap();
+        let replayed = stranded_snapshot_in_issues(
+            read_store_issues(&beads_dir).unwrap(),
+            None,
+        );
+        assert_eq!(indexed, replayed);
+
+        let candidate_ids: Vec<&str> = indexed
+            .candidates
+            .iter()
+            .map(|candidate| candidate.id.as_str())
+            .collect();
+        assert_eq!(candidate_ids, vec!["s.ph1", "s.epic"]);
+        let context_ids: Vec<&str> = indexed
+            .context
+            .iter()
+            .map(|issue| issue.id.as_str())
+            .collect();
+        assert_eq!(context_ids, vec!["s.ctx1"]);
     }
 }

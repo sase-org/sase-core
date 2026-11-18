@@ -30,8 +30,8 @@ pub use queries::{
     cached_blocked, cached_blocked_ids, cached_board, cached_closed_ids,
     cached_detail, cached_epic_children, cached_list, cached_ready,
     cached_ready_ids, cached_resolve, cached_search, cached_show, cached_stats,
-    cached_statuses_for_ids, lineage_history_streams, with_fresh_cache_at,
-    BoardView, ListPage,
+    cached_statuses_for_ids, cached_stranded_snapshot, lineage_history_streams,
+    with_fresh_cache_at, BoardView, ListPage,
 };
 pub use store::{
     cached_store_snapshot, cached_store_snapshot_at, ensure_cache_ready,

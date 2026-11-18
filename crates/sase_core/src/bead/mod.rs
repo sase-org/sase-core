@@ -103,9 +103,9 @@ pub use read::{
     read_legacy_jsonl_issues, read_store_issues, ready_issues,
     reference_diagnostics, resolve_issue_id, resolve_issue_id_in_issues,
     resolve_issue_ids, show_issue, show_issue_detail,
-    show_issue_detail_with_options, stats, statuses_for_ids,
+    show_issue_detail_with_options, stats, statuses_for_ids, stranded_snapshot,
     BeadDoctorReportWire, BeadIssueDetailWire, BeadProjectionDriftWire,
-    BEAD_READ_WIRE_SCHEMA_VERSION,
+    StrandedBeadWire, StrandedSnapshotWire, BEAD_READ_WIRE_SCHEMA_VERSION,
 };
 pub use read_model::{
     cached_store_snapshot, read_model_cache_path_for_store, read_model_status,

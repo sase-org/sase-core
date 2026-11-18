@@ -24,10 +24,13 @@ use crate::bead::events::{
     artifact_link_row_from_provenance, ActiveLinkProvenance,
 };
 use crate::bead::read::{
-    parse_issue_types, parse_statuses, parse_tiers, sort_artifact_link_rows,
-    task_type_matches, BeadIssueDetailWire,
+    is_stranded_candidate, parse_issue_types, parse_statuses, parse_tiers,
+    sort_artifact_link_rows, stranded_bead_from_issue, task_type_matches,
+    BeadIssueDetailWire, StrandedSnapshotWire,
 };
-use crate::bead::wire::{BeadError, BeadSearchMatchWire, IssueWire};
+use crate::bead::wire::{
+    BeadError, BeadSearchMatchWire, IssueTypeWire, IssueWire,
+};
 
 use super::store::{
     drop_cache_file, ensure_cache_ready_at, open_read_only, read_meta,
@@ -1169,6 +1172,111 @@ fn status_statement_query(
     issue_id: &str,
 ) -> Option<String> {
     statement.query_row([issue_id], |row| row.get(0)).ok()
+}
+
+/// Slim stranded-work snapshot from the indexes, or `None` on fallback.
+///
+/// Candidates answer from the indexed status/type/tier columns, so closed
+/// history never decodes; only contender rows load their `row` blob.
+/// Context resolves parent links through the indexed `parent` column
+/// instead of scanning every plan. Order reproduces the replay path's
+/// stable `created_at` sort by breaking ties on the stored `position`.
+#[allow(clippy::type_complexity)]
+pub fn cached_stranded_snapshot(
+    beads_dir: &Path,
+    bead_ids: Option<&[String]>,
+) -> Result<Option<Result<StrandedSnapshotWire, BeadError>>, BeadError> {
+    let owned = OwnedStrandedQuery::new(bead_ids);
+    with_fresh_cache(beads_dir, |connection| {
+        Ok(stranded_in(connection, &owned))
+    })
+}
+
+struct OwnedStrandedQuery {
+    bead_ids: Option<Vec<String>>,
+}
+
+impl OwnedStrandedQuery {
+    fn new(bead_ids: Option<&[String]>) -> Self {
+        Self {
+            bead_ids: bead_ids.map(<[String]>::to_vec),
+        }
+    }
+}
+
+fn stranded_in(
+    connection: &Connection,
+    query: &OwnedStrandedQuery,
+) -> Result<StrandedSnapshotWire, BeadError> {
+    let wanted: Option<BTreeSet<String>> = query
+        .bead_ids
+        .as_ref()
+        .map(|ids| ids.iter().filter(|id| !id.is_empty()).cloned().collect());
+    let mut candidates = Vec::new();
+    let mut statement = connection
+        .prepare(
+            "SELECT row FROM issues WHERE status IN ('open', 'in_progress') \
+             AND (issue_type IN ('phase', 'task') \
+             OR (issue_type = 'plan' AND tier = 'epic')) \
+             ORDER BY created_at ASC, position ASC",
+        )
+        .map_err(|error| BeadError::io(error.to_string()))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| BeadError::io(error.to_string()))?;
+    for row in rows {
+        let text: String =
+            row.map_err(|error| BeadError::io(error.to_string()))?;
+        let issue = decode_issue(text).map_err(BeadError::io)?;
+        if !is_stranded_candidate(&issue) {
+            continue;
+        }
+        if wanted.as_ref().is_some_and(|ids| !ids.contains(&issue.id)) {
+            continue;
+        }
+        candidates.push(stranded_bead_from_issue(&issue));
+    }
+    let candidate_ids: BTreeSet<&str> = candidates
+        .iter()
+        .map(|candidate| candidate.id.as_str())
+        .collect();
+    let phase_ids: Vec<&str> = candidates
+        .iter()
+        .filter(|candidate| candidate.issue_type == IssueTypeWire::Phase)
+        .map(|candidate| candidate.id.as_str())
+        .collect();
+    let mut context = Vec::new();
+    if !phase_ids.is_empty() {
+        let placeholders =
+            phase_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT row FROM issues WHERE issue_type = 'plan' AND parent IN \
+             ({placeholders}) ORDER BY created_at ASC, position ASC"
+        );
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| BeadError::io(error.to_string()))?;
+        let params: Vec<&dyn rusqlite::ToSql> = phase_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
+        let rows = statement
+            .query_map(params.as_slice(), |row| row.get::<_, String>(0))
+            .map_err(|error| BeadError::io(error.to_string()))?;
+        for row in rows {
+            let text: String =
+                row.map_err(|error| BeadError::io(error.to_string()))?;
+            let issue = decode_issue(text).map_err(BeadError::io)?;
+            if candidate_ids.contains(issue.id.as_str()) {
+                continue;
+            }
+            context.push(stranded_bead_from_issue(&issue));
+        }
+    }
+    Ok(StrandedSnapshotWire {
+        candidates,
+        context,
+    })
 }
 
 /// Board views from the indexes: the full list plus ready/blocked IDs.

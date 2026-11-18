@@ -1250,6 +1250,106 @@ fn bead_list_query_statuses_and_closed_bindings_round_trip() {
 }
 
 #[test]
+fn bead_stranded_snapshot_binding_returns_slim_candidate_context() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (_temp, beads_dir) = temp_beads_dir();
+        let rows = [
+            json!({
+                "id": "beads-1",
+                "title": "Epic",
+                "status": "in_progress",
+                "issue_type": "plan",
+                "tier": "epic",
+                "description": "heavy description that must not cross",
+                "notes": [{"id": "n1", "timestamp": "2026-01-01T00:00:00Z", "author": "a", "text": "heavy"}],
+                "created_at": "2026-01-01T00:00:03Z",
+                "updated_at": "2026-01-01T00:00:03Z"
+            }),
+            json!({
+                "id": "beads-1.1",
+                "title": "Phase",
+                "status": "in_progress",
+                "issue_type": "phase",
+                "parent_id": "beads-1",
+                "assignee": "beads-1.1",
+                "created_at": "2026-01-01T00:00:01Z",
+                "updated_at": "2026-01-01T00:00:01Z"
+            }),
+            json!({
+                "id": "beads-1.2",
+                "title": "Child",
+                "status": "closed",
+                "issue_type": "plan",
+                "tier": "plan",
+                "parent_id": "beads-1.1",
+                "created_at": "2026-01-01T00:00:02Z",
+                "updated_at": "2026-01-01T00:00:02Z"
+            }),
+            json!({
+                "id": "beads-9",
+                "title": "Backlog",
+                "status": "open",
+                "issue_type": "phase",
+                "parent_id": "beads-1",
+                "created_at": "2026-01-01T00:00:04Z",
+                "updated_at": "2026-01-01T00:00:04Z"
+            }),
+        ];
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            rows.iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let dir = beads_dir.to_str().unwrap();
+
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        assert!(module.getattr("bead_stranded_snapshot").is_ok());
+
+        let snapshot = py_bead_stranded_snapshot(py, dir, None).unwrap();
+        let snapshot = py_to_json_value(snapshot.bind(py)).unwrap();
+        let candidate_ids: Vec<&str> = snapshot["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(candidate_ids, vec!["beads-1.1", "beads-1"]);
+        let context_ids: Vec<&str> = snapshot["context"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(context_ids, vec!["beads-1.2"]);
+        // Heavy free text and note histories never cross the projection.
+        for row in snapshot["candidates"].as_array().unwrap() {
+            for key in ["description", "design", "notes", "refs", "links"] {
+                assert!(row.get(key).is_none(), "leaked {key}");
+            }
+        }
+        assert_eq!(snapshot["candidates"][0]["assignee"], json!("beads-1.1"));
+
+        let scoped = py_bead_stranded_snapshot(
+            py,
+            dir,
+            Some(vec!["beads-1".to_string()]),
+        )
+        .unwrap();
+        let scoped = py_to_json_value(scoped.bind(py)).unwrap();
+        assert_eq!(scoped["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(scoped["candidates"][0]["id"], json!("beads-1"));
+        assert!(scoped["context"].as_array().unwrap().is_empty());
+    });
+}
+
+#[test]
 fn bead_merge_event_streams_binding_preserves_replay_stable_union() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
