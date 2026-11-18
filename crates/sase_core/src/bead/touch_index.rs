@@ -1250,7 +1250,7 @@ fn display_timestamp(raw: &str, at: DateTime<Utc>) -> String {
     }
 }
 
-fn instant_or_min(text: &str) -> DateTime<Utc> {
+pub(crate) fn instant_or_min(text: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(text)
         .map(|at| at.with_timezone(&Utc))
         .unwrap_or(DateTime::<Utc>::MIN_UTC)

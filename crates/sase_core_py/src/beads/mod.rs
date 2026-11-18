@@ -8,7 +8,7 @@ use target_probe::register_target_probe;
 use crate::artifact_refs::artifact_ref_context_from_pydict;
 
 use crate::json_bridge::{
-    json_value_to_py, py_to_json_value, strings_to_paths,
+    json_value_to_py, py_to_json_value, serialize_to_py, strings_to_paths,
 };
 
 use pyo3::wrap_pyfunction;
@@ -404,6 +404,79 @@ fn py_bead_touch_index_query<'py>(
         core_query_bead_touches(&index_path, actors.as_deref())
     });
     bead_result_to_py(py, Ok::<_, BeadError>(result))
+}
+
+/// Query the touch index for the rows ordered members claim.
+///
+/// `query` is a `BeadTouchMemberQueryWire` dict: ordered
+/// `members` (`globalized_name` plus optional `local_name`), the resolving
+/// `owner` (`username`, `machine_name`, omitted when unconfigured), and
+/// `known_owner_roots`. Only claimed rows are returned, newest first.
+#[pyfunction]
+#[pyo3(name = "bead_touch_member_query")]
+fn py_bead_touch_member_query<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    query: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let query = serde_json::from_value::<
+        sase_core::bead::BeadTouchMemberQueryWire,
+    >(py_to_json_value(query.as_any())?)
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "query is not a valid BeadTouchMemberQueryWire dict: {error}"
+        ))
+    })?;
+    let index_path = PathBuf::from(index_path);
+    let result = py.allow_threads(|| {
+        sase_core::bead::query_bead_touches_for_members(&index_path, &query)
+    });
+    let value = serde_json::to_value(result).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal bead touch member query serialize error: {error}"
+        ))
+    })?;
+    serialize_to_py(py, &value)
+}
+
+/// Fold the legacy bead-views log into the viewed rows members claim.
+///
+/// Same request shape as `bead_touch_member_query`. Streams the log and
+/// folds only claimed events, so unrelated agents' views are released as
+/// the log is scanned. `complete` is false when an I/O error cut the scan
+/// short; callers must discard such an answer.
+#[pyfunction]
+#[pyo3(name = "bead_view_member_query")]
+fn py_bead_view_member_query<'py>(
+    py: Python<'py>,
+    views_path: &str,
+    query: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let query = serde_json::from_value::<
+        sase_core::bead::BeadTouchMemberQueryWire,
+    >(py_to_json_value(query.as_any())?)
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "query is not a valid BeadTouchMemberQueryWire dict: {error}"
+        ))
+    })?;
+    let views_path = PathBuf::from(views_path);
+    let result = py.allow_threads(|| {
+        sase_core::bead::query_bead_views_for_members(&views_path, &query)
+    });
+    let value = serde_json::to_value(result).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal bead view member query serialize error: {error}"
+        ))
+    })?;
+    serialize_to_py(py, &value)
+}
+
+/// Return the targeted touch/view member-query wire schema version.
+#[pyfunction]
+#[pyo3(name = "bead_touch_member_query_wire_schema_version")]
+fn py_bead_touch_member_query_wire_schema_version() -> u64 {
+    sase_core::bead::TOUCH_MEMBER_QUERY_WIRE_SCHEMA_VERSION
 }
 
 #[pyfunction]
@@ -1646,6 +1719,12 @@ pub(crate) fn register_beads(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_bead_touch_index_refresh, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_touch_index_query, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_touch_member_query, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_view_member_query, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_bead_touch_member_query_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_bead_touch_index_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_list_query, m)?)?;

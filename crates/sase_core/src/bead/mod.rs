@@ -23,6 +23,7 @@ pub mod seal_watch;
 pub mod search;
 pub mod target_probe;
 pub mod touch_index;
+pub mod touch_member_query;
 pub mod wire;
 pub mod work;
 
@@ -154,6 +155,13 @@ pub use touch_index::{
     BeadTouchIndexWire, BeadTouchQueryWire, BeadTouchRefreshWire,
     BeadTouchWire, BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION,
     CREATION_REASON_PREVIEW_LIMIT, NOTE_PREVIEW_TEXT_LIMIT,
+};
+pub use touch_member_query::{
+    query_bead_touches_for_members, query_bead_views_for_members,
+    BeadTouchMatchWire, BeadTouchMemberQueryResultWire,
+    BeadTouchMemberQueryWire, BeadViewMemberQueryResultWire, TouchMemberWire,
+    TouchOwnerWire, BEAD_VIEW_LOG_SCHEMA_VERSION,
+    TOUCH_MEMBER_QUERY_WIRE_SCHEMA_VERSION,
 };
 pub use wire::{
     flag_thresholds_due, normalize_creation_reason, notes_text,

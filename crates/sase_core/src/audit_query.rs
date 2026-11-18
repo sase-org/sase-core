@@ -70,7 +70,7 @@ pub struct AuditSourceIdentityWire {
 }
 
 impl AuditSourceIdentityWire {
-    fn missing() -> Self {
+    pub(crate) fn missing() -> Self {
         Self {
             missing: true,
             size: 0,
@@ -254,7 +254,7 @@ fn memory_row_from_mapping(
     data: &serde_json::Map<String, Value>,
 ) -> Option<MemoryReadWire> {
     let schema_version = json_u64(data.get("schema_version")?)?;
-    if !matches!(schema_version, 1 | 2 | 3) {
+    if !matches!(schema_version, 1..=3) {
         return None;
     }
     let id = json_string(data.get("id")?)?;
@@ -498,7 +498,7 @@ fn lexical_clean(path: &Path) -> String {
     out
 }
 
-fn source_identity_for(
+pub(crate) fn source_identity_for(
     log_path: &Path,
 ) -> Result<AuditSourceIdentityWire, AuditQueryError> {
     match std::fs::metadata(log_path) {

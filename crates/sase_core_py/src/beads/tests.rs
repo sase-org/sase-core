@@ -271,6 +271,152 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
 }
 
 #[test]
+fn bead_touch_member_bindings_return_only_claimed_rows() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        for name in [
+            "bead_touch_member_query",
+            "bead_view_member_query",
+            "bead_touch_member_query_wire_schema_version",
+        ] {
+            assert!(module.getattr(name).is_ok(), "{name}");
+        }
+        assert_eq!(py_bead_touch_member_query_wire_schema_version(), 1);
+
+        let dir = tempdir().unwrap();
+        let index_path = dir.path().join("agent_bead_touches.json");
+        let index_str = index_path.to_str().unwrap();
+        fs::write(
+            &index_path,
+            json!({
+                "schema_version": 4,
+                "generation": "gen-9",
+                "streams": {"s-1": [1, 100]},
+                "touches": [
+                    {
+                        "actor": "bbugyi200.athena.coder",
+                        "bead_id": "sase-1.1",
+                        "title": "Mine",
+                        "issue_type": "task",
+                        "status": "open",
+                        "verbs": {"updated": 1},
+                        "first_at": "2026-06-01T00:00:00Z",
+                        "last_at": "2026-06-02T00:00:00Z",
+                        "current_note_count": 0,
+                        "creation_reason_truncated": false,
+                        "stream_id": "s-1",
+                    },
+                    {
+                        "actor": "stranger",
+                        "bead_id": "sase-9.9",
+                        "title": "Theirs",
+                        "issue_type": "task",
+                        "status": "open",
+                        "verbs": {"updated": 1},
+                        "first_at": "2026-06-01T00:00:00Z",
+                        "last_at": "2026-06-03T00:00:00Z",
+                        "current_note_count": 0,
+                        "creation_reason_truncated": false,
+                        "stream_id": "s-1",
+                    },
+                ],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let request = json!({
+            "members": [
+                {"globalized_name": "bbugyi200.athena.coder", "local_name": "coder"},
+            ],
+            "owner": {"username": "bbugyi200", "machine_name": "athena"},
+            "known_owner_roots": ["athena", "bbugyi200.athena"],
+        });
+        let request_obj = json_value_to_py(py, &request).unwrap();
+        let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+        let out = py_bead_touch_member_query(py, index_str, request).unwrap();
+        let out = py_to_json_value(out.bind(py)).unwrap();
+        assert_eq!(out["schema_version"], json!(4));
+        assert_eq!(out["generation"], json!("gen-9"));
+        assert_eq!(out["source"]["missing"], json!(false));
+        assert_eq!(out["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(out["rows"][0]["member_index"], json!(0));
+        assert_eq!(out["rows"][0]["touch"]["bead_id"], json!("sase-1.1"));
+
+        // Legacy bare-local recovery resolves through the passed owner.
+        let bare = json!({
+            "members": [{"globalized_name": "bbugyi200.athena.coder"}],
+            "owner": {"username": "bbugyi200", "machine_name": "athena"},
+            "known_owner_roots": ["athena", "bbugyi200.athena"],
+        });
+        let bare_obj = json_value_to_py(py, &bare).unwrap();
+        let bare = bare_obj.bind(py).downcast::<PyDict>().unwrap();
+        fs::write(
+            &index_path,
+            json!({
+                "schema_version": 4,
+                "generation": "gen-9",
+                "streams": {},
+                "touches": [
+                    {
+                        "actor": "coder",
+                        "bead_id": "sase-1.2",
+                        "title": "Bare",
+                        "issue_type": "task",
+                        "status": "open",
+                        "verbs": {"noted": 1},
+                        "first_at": "2026-06-01T00:00:00Z",
+                        "last_at": "2026-06-01T00:00:00Z",
+                        "current_note_count": 0,
+                        "creation_reason_truncated": false,
+                        "stream_id": "s-1",
+                    },
+                ],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let out = py_bead_touch_member_query(py, index_str, bare).unwrap();
+        let out = py_to_json_value(out.bind(py)).unwrap();
+        assert_eq!(out["rows"].as_array().unwrap().len(), 1);
+
+        let views_path = dir.path().join("bead_views.jsonl");
+        let views_str = views_path.to_str().unwrap();
+        fs::write(
+            &views_path,
+            format!(
+                "{}\n{}\n",
+                json!({"schema_version": 1, "id": "v-1", "timestamp": "2026-06-01T00:00:00Z", "project": "p", "cwd": "/", "bead_id": "sase-1.1", "agent_name": "bbugyi200.athena.coder"}),
+                json!({"schema_version": 1, "id": "v-2", "timestamp": "2026-06-02T00:00:00Z", "project": "p", "cwd": "/", "bead_id": "sase-1.1", "agent_name": "stranger"}),
+            ),
+        )
+        .unwrap();
+        let out = py_bead_view_member_query(py, views_str, request).unwrap();
+        let out = py_to_json_value(out.bind(py)).unwrap();
+        assert_eq!(out["complete"], json!(true));
+        assert_eq!(out["source"]["missing"], json!(false));
+        assert_eq!(out["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(out["rows"][0]["touch"]["verbs"], json!({"viewed": 1}));
+
+        let absent = py_bead_touch_member_query(
+            py,
+            dir.path().join("absent.json").to_str().unwrap(),
+            request,
+        )
+        .unwrap();
+        let absent = py_to_json_value(absent.bind(py)).unwrap();
+        assert_eq!(absent["rows"], json!([]));
+        assert_eq!(absent["source"]["missing"], json!(true));
+
+        let bad_obj = json_value_to_py(py, &json!({"members": [7]})).unwrap();
+        let bad = bad_obj.bind(py).downcast::<PyDict>().unwrap();
+        assert!(py_bead_touch_member_query(py, index_str, bad).is_err());
+    });
+}
+
+#[test]
 fn bead_doctor_binding_keeps_contexts_optional_and_marks_unavailable() {
     pyo3::prepare_freethreaded_python();
     let temp = tempfile::tempdir().unwrap();
