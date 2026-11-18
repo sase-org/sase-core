@@ -16,9 +16,10 @@ mod validation;
 mod wire;
 
 pub use batch::{
-    apply_chop_batch_transition, reconcile_chop_batch, summarize_chop_batch,
-    validate_chop_batch_manifest, ChopBatchBlockedEntryWire,
-    ChopBatchCountsWire, ChopBatchEventKindWire, ChopBatchLaunchRoleWire,
+    apply_chop_batch_transition, chop_batch_generation_matches,
+    reconcile_chop_batch, summarize_chop_batch, validate_chop_batch_manifest,
+    ChopBatchBlockedEntryWire, ChopBatchCountsWire, ChopBatchEventKindWire,
+    ChopBatchGenerationMatchRequestWire, ChopBatchLaunchRoleWire,
     ChopBatchManifestWire, ChopBatchMemberStatusWire, ChopBatchMemberWire,
     ChopBatchReconcileRequestWire, ChopBatchResumeWire,
     ChopBatchRunContextWire, ChopBatchSpawnObservationKindWire,

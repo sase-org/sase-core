@@ -760,3 +760,80 @@ fn chop_batch_binding_settles_a_launch_that_crosses_cancellation() {
         assert_eq!(settled_value["members"][1]["status"], json!("cancelled"));
     });
 }
+
+#[test]
+fn chop_batch_binding_matches_generation_by_clan_and_settles_cancelled_dispatch() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let manifest = healthy_chop_batch_manifest_json();
+        let scoped_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": CHOP_BATCH_SCHEMA_VERSION,
+                "manifest": manifest,
+                "clan": "toobig-68",
+                "generation": "gen-1",
+            }),
+        )
+        .unwrap();
+        let scoped = scoped_obj.bind(py).downcast::<PyDict>().unwrap();
+        assert!(py_chop_batch_generation_matches(py, scoped).unwrap());
+
+        let wrong_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": CHOP_BATCH_SCHEMA_VERSION,
+                "manifest": manifest,
+                "clan": "toobig-68",
+                "generation": "gen-2",
+            }),
+        )
+        .unwrap();
+        let wrong = wrong_obj.bind(py).downcast::<PyDict>().unwrap();
+        assert!(!py_chop_batch_generation_matches(py, wrong).unwrap());
+
+        let dispatch_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": CHOP_BATCH_SCHEMA_VERSION,
+                "manifest": manifest,
+                "event": "begin_dispatch",
+                "member_index": 0,
+            }),
+        )
+        .unwrap();
+        let dispatch = dispatch_obj.bind(py).downcast::<PyDict>().unwrap();
+        let dispatching = py_apply_chop_batch_transition(py, dispatch).unwrap();
+        let dispatching_value = py_to_json_value(dispatching.bind(py)).unwrap();
+
+        let cancel_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": CHOP_BATCH_SCHEMA_VERSION,
+                "manifest": dispatching_value,
+                "event": "cancel_clan_generation",
+                "reason": "user killed clan",
+            }),
+        )
+        .unwrap();
+        let cancel = cancel_obj.bind(py).downcast::<PyDict>().unwrap();
+        let cancelled = py_apply_chop_batch_transition(py, cancel).unwrap();
+        let cancelled_value = py_to_json_value(cancelled.bind(py)).unwrap();
+
+        let settle_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": CHOP_BATCH_SCHEMA_VERSION,
+                "manifest": cancelled_value,
+                "event": "settle_cancelled_dispatch",
+                "member_index": 0,
+                "reason": "dead executor; no spawn evidence",
+            }),
+        )
+        .unwrap();
+        let settle = settle_obj.bind(py).downcast::<PyDict>().unwrap();
+        let settled = py_apply_chop_batch_transition(py, settle).unwrap();
+        let settled_value = py_to_json_value(settled.bind(py)).unwrap();
+        assert_eq!(settled_value["members"][0]["status"], json!("cancelled"));
+    });
+}

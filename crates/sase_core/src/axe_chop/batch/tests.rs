@@ -557,3 +557,85 @@ fn wait_references_must_name_batch_members() {
     // launcher's job, so validation accepts the resolvable reference.
     validate_chop_batch_manifest(&shown).expect("resolvable wait ref");
 }
+
+fn mixed_clan_manifest() -> ChopBatchManifestWire {
+    let mut shown = manifest(&["a.one", "b.one"]);
+    shown.members[0].clan = Some("a".to_string());
+    shown.members[0].clan_generation = Some("20261118_120000".to_string());
+    shown.members[1].clan = Some("b".to_string());
+    shown.members[1].clan_generation = Some("20261118_130000".to_string());
+    shown
+}
+
+fn generation_match(
+    manifest: &ChopBatchManifestWire,
+    clan: &str,
+    generation: &str,
+) -> bool {
+    chop_batch_generation_matches(&ChopBatchGenerationMatchRequestWire {
+        schema_version: CHOP_BATCH_SCHEMA_VERSION,
+        manifest: manifest.clone(),
+        clan: clan.to_string(),
+        generation: generation.to_string(),
+    })
+    .expect("generation match must succeed")
+}
+
+#[test]
+fn generation_match_is_scoped_to_the_requested_clan() {
+    let shown = mixed_clan_manifest();
+    // Wrong generation that belongs to the other clan must not match.
+    assert!(!generation_match(&shown, "a", "20261118_130000"));
+    assert!(!generation_match(&shown, "b", "20261118_120000"));
+    // Each clan's own generation matches and cancels the whole batch.
+    assert!(generation_match(&shown, "a", "20261118_120000"));
+    assert!(generation_match(&shown, "b", "20261118_130000"));
+}
+
+#[test]
+fn cancelled_dispatch_settles_without_relaunch() {
+    let shown = manifest(&["a1", "a2"]);
+    let in_flight = dispatch(&shown, 0);
+    let cancelled = transition(
+        &in_flight,
+        ChopBatchEventKindWire::CancelClanGeneration,
+        None,
+        Some("user killed clan"),
+    )
+    .expect("cancel must succeed");
+    assert_eq!(
+        cancelled.members[0].status,
+        ChopBatchMemberStatusWire::Dispatching
+    );
+    // Dead-executor reconciliation with proof of no spawn settles the
+    // in-flight member to cancelled without launching.
+    let settled = transition(
+        &cancelled,
+        ChopBatchEventKindWire::SettleCancelledDispatch,
+        Some(0),
+        Some("dead executor; no spawn evidence"),
+    )
+    .expect("settle must succeed");
+    assert_eq!(
+        settled.members[0].status,
+        ChopBatchMemberStatusWire::Cancelled
+    );
+    assert_eq!(settled.status, ChopBatchStatusWire::Cancelled);
+    // Settling a non-dispatching member or a non-cancelled batch refuses.
+    let error = transition(
+        &settled,
+        ChopBatchEventKindWire::SettleCancelledDispatch,
+        Some(0),
+        Some("again"),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "terminal_state_conflict");
+    let error = transition(
+        &shown,
+        ChopBatchEventKindWire::SettleCancelledDispatch,
+        Some(0),
+        Some("not cancelled"),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "batch_not_cancelled");
+}

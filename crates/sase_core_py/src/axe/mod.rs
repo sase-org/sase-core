@@ -392,6 +392,21 @@ fn py_summarize_chop_batch<'py>(
     chop_result_to_py(py, &result)
 }
 
+/// Decide whether an explicit clan-generation kill targets a batch.
+#[pyfunction]
+#[pyo3(name = "chop_batch_generation_matches")]
+fn py_chop_batch_generation_matches<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<bool> {
+    let request: ChopBatchGenerationMatchRequestWire =
+        chop_request_from_pydict(request, "chop batch generation match request")?;
+    let result =
+        core_chop_batch_generation_matches(&request).map_err(chop_error_to_pyerr)?;
+    let _ = py;
+    Ok(result)
+}
+
 pub(crate) fn register_axe(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_chop_overrun_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_chop_overrun, m)?)?;
@@ -422,6 +437,7 @@ pub(crate) fn register_axe(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_apply_chop_batch_transition, m)?)?;
     m.add_function(wrap_pyfunction!(py_reconcile_chop_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_summarize_chop_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(py_chop_batch_generation_matches, m)?)?;
     Ok(())
 }
 

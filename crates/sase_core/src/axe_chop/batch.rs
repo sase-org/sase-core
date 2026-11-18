@@ -78,6 +78,7 @@ pub enum ChopBatchEventKindWire {
     RequestPause,
     Resume,
     CancelClanGeneration,
+    SettleCancelledDispatch,
 }
 
 /// One explicit spawn observation for a batch member, recorded by the host
@@ -449,6 +450,30 @@ pub fn apply_chop_batch_transition(
                 }
             }
         }
+        ChopBatchEventKindWire::SettleCancelledDispatch => {
+            let index = require_member(request)?;
+            let reason = require_reason(request, "settle_cancelled_dispatch")?;
+            if manifest.status != ChopBatchStatusWire::Cancelled {
+                return Err(ChopEngineError::new(
+                    "batch_not_cancelled",
+                    "$.status",
+                    "settle_cancelled_dispatch requires a cancelled batch",
+                ));
+            }
+            let member = require_member_mut(&mut manifest, index)?;
+            match member.status {
+                ChopBatchMemberStatusWire::Dispatching => {
+                    member.status = ChopBatchMemberStatusWire::Cancelled;
+                    member.status_reason = Some(reason);
+                }
+                _ => {
+                    return Err(terminal_state_error(
+                        index,
+                        "settle_cancelled_dispatch",
+                    ));
+                }
+            }
+        }
     }
     maybe_complete(&mut manifest);
     validate_manifest(&manifest)?;
@@ -556,6 +581,75 @@ pub fn summarize_chop_batch(
         batch_status: manifest.status,
         counts: count_members(&manifest.members),
     })
+}
+
+/// Request to test whether an explicit clan-generation kill targets a batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChopBatchGenerationMatchRequestWire {
+    pub schema_version: u32,
+    pub manifest: ChopBatchManifestWire,
+    pub clan: String,
+    pub generation: String,
+}
+
+/// Decide whether an explicit kill targets the requested clan generation.
+///
+/// Only generations recorded for the requested clan may satisfy or veto the
+/// match. Generations from other clans in a mixed-clan batch are ignored.
+pub fn chop_batch_generation_matches(
+    request: &ChopBatchGenerationMatchRequestWire,
+) -> Result<bool, ChopEngineError> {
+    if request.schema_version != CHOP_BATCH_SCHEMA_VERSION {
+        return Err(ChopEngineError::new(
+            "schema_version_mismatch",
+            "$.schema_version",
+            format!(
+                "got {}, expected {CHOP_BATCH_SCHEMA_VERSION}",
+                request.schema_version
+            ),
+        ));
+    }
+    validate_manifest(&request.manifest)?;
+    if request.clan.trim().is_empty() {
+        return Err(ChopEngineError::new(
+            "blank_value",
+            "$.clan",
+            "clan must not be blank",
+        ));
+    }
+    if request.generation.trim().is_empty() {
+        return Ok(true);
+    }
+    let mut scoped: Vec<String> = Vec::new();
+    for member in &request.manifest.members {
+        if let Some(clan) = member.clan.as_deref() {
+            if !clan.is_empty() && clan != request.clan {
+                continue;
+            }
+        }
+        if let Some(generation) = member.clan_generation.as_deref() {
+            if !generation.is_empty() {
+                scoped.push(generation.to_string());
+            }
+        }
+    }
+    if scoped.is_empty() {
+        let top_clan = request.manifest.clan.as_deref().unwrap_or("");
+        let top_generation = request.manifest.clan_generation.as_deref().unwrap_or("");
+        let has_member_clans = request.manifest.members.iter().any(|member| {
+            member.clan.as_deref().is_some_and(|clan| !clan.is_empty())
+        });
+        if !top_generation.is_empty() && (top_clan.is_empty() || top_clan == request.clan)
+            && !has_member_clans
+        {
+            scoped.push(top_generation.to_string());
+        }
+    }
+    if !scoped.is_empty() {
+        return Ok(scoped.iter().any(|generation| generation == &request.generation));
+    }
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
