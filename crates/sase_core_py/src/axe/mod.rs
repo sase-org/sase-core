@@ -328,6 +328,70 @@ fn py_validate_axe_config<'py>(
     chop_result_to_py(py, &result)
 }
 
+// --- Chop launch batch contract -------------------------------------------
+/// Return the supported chop launch batch wire schema version.
+#[pyfunction]
+#[pyo3(name = "chop_batch_wire_schema_version")]
+fn py_chop_batch_wire_schema_version() -> u32 {
+    CHOP_BATCH_SCHEMA_VERSION
+}
+
+/// Validate a crash-safe chop launch batch manifest without changing it.
+#[pyfunction]
+#[pyo3(name = "validate_chop_batch_manifest")]
+fn py_validate_chop_batch_manifest<'py>(
+    py: Python<'py>,
+    manifest: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let manifest: ChopBatchManifestWire =
+        chop_request_from_pydict(manifest, "chop batch manifest")?;
+    let validated = core_validate_chop_batch_manifest(&manifest)
+        .map_err(chop_error_to_pyerr)?;
+    chop_result_to_py(py, &validated)
+}
+
+/// Apply one state-machine event to a chop launch batch manifest.
+#[pyfunction]
+#[pyo3(name = "apply_chop_batch_transition")]
+fn py_apply_chop_batch_transition<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ChopBatchTransitionRequestWire =
+        chop_request_from_pydict(request, "chop batch transition request")?;
+    let result = core_apply_chop_batch_transition(&request)
+        .map_err(chop_error_to_pyerr)?;
+    chop_result_to_py(py, &result)
+}
+
+/// Select the resume work for a batch from explicit spawn observations.
+#[pyfunction]
+#[pyo3(name = "reconcile_chop_batch")]
+fn py_reconcile_chop_batch<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ChopBatchReconcileRequestWire =
+        chop_request_from_pydict(request, "chop batch reconcile request")?;
+    let result =
+        core_reconcile_chop_batch(&request).map_err(chop_error_to_pyerr)?;
+    chop_result_to_py(py, &result)
+}
+
+/// Return batch identity plus progress counts.
+#[pyfunction]
+#[pyo3(name = "summarize_chop_batch")]
+fn py_summarize_chop_batch<'py>(
+    py: Python<'py>,
+    manifest: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let manifest: ChopBatchManifestWire =
+        chop_request_from_pydict(manifest, "chop batch manifest")?;
+    let result =
+        core_summarize_chop_batch(&manifest).map_err(chop_error_to_pyerr)?;
+    chop_result_to_py(py, &result)
+}
+
 pub(crate) fn register_axe(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_chop_overrun_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_chop_overrun, m)?)?;
@@ -353,6 +417,11 @@ pub(crate) fn register_axe(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_parse_chop_duration, m)?)?;
     m.add_function(wrap_pyfunction!(py_split_axe_description, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_axe_config, m)?)?;
+    m.add_function(wrap_pyfunction!(py_chop_batch_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_chop_batch_manifest, m)?)?;
+    m.add_function(wrap_pyfunction!(py_apply_chop_batch_transition, m)?)?;
+    m.add_function(wrap_pyfunction!(py_reconcile_chop_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(py_summarize_chop_batch, m)?)?;
     Ok(())
 }
 

@@ -601,11 +601,19 @@ pub use artifact_ref::{
 /// Legacy Rust alias retained for compatibility with older AXE callers.
 pub use axe_chop::ChopChangespecSnapshotWire;
 pub use axe_chop::{
-    apply_checkpoint_update, check_and_record_once_per, derive_chop_agent_name,
-    evaluate_chop_decision, expand_chop_targets, parse_chop_duration,
-    parse_chop_result, release_chop_once_per, split_axe_description,
-    validate_axe_config, validate_chop_proposal, validate_chop_result,
+    apply_checkpoint_update, apply_chop_batch_transition,
+    check_and_record_once_per, derive_chop_agent_name, evaluate_chop_decision,
+    expand_chop_targets, parse_chop_duration, parse_chop_result,
+    reconcile_chop_batch, release_chop_once_per, split_axe_description,
+    summarize_chop_batch, validate_axe_config, validate_chop_batch_manifest,
+    validate_chop_proposal, validate_chop_result,
     AxeConfigValidationRequestWire, ChopAgentSnapshotWire,
+    ChopBatchBlockedEntryWire, ChopBatchCountsWire, ChopBatchEventKindWire,
+    ChopBatchLaunchRoleWire, ChopBatchManifestWire, ChopBatchMemberStatusWire,
+    ChopBatchMemberWire, ChopBatchReconcileRequestWire, ChopBatchResumeWire,
+    ChopBatchRunContextWire, ChopBatchSpawnObservationKindWire,
+    ChopBatchSpawnObservationWire, ChopBatchStatusWire, ChopBatchSummaryWire,
+    ChopBatchTransitionRequestWire, ChopBatchTypedBundleRefWire,
     ChopCheckpointDocumentWire, ChopCheckpointEntryWire,
     ChopCheckpointEventWire, ChopCheckpointPolicyWire,
     ChopCheckpointUpdateRequestWire, ChopDecisionRequestWire, ChopDecisionWire,
@@ -616,7 +624,8 @@ pub use axe_chop::{
     ChopResultStatusWire, ChopSeenEntryWire, ChopSeenStoreDocumentWire,
     ChopTargetExpansionRequestWire, ChopTargetExpansionWire,
     ChopTargetInstanceWire, ChopTargetSourceFiltersWire, ChopTriggerConfigWire,
-    ProposalWaitOnWire, CHOP_ENGINE_SCHEMA_VERSION, CHOP_RESULT_SCHEMA_VERSION,
+    ProposalWaitOnWire, CHOP_BATCH_MAX_MEMBERS, CHOP_BATCH_SCHEMA_VERSION,
+    CHOP_ENGINE_SCHEMA_VERSION, CHOP_RESULT_SCHEMA_VERSION,
     CHOP_STATE_SCHEMA_VERSION,
 };
 pub use axe_status::{

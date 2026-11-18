@@ -532,3 +532,174 @@ fn chop_subprocess_diagnostic_binding_returns_plain_dict() {
         );
     });
 }
+
+fn healthy_chop_batch_manifest_json() -> JsonValue {
+    json!({
+        "schema_version": CHOP_BATCH_SCHEMA_VERSION,
+        "batch_id": "batch-1",
+        "run": {
+            "routine": "guard",
+            "job": "split",
+            "run_id": "20261117T120000_000001",
+        },
+        "typed_bundle": {
+            "bundle_id": "bundle-7",
+            "bundle_digest": "digest-7",
+        },
+        "clan": "toobig-68",
+        "clan_generation": "gen-1",
+        "members": [
+            {
+                "source_index": 0,
+                "proposal_id": "fix",
+                "agent_name": "toobig-68.split.a1",
+                "clan": "toobig-68",
+                "clan_generation": "gen-1",
+                "launch_role": "join",
+                "prompt": "Fix the finding.\n#pr",
+                "workspace": "git:sase",
+            },
+            {
+                "source_index": 1,
+                "proposal_id": "docs",
+                "agent_name": "toobig-68.split.a2",
+                "clan": "toobig-68",
+                "clan_generation": "gen-1",
+                "launch_role": "join",
+                "prompt": "Document the fix.\n#pr",
+                "workspace": "git:sase",
+            },
+        ],
+    })
+}
+
+fn chop_batch_manifest_dict<'py>(
+    py: Python<'py>,
+    value: &JsonValue,
+) -> Bound<'py, PyDict> {
+    let obj = json_value_to_py(py, value).unwrap();
+    obj.bind(py).downcast::<PyDict>().unwrap().clone()
+}
+
+#[test]
+fn chop_batch_binding_returns_exact_plain_python_shape() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        assert_eq!(
+            py_chop_batch_wire_schema_version(),
+            CHOP_BATCH_SCHEMA_VERSION
+        );
+        let manifest =
+            chop_batch_manifest_dict(py, &healthy_chop_batch_manifest_json());
+        let validated = py_validate_chop_batch_manifest(py, &manifest).unwrap();
+        let value = py_to_json_value(validated.bind(py)).unwrap();
+        assert_eq!(value["batch_id"], json!("batch-1"));
+        assert_eq!(value["status"], json!("open"));
+        assert!(validated.bind(py).downcast::<PyDict>().is_ok());
+
+        let summary = py_summarize_chop_batch(py, &manifest).unwrap();
+        let value = py_to_json_value(summary.bind(py)).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "schema_version": CHOP_BATCH_SCHEMA_VERSION,
+                "batch_id": "batch-1",
+                "batch_status": "open",
+                "counts": {
+                    "total": 2,
+                    "pending": 2,
+                    "dispatching": 0,
+                    "launched": 0,
+                    "skipped": 0,
+                    "blocked": 0,
+                    "cancelled": 0,
+                },
+            })
+        );
+    });
+}
+
+#[test]
+fn chop_batch_binding_applies_transitions_and_reconciles() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let dispatch_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": CHOP_BATCH_SCHEMA_VERSION,
+                "manifest": healthy_chop_batch_manifest_json(),
+                "event": "begin_dispatch",
+                "member_index": 0,
+            }),
+        )
+        .unwrap();
+        let dispatch = dispatch_obj.bind(py).downcast::<PyDict>().unwrap();
+        let next = py_apply_chop_batch_transition(py, dispatch).unwrap();
+        let next_value = py_to_json_value(next.bind(py)).unwrap();
+        assert_eq!(next_value["members"][0]["status"], json!("dispatching"));
+
+        let ack_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": CHOP_BATCH_SCHEMA_VERSION,
+                "manifest": next_value,
+                "event": "acknowledge_launch",
+                "member_index": 0,
+            }),
+        )
+        .unwrap();
+        let ack = ack_obj.bind(py).downcast::<PyDict>().unwrap();
+        let launched = py_apply_chop_batch_transition(py, ack).unwrap();
+        let launched_value = py_to_json_value(launched.bind(py)).unwrap();
+        assert_eq!(launched_value["members"][0]["status"], json!("launched"));
+
+        let reconcile_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": CHOP_BATCH_SCHEMA_VERSION,
+                "manifest": launched_value,
+                "observations": [{
+                    "agent_name": "toobig-68.split.a2",
+                    "observation": "reservation_only",
+                }],
+            }),
+        )
+        .unwrap();
+        let reconcile = reconcile_obj.bind(py).downcast::<PyDict>().unwrap();
+        let resume = py_reconcile_chop_batch(py, reconcile).unwrap();
+        let resume_value = py_to_json_value(resume.bind(py)).unwrap();
+        assert_eq!(resume_value["to_launch"], json!([1]));
+        assert_eq!(resume_value["already_launched"], json!([0]));
+        assert_eq!(resume_value["blocked"], json!([]));
+
+        // Launching without a prior dispatch is rejected, so Python
+        // callers cannot mark a member launched before spawning it.
+        let bad_ack_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": CHOP_BATCH_SCHEMA_VERSION,
+                "manifest": healthy_chop_batch_manifest_json(),
+                "event": "acknowledge_launch",
+                "member_index": 1,
+            }),
+        )
+        .unwrap();
+        let bad_ack = bad_ack_obj.bind(py).downcast::<PyDict>().unwrap();
+        let error = py_apply_chop_batch_transition(py, bad_ack).unwrap_err();
+        assert!(error.is_instance_of::<PyValueError>(py));
+        assert!(
+            error.to_string().contains("launch_without_dispatch"),
+            "{}",
+            error
+        );
+
+        // Unknown wire fields are rejected fail-closed.
+        let mut unknown = healthy_chop_batch_manifest_json();
+        unknown["surprise"] = json!(true);
+        let unknown_manifest = chop_batch_manifest_dict(py, &unknown);
+        let error =
+            py_validate_chop_batch_manifest(py, &unknown_manifest).unwrap_err();
+        assert!(error.is_instance_of::<PyValueError>(py));
+        assert!(error.to_string().contains("surprise"), "{}", error);
+    });
+}

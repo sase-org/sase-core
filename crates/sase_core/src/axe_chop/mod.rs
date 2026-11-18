@@ -6,6 +6,7 @@
 //! and once-per transforms, target expansion, and strict axe config
 //! validation.
 
+mod batch;
 mod bookkeeping;
 mod config;
 mod decision;
@@ -14,6 +15,17 @@ mod targets;
 mod validation;
 mod wire;
 
+pub use batch::{
+    apply_chop_batch_transition, reconcile_chop_batch, summarize_chop_batch,
+    validate_chop_batch_manifest, ChopBatchBlockedEntryWire,
+    ChopBatchCountsWire, ChopBatchEventKindWire, ChopBatchLaunchRoleWire,
+    ChopBatchManifestWire, ChopBatchMemberStatusWire, ChopBatchMemberWire,
+    ChopBatchReconcileRequestWire, ChopBatchResumeWire,
+    ChopBatchRunContextWire, ChopBatchSpawnObservationKindWire,
+    ChopBatchSpawnObservationWire, ChopBatchStatusWire, ChopBatchSummaryWire,
+    ChopBatchTransitionRequestWire, ChopBatchTypedBundleRefWire,
+    CHOP_BATCH_MAX_MEMBERS, CHOP_BATCH_SCHEMA_VERSION,
+};
 pub use bookkeeping::{
     apply_checkpoint_update, check_and_record_once_per, release_chop_once_per,
 };
