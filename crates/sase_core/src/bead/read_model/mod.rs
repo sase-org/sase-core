@@ -20,6 +20,7 @@ mod tail;
 mod tests;
 #[cfg(test)]
 mod tests_version;
+mod triage_owners;
 
 pub use freshness::{sweep_store_signatures, READ_MODEL_SWEEP_INTERVAL_SECS};
 pub use location::read_model_cache_path_for_store;
@@ -47,3 +48,4 @@ pub(crate) use store::{
     drop_cache_file, fingerprint_manifest_config, read_invalidated_generation,
     ManifestConfigFingerprint,
 };
+pub use triage_owners::cached_triage_owner_candidates;

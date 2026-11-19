@@ -653,6 +653,26 @@ fn py_bead_stranded_snapshot<'py>(
     )
 }
 
+/// Owner candidates for ToolRun failure triage: CI/flake/bug tasks that
+/// are open, or closed within the lookback ending at `now_ts` (default:
+/// now), projected to the classifier's candidate fields only.
+#[pyfunction]
+#[pyo3(name = "bead_triage_owner_candidates")]
+#[pyo3(signature = (beads_dir, now_ts=None))]
+fn py_bead_triage_owner_candidates<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    now_ts: Option<i64>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            sase_core::bead::triage_owner_candidates(&beads_dir, now_ts)
+        }),
+    )
+}
+
 #[pyfunction]
 #[pyo3(name = "bead_parse_epic_symbol_entries")]
 fn py_bead_parse_epic_symbol_entries(
@@ -1747,6 +1767,7 @@ pub(crate) fn register_beads(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_list_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_statuses_for_ids, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_stranded_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_triage_owner_candidates, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_parse_epic_symbol_entries, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_assess_epic_symbol_freshness, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_closed_ids, m)?)?;

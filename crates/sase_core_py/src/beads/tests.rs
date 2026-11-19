@@ -1350,6 +1350,114 @@ fn bead_stranded_snapshot_binding_returns_slim_candidate_context() {
 }
 
 #[test]
+fn bead_triage_owner_candidates_binding_returns_candidate_fields_only() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (_temp, beads_dir) = temp_beads_dir();
+        let rows = [
+            json!({
+                "id": "beads-1",
+                "title": "Flaky owner",
+                "status": "ready",
+                "issue_type": "task",
+                "task_type": "flake",
+                "task_type_fields": {
+                    "node_id": "tests/test_owner.py::test_it",
+                    "location": "tests/test_owner.py"
+                },
+                "description": "heavy description that must not cross",
+                "notes": [{"id": "n1", "timestamp": "2026-01-01T00:00:00Z", "author": "a", "text": "heavy"}],
+                "created_at": "2026-01-01T00:00:01Z",
+                "updated_at": "2026-01-01T00:00:01Z"
+            }),
+            json!({
+                "id": "beads-2",
+                "title": "Recently fixed",
+                "status": "closed",
+                "issue_type": "task",
+                "task_type": "ci",
+                "closed_at": "2026-03-09T00:00:00Z",
+                "created_at": "2026-01-01T00:00:02Z",
+                "updated_at": "2026-03-09T00:00:00Z"
+            }),
+            json!({
+                "id": "beads-3",
+                "title": "Idea",
+                "status": "open",
+                "issue_type": "task",
+                "task_type": "feature",
+                "created_at": "2026-01-01T00:00:03Z",
+                "updated_at": "2026-01-01T00:00:03Z"
+            }),
+        ];
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            rows.iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let dir = beads_dir.to_str().unwrap();
+
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        assert!(module.getattr("bead_triage_owner_candidates").is_ok());
+
+        // 2026-03-10T00:00:00Z: beads-2 closed one day earlier.
+        let now = 1_773_100_800_i64;
+        let projected =
+            py_bead_triage_owner_candidates(py, dir, Some(now)).unwrap();
+        let projected = py_to_json_value(projected.bind(py)).unwrap();
+        assert_eq!(
+            projected,
+            json!({
+                "schema_version": 1,
+                "candidates": [
+                    {
+                        "node_id": "beads-1",
+                        "location": "tests/test_owner.py::test_it",
+                        "title": "Flaky owner",
+                        "status": "open",
+                        "closed_ts": null
+                    },
+                    {
+                        "node_id": "beads-2",
+                        "location": null,
+                        "title": "Recently fixed",
+                        "status": "closed",
+                        "closed_ts": now - 86_400
+                    }
+                ],
+                "diagnostics": []
+            })
+        );
+
+        // Eight days later the closed task has left the lookback.
+        let later =
+            py_bead_triage_owner_candidates(py, dir, Some(now + 7 * 86_400))
+                .unwrap();
+        let later = py_to_json_value(later.bind(py)).unwrap();
+        let later_ids: Vec<&str> = later["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["node_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(later_ids, vec!["beads-1"]);
+
+        let missing = py_bead_triage_owner_candidates(
+            py,
+            beads_dir.join("absent").to_str().unwrap(),
+            Some(now),
+        );
+        assert!(missing.is_err());
+    });
+}
+
+#[test]
 fn bead_merge_event_streams_binding_preserves_replay_stable_union() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

@@ -24,6 +24,7 @@ pub mod search;
 pub mod target_probe;
 pub mod touch_index;
 pub mod touch_member_query;
+pub mod triage_owners;
 pub mod wire;
 pub mod work;
 
@@ -162,6 +163,12 @@ pub use touch_member_query::{
     BeadTouchMemberQueryWire, BeadViewMemberQueryResultWire, TouchMemberWire,
     TouchOwnerWire, BEAD_VIEW_LOG_SCHEMA_VERSION,
     TOUCH_MEMBER_QUERY_WIRE_SCHEMA_VERSION,
+};
+pub use triage_owners::{
+    triage_owner_candidates, BeadTriageOwnerCandidateWire,
+    BeadTriageOwnerCandidatesWire, BeadTriageOwnerStatusWire,
+    BEAD_TRIAGE_OWNER_CANDIDATES_WIRE_SCHEMA_VERSION,
+    TRIAGE_OWNER_CLOSED_LOOKBACK_SECS, TRIAGE_OWNER_TASK_TYPES,
 };
 pub use wire::{
     flag_thresholds_due, normalize_creation_reason, notes_text,
