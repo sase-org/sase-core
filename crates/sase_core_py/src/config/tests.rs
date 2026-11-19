@@ -47,6 +47,68 @@ fn disk_inventory_binding_classifies_overlaps() {
             result["rows"][1]["overlap_parent_path"].as_str(),
             Some("/tmp/root")
         );
+        assert_eq!(
+            result["schema_version"],
+            DISK_INVENTORY_WIRE_SCHEMA_VERSION
+        );
+        assert_eq!(result["totals_are_lower_bound"], false);
+        assert_eq!(result["rows"][0]["size_state"], "measured");
+    });
+}
+
+#[test]
+fn disk_inventory_binding_round_trips_unmeasured_v2_rows() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": DISK_INVENTORY_WIRE_SCHEMA_VERSION,
+                "rows": [
+                    {
+                        "section": "workspaces",
+                        "name": "root",
+                        "path": "/tmp/root",
+                        "size_bytes": 0,
+                        "size_state": "unmeasured",
+                        "owner": "workspace_cleanup_and_compact",
+                        "horizon": "cleanup TTL 14 day(s)",
+                        "coverage": "complete",
+                    },
+                    {
+                        "section": "sase_home",
+                        "name": "tools",
+                        "path": "/tmp/tools",
+                        "size_bytes": 2048,
+                        "size_state": "lower_bound",
+                        "owner": "tool_run_retention",
+                        "horizon": "summary 180d",
+                    }
+                ],
+            }),
+        )
+        .unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_classify_disk_inventory(py, request).unwrap();
+        let result = py_to_json_value(result.bind(py)).unwrap();
+
+        assert_eq!(
+            result["schema_version"],
+            DISK_INVENTORY_WIRE_SCHEMA_VERSION
+        );
+        assert_eq!(result["totals_are_lower_bound"], true);
+        assert_eq!(result["coverage_status"], "partial");
+        assert_eq!(result["total_bytes"], 2048);
+        assert_eq!(
+            result["unmeasured_owners"],
+            json!(["workspace_cleanup_and_compact /tmp/root"])
+        );
+        assert_eq!(result["rows"][0]["coverage"], "partial");
+        assert_eq!(result["rows"][0]["size_state"], "unmeasured");
+        assert_eq!(result["rows"][1]["size_state"], "lower_bound");
     });
 }
 

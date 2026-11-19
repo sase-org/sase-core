@@ -4,6 +4,9 @@
 //! owns the threshold math and top-owner selection so doctor, housekeeping and
 //! cleanup orchestration agree about when the host is under pressure.
 
+use crate::disk_inventory::{
+    DISK_INVENTORY_SIZE_MEASURED, DISK_INVENTORY_SIZE_UNMEASURED,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -53,6 +56,8 @@ pub struct DiskPressureOwnerRowWire {
     pub name: String,
     pub path: String,
     pub size_bytes: u64,
+    #[serde(default = "default_measured_size_state")]
+    pub size_state: String,
     pub owner: String,
     pub status: String,
 }
@@ -260,6 +265,14 @@ fn format_percent_basis(percent: f64) -> String {
     }
 }
 
+fn default_measured_size_state() -> String {
+    DISK_INVENTORY_SIZE_MEASURED.to_string()
+}
+
+fn owner_is_unmeasured(row: &DiskPressureOwnerRowWire) -> bool {
+    row.size_state == DISK_INVENTORY_SIZE_UNMEASURED
+}
+
 fn top_owner_rows(
     rows: &[DiskPressureOwnerRowWire],
     min_bytes: u64,
@@ -267,7 +280,7 @@ fn top_owner_rows(
 ) -> Vec<DiskPressureOwnerRowWire> {
     let mut selected = rows
         .iter()
-        .filter(|row| row.size_bytes >= min_bytes)
+        .filter(|row| !owner_is_unmeasured(row) && row.size_bytes >= min_bytes)
         .cloned()
         .collect::<Vec<_>>();
     selected.sort_by(|left, right| {
@@ -366,6 +379,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn top_owners_never_present_unmeasured_rows() {
+        let mut req =
+            request(10 * 1024 * 1024 * 1024, 100 * 1024 * 1024 * 1024);
+        req.top_owner_min_bytes = 0;
+        req.top_owner_limit = 5;
+        req.owner_rows = vec![
+            owner("measured-mid", 50, "owned"),
+            unmeasured_owner("unmeasured-zero", 0),
+            unmeasured_owner("unmeasured-nonzero", 400),
+            owner("measured-small", 0, "owned"),
+        ];
+
+        let result = classify_disk_pressure(&req).unwrap();
+
+        assert_eq!(
+            result
+                .top_owners
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["measured-mid", "measured-small"],
+        );
+    }
+
     fn owner(
         name: &str,
         size_bytes: u64,
@@ -376,8 +414,24 @@ mod tests {
             name: name.to_string(),
             path: format!("/{name}"),
             size_bytes,
+            size_state: DISK_INVENTORY_SIZE_MEASURED.to_string(),
             owner: status.to_string(),
             status: status.to_string(),
+        }
+    }
+
+    fn unmeasured_owner(
+        name: &str,
+        size_bytes: u64,
+    ) -> DiskPressureOwnerRowWire {
+        DiskPressureOwnerRowWire {
+            section: "section".to_string(),
+            name: name.to_string(),
+            path: format!("/{name}"),
+            size_bytes,
+            size_state: DISK_INVENTORY_SIZE_UNMEASURED.to_string(),
+            owner: "workspace".to_string(),
+            status: "owned".to_string(),
         }
     }
 }

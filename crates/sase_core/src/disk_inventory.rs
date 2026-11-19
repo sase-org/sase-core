@@ -11,11 +11,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 use thiserror::Error;
 
-pub const DISK_INVENTORY_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const DISK_INVENTORY_WIRE_SCHEMA_VERSION: u32 = 2;
 
 pub const DISK_INVENTORY_COVERAGE_COMPLETE: &str = "complete";
 pub const DISK_INVENTORY_COVERAGE_PARTIAL: &str = "partial";
 pub const DISK_INVENTORY_COVERAGE_UNRESOLVED: &str = "unresolved";
+
+pub const DISK_INVENTORY_SIZE_MEASURED: &str = "measured";
+pub const DISK_INVENTORY_SIZE_LOWER_BOUND: &str = "lower_bound";
+pub const DISK_INVENTORY_SIZE_UNMEASURED: &str = "unmeasured";
 
 #[derive(Debug, Error)]
 pub enum DiskInventoryError {
@@ -43,6 +47,8 @@ pub struct DiskInventoryInputRowWire {
     #[serde(default)]
     pub physical_path: Option<String>,
     pub size_bytes: u64,
+    #[serde(default = "default_measured_size_state")]
+    pub size_state: String,
     pub owner: String,
     pub horizon: String,
     #[serde(default = "default_owned_status")]
@@ -66,6 +72,8 @@ pub struct DiskInventoryResultWire {
     pub coverage_status: String,
     pub scan_diagnostics: Vec<String>,
     pub unresolved_owner_coverage: Vec<String>,
+    pub unmeasured_owners: Vec<String>,
+    pub totals_are_lower_bound: bool,
     pub stray_scan_visited: u64,
     pub stray_scan_truncated: bool,
 }
@@ -77,6 +85,7 @@ pub struct DiskInventoryRowWire {
     pub path: String,
     pub physical_path: Option<String>,
     pub size_bytes: u64,
+    pub size_state: String,
     pub exclusive_size_bytes: u64,
     pub owner: String,
     pub horizon: String,
@@ -105,6 +114,24 @@ fn default_owned_status() -> String {
 
 fn default_complete_coverage() -> String {
     DISK_INVENTORY_COVERAGE_COMPLETE.to_string()
+}
+
+fn default_measured_size_state() -> String {
+    DISK_INVENTORY_SIZE_MEASURED.to_string()
+}
+
+fn size_state_is_measured(size_state: &str) -> bool {
+    size_state.is_empty() || size_state == DISK_INVENTORY_SIZE_MEASURED
+}
+
+fn effective_row_coverage(input: &DiskInventoryInputRowWire) -> String {
+    if !size_state_is_measured(&input.size_state)
+        && input.coverage == DISK_INVENTORY_COVERAGE_COMPLETE
+    {
+        DISK_INVENTORY_COVERAGE_PARTIAL.to_string()
+    } else {
+        input.coverage.clone()
+    }
 }
 
 pub fn classify_disk_inventory(
@@ -140,23 +167,32 @@ pub fn classify_disk_inventory(
 
     let mut diagnostics = request.scan_diagnostics.clone();
     let mut unresolved = Vec::new();
+    let mut unmeasured_owners = Vec::new();
     let mut coverage_status = DISK_INVENTORY_COVERAGE_COMPLETE;
+    let mut totals_are_lower_bound = false;
     if request.stray_scan_truncated || !request.scan_diagnostics.is_empty() {
         coverage_status = DISK_INVENTORY_COVERAGE_PARTIAL;
     }
 
     for row in &rows {
+        let coverage = effective_row_coverage(&row.input);
         for diagnostic in &row.input.diagnostics {
             diagnostics.push(format!("{}: {diagnostic}", row_label(row)));
         }
         for diagnostic in &row.diagnostics {
             diagnostics.push(format!("{}: {diagnostic}", row_label(row)));
         }
-        if row.input.coverage != DISK_INVENTORY_COVERAGE_COMPLETE
+        if coverage != DISK_INVENTORY_COVERAGE_COMPLETE
             || !row.input.diagnostics.is_empty()
             || !row.diagnostics.is_empty()
         {
             coverage_status = DISK_INVENTORY_COVERAGE_PARTIAL;
+        }
+        if !size_state_is_measured(&row.input.size_state) {
+            totals_are_lower_bound = true;
+        }
+        if row.input.size_state == DISK_INVENTORY_SIZE_UNMEASURED {
+            unmeasured_owners.push(row_label(row));
         }
         if row.input.coverage == DISK_INVENTORY_COVERAGE_UNRESOLVED {
             coverage_status = DISK_INVENTORY_COVERAGE_PARTIAL;
@@ -169,13 +205,16 @@ pub fn classify_disk_inventory(
     let mut owned_total = 0_u64;
     let mut unowned_total = 0_u64;
     for row in &rows {
-        logical_total = logical_total.saturating_add(row.input.size_bytes);
-        total = total.saturating_add(row.exclusive_size_bytes);
-        if row.input.status == "unowned" {
-            unowned_total =
-                unowned_total.saturating_add(row.exclusive_size_bytes);
-        } else {
-            owned_total = owned_total.saturating_add(row.exclusive_size_bytes);
+        if row.input.size_state != DISK_INVENTORY_SIZE_UNMEASURED {
+            logical_total = logical_total.saturating_add(row.input.size_bytes);
+            total = total.saturating_add(row.exclusive_size_bytes);
+            if row.input.status == "unowned" {
+                unowned_total =
+                    unowned_total.saturating_add(row.exclusive_size_bytes);
+            } else {
+                owned_total =
+                    owned_total.saturating_add(row.exclusive_size_bytes);
+            }
         }
     }
 
@@ -187,12 +226,17 @@ pub fn classify_disk_inventory(
             path: row.input.path.clone(),
             physical_path: row.input.physical_path.clone(),
             size_bytes: row.input.size_bytes,
+            size_state: if row.input.size_state.is_empty() {
+                DISK_INVENTORY_SIZE_MEASURED.to_string()
+            } else {
+                row.input.size_state.clone()
+            },
             exclusive_size_bytes: row.exclusive_size_bytes,
             owner: row.input.owner.clone(),
             horizon: row.input.horizon.clone(),
             status: row.input.status.clone(),
             reclaim: row.input.reclaim.clone(),
-            coverage: row.input.coverage.clone(),
+            coverage: effective_row_coverage(&row.input),
             diagnostics: merged_row_diagnostics(row),
             overlap_parent_path: row
                 .parent
@@ -202,6 +246,8 @@ pub fn classify_disk_inventory(
         })
         .collect();
 
+    let mut unmeasured_owners = dedupe(unmeasured_owners);
+    unmeasured_owners.sort();
     Ok(DiskInventoryResultWire {
         schema_version: DISK_INVENTORY_WIRE_SCHEMA_VERSION,
         rows: output_rows,
@@ -212,6 +258,8 @@ pub fn classify_disk_inventory(
         coverage_status: coverage_status.to_string(),
         scan_diagnostics: dedupe(diagnostics),
         unresolved_owner_coverage: dedupe(unresolved),
+        unmeasured_owners,
+        totals_are_lower_bound,
         stray_scan_visited: request.stray_scan_visited,
         stray_scan_truncated: request.stray_scan_truncated,
     })
@@ -257,8 +305,16 @@ fn calculate_exclusive_sizes(rows: &mut [ClassifiedRow]) {
         .iter()
         .map(|row| row.input.size_bytes)
         .collect::<Vec<_>>();
+    let unmeasured = rows
+        .iter()
+        .map(|row| row.input.size_state == DISK_INVENTORY_SIZE_UNMEASURED)
+        .collect::<Vec<_>>();
 
     for (index, row) in rows.iter_mut().enumerate() {
+        if unmeasured[index] {
+            row.exclusive_size_bytes = 0;
+            continue;
+        }
         if row.key.is_empty() {
             row.exclusive_size_bytes = row.input.size_bytes;
             continue;
@@ -275,7 +331,7 @@ fn calculate_exclusive_sizes(rows: &mut [ClassifiedRow]) {
     }
 
     for index in 0..rows.len() {
-        if rows[index].duplicate {
+        if unmeasured[index] || rows[index].duplicate {
             rows[index].exclusive_size_bytes = 0;
             continue;
         }
@@ -417,6 +473,7 @@ mod tests {
             path: path.to_string(),
             physical_path: None,
             size_bytes,
+            size_state: DISK_INVENTORY_SIZE_MEASURED.to_string(),
             owner: owner.to_string(),
             horizon: "test".to_string(),
             status: "owned".to_string(),
@@ -492,5 +549,74 @@ mod tests {
         assert_eq!(result.coverage_status, DISK_INVENTORY_COVERAGE_PARTIAL);
         assert_eq!(result.unresolved_owner_coverage, vec!["test/".to_string()]);
         assert!(result.scan_diagnostics[0].contains("registry failed"));
+        assert!(!result.totals_are_lower_bound);
+        assert!(result.unmeasured_owners.is_empty());
+    }
+
+    #[test]
+    fn unmeasured_rows_force_partial_coverage_and_named_owners() {
+        let mut missing = row("/tmp/ws", 0, "workspace");
+        missing.size_state = DISK_INVENTORY_SIZE_UNMEASURED.to_string();
+        let mut floor = row("/tmp/tools", 1024, "tools");
+        floor.size_state = DISK_INVENTORY_SIZE_LOWER_BOUND.to_string();
+
+        let result =
+            classify_disk_inventory(&request(vec![missing, floor])).unwrap();
+
+        assert_eq!(result.schema_version, DISK_INVENTORY_WIRE_SCHEMA_VERSION);
+        assert_eq!(result.rows[0].coverage, DISK_INVENTORY_COVERAGE_PARTIAL);
+        assert_eq!(result.rows[0].size_state, DISK_INVENTORY_SIZE_UNMEASURED);
+        assert_eq!(result.rows[1].coverage, DISK_INVENTORY_COVERAGE_PARTIAL);
+        assert_eq!(result.rows[1].size_state, DISK_INVENTORY_SIZE_LOWER_BOUND);
+        assert!(result.totals_are_lower_bound);
+        assert_eq!(
+            result.unmeasured_owners,
+            vec!["workspace /tmp/ws".to_string()]
+        );
+        assert_eq!(result.logical_total_bytes, 1024);
+        assert_eq!(result.total_bytes, 1024);
+        assert_eq!(result.coverage_status, DISK_INVENTORY_COVERAGE_PARTIAL);
+    }
+
+    #[test]
+    fn unmeasured_parent_does_not_treat_zero_as_exact_or_warn_on_children() {
+        let mut parent = row("/tmp/root", 0, "workspace");
+        parent.size_state = DISK_INVENTORY_SIZE_UNMEASURED.to_string();
+        let child = row("/tmp/root/target", 30, "rust-target");
+
+        let result =
+            classify_disk_inventory(&request(vec![parent, child])).unwrap();
+
+        assert_eq!(result.rows[0].exclusive_size_bytes, 0);
+        assert_eq!(result.rows[1].exclusive_size_bytes, 30);
+        assert_eq!(result.total_bytes, 30);
+        assert!(result.totals_are_lower_bound);
+        assert!(result
+            .scan_diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.contains("overlapping child")));
+    }
+
+    #[test]
+    fn missing_size_state_defaults_to_measured() {
+        let payload = serde_json::json!({
+            "schema_version": DISK_INVENTORY_WIRE_SCHEMA_VERSION,
+            "rows": [{
+                "section": "test",
+                "name": "/tmp/root",
+                "path": "/tmp/root",
+                "size_bytes": 50,
+                "owner": "workspace",
+                "horizon": "test"
+            }]
+        });
+        let request: DiskInventoryRequestWire =
+            serde_json::from_value(payload).unwrap();
+        let result = classify_disk_inventory(&request).unwrap();
+
+        assert_eq!(result.rows[0].size_state, DISK_INVENTORY_SIZE_MEASURED);
+        assert_eq!(result.rows[0].coverage, DISK_INVENTORY_COVERAGE_COMPLETE);
+        assert!(!result.totals_are_lower_bound);
+        assert!(result.unmeasured_owners.is_empty());
     }
 }
