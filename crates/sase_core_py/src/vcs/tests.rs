@@ -1243,3 +1243,75 @@ fn parked_recheck_binding_matches_core_policy() {
         assert!(!value);
     });
 }
+
+#[test]
+fn publication_standing_binding_reports_transitions() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        let decide = module.getattr("decide_publication_standing").unwrap();
+
+        fn call(
+            decide: &Bound<'_, PyAny>,
+            previous: serde_json::Value,
+            observation: serde_json::Value,
+            now: f64,
+        ) -> serde_json::Value {
+            let request = json_value_to_py(
+                decide.py(),
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "previous": previous,
+                    "observation": observation,
+                    "now": now,
+                }),
+            )
+            .unwrap();
+            let result = decide.call1((request,)).unwrap();
+            py_to_json_value(&result).unwrap()
+        }
+
+        let observation = serde_json::json!({
+            "project": "proj",
+            "signature": "sig",
+            "failure_kind": "drain_error",
+            "error_class": "other",
+            "detail": "git push failed",
+        });
+        let opened = call(
+            &decide,
+            serde_json::Value::Null,
+            observation.clone(),
+            1_000.0,
+        );
+        assert_eq!(opened["transition"], serde_json::json!("opened"));
+        assert_eq!(opened["alert"]["attempts"], serde_json::json!(1));
+        assert_eq!(
+            opened["alert"]["next_attempt_at"],
+            serde_json::json!(1060.0)
+        );
+
+        let alert = opened["alert"].clone();
+        let silent = call(&decide, alert.clone(), observation.clone(), 1_010.0);
+        assert_eq!(silent["transition"], serde_json::json!("none"));
+        assert_eq!(silent["alert"]["attempts"], serde_json::json!(2));
+
+        let escalated = call(
+            &decide,
+            silent["alert"].clone(),
+            observation.clone(),
+            87_401.0,
+        );
+        assert_eq!(escalated["transition"], serde_json::json!("escalated"));
+
+        let cleared = call(
+            &decide,
+            escalated["alert"].clone(),
+            serde_json::Value::Null,
+            87_402.0,
+        );
+        assert_eq!(cleared["transition"], serde_json::json!("cleared"));
+        assert!(cleared["alert"].is_null());
+    });
+}

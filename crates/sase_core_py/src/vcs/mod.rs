@@ -7,6 +7,7 @@ use crate::json_bridge::{json_value_to_py, py_to_json_value, serialize_to_py};
 mod git_lock;
 
 use crate::provider_policy::provider_priority_dict_from_py;
+use sase_core::agent_publication_recovery::PublicationStandingDecideRequestWire;
 use sase_core::rebase_gate::{
     build_rebase_gate_context as core_build_rebase_gate_context,
     classify_rebase_gate_result as core_classify_rebase_gate_result,
@@ -626,6 +627,29 @@ fn py_decide_publication_failure_accounting<'py>(
     serialize_to_py(py, &result)
 }
 
+/// Decide the standing-alert transition for one publication failure observation.
+#[pyfunction]
+#[pyo3(name = "decide_publication_standing")]
+fn py_decide_publication_standing<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PublicationStandingDecideRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid PublicationStandingDecideRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    let result =
+        sase_core::agent_publication_recovery::decide_publication_standing(
+            &request,
+        )
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
 /// Select a bounded drain set of active and reviveable publication rows.
 #[pyfunction]
 #[pyo3(name = "select_publication_drain")]
@@ -1094,6 +1118,7 @@ pub(crate) fn register_vcs(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_decide_publication_failure_accounting,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_decide_publication_standing, m)?)?;
     m.add_function(wrap_pyfunction!(py_select_publication_drain, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_decide_publication_request_completion,

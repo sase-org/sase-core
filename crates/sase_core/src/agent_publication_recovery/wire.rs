@@ -430,3 +430,90 @@ pub struct PublicationRebaseConflictResponseWire {
     #[serde(default)]
     pub reasons: Vec<String>,
 }
+
+pub const PUBLICATION_STANDING_TRANSITION_OPENED: &str = "opened";
+pub const PUBLICATION_STANDING_TRANSITION_CHANGED: &str = "changed";
+pub const PUBLICATION_STANDING_TRANSITION_ESCALATED: &str = "escalated";
+pub const PUBLICATION_STANDING_TRANSITION_CLEARED: &str = "cleared";
+pub const PUBLICATION_STANDING_TRANSITION_NONE: &str = "none";
+
+pub const PUBLICATION_STANDING_KIND_SELECTION_ERROR: &str = "selection_error";
+pub const PUBLICATION_STANDING_KIND_TARGET_UNAVAILABLE: &str =
+    "target_unavailable";
+pub const PUBLICATION_STANDING_KIND_DRAIN_ERROR: &str = "drain_error";
+pub const PUBLICATION_STANDING_KIND_DRAIN_TIMEOUT: &str = "drain_timeout";
+pub const PUBLICATION_STANDING_KIND_LOCK_BUSY: &str = "lock_busy";
+pub const PUBLICATION_STANDING_KIND_CHARGED_ITEM: &str = "charged_item_error";
+pub const PUBLICATION_STANDING_KIND_ARTIFACT_LINK: &str = "artifact_link_error";
+pub const PUBLICATION_STANDING_KIND_REFERENCED_BY: &str = "referenced_by_error";
+pub const PUBLICATION_STANDING_KIND_HEARTBEAT_WRITE: &str = "heartbeat_write";
+
+pub const PUBLICATION_STANDING_KINDS: &[&str] = &[
+    PUBLICATION_STANDING_KIND_SELECTION_ERROR,
+    PUBLICATION_STANDING_KIND_TARGET_UNAVAILABLE,
+    PUBLICATION_STANDING_KIND_DRAIN_ERROR,
+    PUBLICATION_STANDING_KIND_DRAIN_TIMEOUT,
+    PUBLICATION_STANDING_KIND_LOCK_BUSY,
+    PUBLICATION_STANDING_KIND_CHARGED_ITEM,
+    PUBLICATION_STANDING_KIND_ARTIFACT_LINK,
+    PUBLICATION_STANDING_KIND_REFERENCED_BY,
+    PUBLICATION_STANDING_KIND_HEARTBEAT_WRITE,
+];
+
+/// Row-scoped failures are already governed by attempt counts, quarantine,
+/// and parking, so they never take on the project backoff below.
+pub const PUBLICATION_STANDING_ROW_SCOPED_KINDS: &[&str] =
+    &[PUBLICATION_STANDING_KIND_CHARGED_ITEM];
+
+pub const PUBLICATION_STANDING_BACKOFF_INITIAL_SECONDS: f64 = 60.0;
+pub const PUBLICATION_STANDING_BACKOFF_MAX_SECONDS: f64 = 1800.0;
+pub const PUBLICATION_STANDING_ESCALATE_AFTER_SECONDS: f64 = 86400.0;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublicationStandingObservationWire {
+    pub project: String,
+    pub signature: String,
+    pub failure_kind: String,
+    #[serde(default)]
+    pub error_class: String,
+    #[serde(default)]
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublicationStandingAlertWire {
+    pub project: String,
+    pub signature: String,
+    pub failure_kind: String,
+    #[serde(default)]
+    pub error_class: String,
+    #[serde(default)]
+    pub detail: String,
+    pub attempts: u32,
+    pub first_seen: f64,
+    pub last_seen: f64,
+    pub last_reported: f64,
+    #[serde(default)]
+    pub escalated: bool,
+    pub next_attempt_at: f64,
+    pub project_scoped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublicationStandingDecideRequestWire {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub previous: Option<PublicationStandingAlertWire>,
+    #[serde(default)]
+    pub observation: Option<PublicationStandingObservationWire>,
+    pub now: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublicationStandingDecideResponseWire {
+    pub schema_version: u32,
+    pub transition: String,
+    #[serde(default)]
+    pub alert: Option<PublicationStandingAlertWire>,
+    pub project_scoped: bool,
+}
