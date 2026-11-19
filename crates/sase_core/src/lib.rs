@@ -47,6 +47,7 @@ pub mod artifact_ref;
 pub mod audit_query;
 pub mod autonomy;
 pub mod axe_chop;
+pub mod axe_error;
 pub mod axe_overrun;
 pub mod axe_status;
 pub mod bead;

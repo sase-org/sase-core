@@ -446,6 +446,11 @@ pub(crate) use sase_core::axe_chop::{
     CHOP_ENGINE_SCHEMA_VERSION, CHOP_RESULT_SCHEMA_VERSION,
     CHOP_STATE_SCHEMA_VERSION,
 };
+pub(crate) use sase_core::axe_error::{
+    group_axe_errors as core_group_axe_errors,
+    normalize_error_signature as core_normalize_error_signature,
+    AxeErrorGroupRequestWire, AxeErrorWireError, AXE_ERROR_WIRE_SCHEMA_VERSION,
+};
 pub(crate) use sase_core::axe_overrun::{
     classify_chop_overrun as core_classify_chop_overrun, ChopOverrunError,
     ChopOverrunRequestWire, CHOP_OVERRUN_SCHEMA_VERSION,

@@ -100,6 +100,48 @@ fn py_project_axe_status_public<'py>(
     json_value_to_py(py, &value)
 }
 
+// --- Axe error signature grouping ----------------------------------------
+fn axe_error_to_pyerr(error: AxeErrorWireError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+/// Return the supported axe error-group wire schema version.
+#[pyfunction]
+#[pyo3(name = "axe_error_wire_schema_version")]
+fn py_axe_error_wire_schema_version() -> u32 {
+    AXE_ERROR_WIRE_SCHEMA_VERSION
+}
+
+/// Turn scheduler error text into a stable grouping signature.
+#[pyfunction]
+#[pyo3(name = "normalize_error_signature")]
+fn py_normalize_error_signature(text: &str) -> String {
+    core_normalize_error_signature(text)
+}
+
+/// Fold error entries into per-cause groups in first-seen group order.
+#[pyfunction]
+#[pyo3(name = "group_axe_errors")]
+fn py_group_axe_errors<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: AxeErrorGroupRequestWire = serde_json::from_value(value)
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "request is not a valid AxeErrorGroupRequestWire dict: {error}"
+            ))
+        })?;
+    let response = py
+        .allow_threads(|| core_group_axe_errors(&request))
+        .map_err(axe_error_to_pyerr)?;
+    let value = serde_json::to_value(response).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 // --- Axe chop engine bindings --------------------------------------------
 fn chop_error_to_pyerr(error: ChopEngineError) -> PyErr {
     PyValueError::new_err(error.to_string())
@@ -411,6 +453,9 @@ fn py_chop_batch_generation_matches<'py>(
 }
 
 pub(crate) fn register_axe(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(py_axe_error_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_normalize_error_signature, m)?)?;
+    m.add_function(wrap_pyfunction!(py_group_axe_errors, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_overrun_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_chop_overrun, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_status_wire_schema_version, m)?)?;
