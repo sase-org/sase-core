@@ -762,7 +762,8 @@ fn chop_batch_binding_settles_a_launch_that_crosses_cancellation() {
 }
 
 #[test]
-fn chop_batch_binding_matches_generation_by_clan_and_settles_cancelled_dispatch() {
+fn chop_batch_binding_matches_generation_by_clan_and_settles_cancelled_dispatch(
+) {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
         let manifest = healthy_chop_batch_manifest_json();

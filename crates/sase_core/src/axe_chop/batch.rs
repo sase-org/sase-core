@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::wire::{ChopEngineError, ProposalWaitOnWire};
@@ -597,6 +598,8 @@ pub struct ChopBatchGenerationMatchRequestWire {
 ///
 /// Only generations recorded for the requested clan may satisfy or veto the
 /// match. Generations from other clans in a mixed-clan batch are ignored.
+/// When the selected clan has no recorded generation, an older kill that
+/// predates the batch must not match.
 pub fn chop_batch_generation_matches(
     request: &ChopBatchGenerationMatchRequestWire,
 ) -> Result<bool, ChopEngineError> {
@@ -636,20 +639,84 @@ pub fn chop_batch_generation_matches(
     }
     if scoped.is_empty() {
         let top_clan = request.manifest.clan.as_deref().unwrap_or("");
-        let top_generation = request.manifest.clan_generation.as_deref().unwrap_or("");
+        let top_generation =
+            request.manifest.clan_generation.as_deref().unwrap_or("");
         let has_member_clans = request.manifest.members.iter().any(|member| {
             member.clan.as_deref().is_some_and(|clan| !clan.is_empty())
         });
-        if !top_generation.is_empty() && (top_clan.is_empty() || top_clan == request.clan)
+        if !top_generation.is_empty()
+            && (top_clan.is_empty() || top_clan == request.clan)
             && !has_member_clans
         {
             scoped.push(top_generation.to_string());
         }
     }
     if !scoped.is_empty() {
-        return Ok(scoped.iter().any(|generation| generation == &request.generation));
+        return Ok(scoped
+            .iter()
+            .any(|generation| generation == &request.generation));
     }
-    Ok(true)
+    Ok(!older_generation_predates_batch(
+        &request.manifest,
+        &request.generation,
+    ))
+}
+
+fn older_generation_predates_batch(
+    manifest: &ChopBatchManifestWire,
+    generation: &str,
+) -> bool {
+    let Some(batch_started) = batch_started_at(manifest) else {
+        return false;
+    };
+    let Some(generation_started) = generation_started_at(generation) else {
+        return false;
+    };
+    generation_started < batch_started
+}
+
+fn batch_started_at(manifest: &ChopBatchManifestWire) -> Option<DateTime<Utc>> {
+    if let Some(created_at) = manifest.created_at.as_deref() {
+        if let Some(parsed) = parse_batch_instant(created_at) {
+            return Some(parsed);
+        }
+    }
+    parse_batch_instant(manifest.run.run_started_at.as_deref()?)
+}
+
+fn parse_batch_instant(value: &str) -> Option<DateTime<Utc>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(trimmed) {
+        return Some(parsed.with_timezone(&Utc));
+    }
+    let normalized = trimmed.replace('Z', "+00:00");
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(&normalized) {
+        return Some(parsed.with_timezone(&Utc));
+    }
+    for format in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S%.f",
+    ] {
+        if let Ok(parsed) = NaiveDateTime::parse_from_str(trimmed, format) {
+            return Some(parsed.and_utc());
+        }
+    }
+    None
+}
+
+fn generation_started_at(generation: &str) -> Option<DateTime<Utc>> {
+    let digits: String =
+        generation.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() < 14 {
+        return None;
+    }
+    NaiveDateTime::parse_from_str(&digits[..14], "%Y%m%d%H%M%S")
+        .ok()
+        .map(|parsed| parsed.and_utc())
 }
 
 #[allow(clippy::too_many_arguments)]

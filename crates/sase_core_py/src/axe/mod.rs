@@ -400,9 +400,12 @@ fn py_chop_batch_generation_matches<'py>(
     request: &Bound<'py, PyDict>,
 ) -> PyResult<bool> {
     let request: ChopBatchGenerationMatchRequestWire =
-        chop_request_from_pydict(request, "chop batch generation match request")?;
-    let result =
-        core_chop_batch_generation_matches(&request).map_err(chop_error_to_pyerr)?;
+        chop_request_from_pydict(
+            request,
+            "chop batch generation match request",
+        )?;
+    let result = core_chop_batch_generation_matches(&request)
+        .map_err(chop_error_to_pyerr)?;
     let _ = py;
     Ok(result)
 }

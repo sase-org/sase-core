@@ -592,6 +592,33 @@ fn generation_match_is_scoped_to_the_requested_clan() {
     assert!(generation_match(&shown, "b", "20261118_130000"));
 }
 
+fn unrecorded_generation_manifest() -> ChopBatchManifestWire {
+    let mut shown = manifest(&["a.one"]);
+    shown.clan = None;
+    shown.clan_generation = None;
+    shown.created_at = Some("2026-11-18T12:00:00+00:00".to_string());
+    shown.members[0].clan = Some("reused-clan".to_string());
+    shown.members[0].clan_generation = None;
+    shown
+}
+
+#[test]
+fn older_generation_does_not_match_a_batch_without_recorded_generation() {
+    let shown = unrecorded_generation_manifest();
+    assert!(!generation_match(&shown, "reused-clan", "20261117_120000"));
+    assert!(generation_match(&shown, "reused-clan", "20261118_120000"));
+    assert!(generation_match(&shown, "reused-clan", "unparseable"));
+}
+
+#[test]
+fn unrecorded_generation_falls_back_to_run_started_at() {
+    let mut shown = unrecorded_generation_manifest();
+    shown.created_at = None;
+    shown.run.run_started_at = Some("2026-11-18T12:00:00+00:00".to_string());
+    assert!(!generation_match(&shown, "reused-clan", "20261117_120000"));
+    assert!(generation_match(&shown, "reused-clan", "20261118_130000"));
+}
+
 #[test]
 fn cancelled_dispatch_settles_without_relaunch() {
     let shown = manifest(&["a1", "a2"]);
