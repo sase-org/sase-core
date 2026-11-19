@@ -197,6 +197,7 @@ fn notification_append_plus_upsert_concurrency_preserves_valid_rows() {
                         "2026-05-01T04:00:00+00:00".to_string(),
                     ),
                     supersedes: None,
+                    ..NotificationUpsertRequestWire::default()
                 },
             )
             .unwrap();

@@ -81,6 +81,131 @@ fn notification_store_binding_round_trips_json_shape() {
 }
 
 #[test]
+fn notification_plus_one_binding_round_trips_noop_actions_and_opt_in() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (_temp, path) = temp_notification_path("notifications.jsonl");
+        let row_obj = json_value_to_py(
+            py,
+            &json!({
+                "id": "dismissed",
+                "timestamp": "2026-04-30T12:00:00+00:00",
+                "sender": "ci_watch",
+                "dismissed": true,
+                "dedup_key": "combo"
+            }),
+        )
+        .unwrap();
+        let row = row_obj.bind(py).downcast::<PyDict>().unwrap();
+        py_append_notification(py, path.to_str().unwrap(), row).unwrap();
+
+        let before = py_read_notifications_snapshot(
+            py,
+            path.to_str().unwrap(),
+            true,
+            false,
+        )
+        .unwrap();
+        let before_value = py_to_json_value(before.bind(py)).unwrap();
+        let request_obj = json_value_to_py(
+            py,
+            &json!({
+                "dedup_key": "combo",
+                "timestamp": "2026-04-30T13:00:00+00:00",
+                "sender": "ci_watch",
+                "note": "still failing"
+            }),
+        )
+        .unwrap();
+        let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+        let skipped = py_append_notification_plus_one(
+            py,
+            path.to_str().unwrap(),
+            request,
+        )
+        .unwrap();
+        let skipped_value = py_to_json_value(skipped.bind(py)).unwrap();
+        assert_eq!(skipped_value["action"], json!("skipped_dismissed"));
+        assert_eq!(skipped_value["id"], json!("dismissed"));
+
+        let after = py_read_notifications_snapshot(
+            py,
+            path.to_str().unwrap(),
+            true,
+            false,
+        )
+        .unwrap();
+        let after_value = py_to_json_value(after.bind(py)).unwrap();
+        assert_eq!(after_value["generation"], before_value["generation"]);
+        assert_eq!(after_value["notifications"], before_value["notifications"]);
+
+        let opted_obj = json_value_to_py(
+            py,
+            &json!({
+                "dedup_key": "combo",
+                "timestamp": "2026-04-30T13:01:00+00:00",
+                "sender": "ci_watch",
+                "note": "still failing",
+                "plus_one_dismissed": true,
+                "coalesce_window_seconds": 0
+            }),
+        )
+        .unwrap();
+        let opted = opted_obj.bind(py).downcast::<PyDict>().unwrap();
+        let applied =
+            py_append_notification_plus_one(py, path.to_str().unwrap(), opted)
+                .unwrap();
+        let applied_value = py_to_json_value(applied.bind(py)).unwrap();
+        assert_eq!(applied_value["action"], json!("applied"));
+        assert_eq!(applied_value["plus_one_count"], json!(1));
+
+        let coalesced_obj = json_value_to_py(
+            py,
+            &json!({
+                "dedup_key": "combo",
+                "timestamp": "2026-04-30T13:02:00+00:00",
+                "sender": "ci_watch",
+                "note": "still failing",
+                "plus_one_dismissed": true
+            }),
+        )
+        .unwrap();
+        let coalesced = coalesced_obj.bind(py).downcast::<PyDict>().unwrap();
+        let outcome = py_append_notification_plus_one(
+            py,
+            path.to_str().unwrap(),
+            coalesced,
+        )
+        .unwrap();
+        let outcome_value = py_to_json_value(outcome.bind(py)).unwrap();
+        assert_eq!(outcome_value["action"], json!("coalesced"));
+        assert_eq!(outcome_value["plus_one_count"], json!(1));
+
+        let upsert_obj = json_value_to_py(
+            py,
+            &json!({
+                "notification": {
+                    "id": "ignored",
+                    "timestamp": "2026-04-30T13:03:00+00:00",
+                    "sender": "ci_watch",
+                    "dedup_key": "combo"
+                },
+                "plus_one_note": "still failing",
+                "plus_one_timestamp": "2026-04-30T13:03:00+00:00"
+            }),
+        )
+        .unwrap();
+        let upsert = upsert_obj.bind(py).downcast::<PyDict>().unwrap();
+        let skipped_upsert =
+            py_upsert_notification(py, path.to_str().unwrap(), upsert).unwrap();
+        let skipped_upsert_value =
+            py_to_json_value(skipped_upsert.bind(py)).unwrap();
+        assert_eq!(skipped_upsert_value["action"], json!("skipped_dismissed"));
+        assert_eq!(skipped_upsert_value["id"], json!("dismissed"));
+    });
+}
+
+#[test]
 fn notification_store_current_snapshot_binding_reconciles_snoozes() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
@@ -459,6 +584,30 @@ fn notification_plus_one_and_upsert_bindings_round_trip() {
         assert_eq!(upsert_value["action"], json!("plus_oned"));
         assert_eq!(upsert_value["id"], json!("n1"));
         assert_eq!(upsert_value["plus_one_count"], json!(2));
+
+        let repeated_obj = json_value_to_py(
+            py,
+            &json!({
+                "notification": {
+                    "id": "n3",
+                    "timestamp": "2026-04-30T14:05:00+00:00",
+                    "sender": "ci_watch",
+                    "dedup_key": "combo"
+                },
+                "plus_one_note": " second ",
+                "plus_one_timestamp": "2026-04-30T14:05:00+00:00"
+            }),
+        )
+        .unwrap();
+        let repeated = repeated_obj.bind(py).downcast::<PyDict>().unwrap();
+        let repeated_outcome =
+            py_upsert_notification(py, path.to_str().unwrap(), repeated)
+                .unwrap();
+        let repeated_value =
+            py_to_json_value(repeated_outcome.bind(py)).unwrap();
+        assert_eq!(repeated_value["action"], json!("coalesced"));
+        assert_eq!(repeated_value["id"], json!("n1"));
+        assert_eq!(repeated_value["plus_one_count"], json!(2));
     });
 }
 

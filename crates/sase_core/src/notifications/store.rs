@@ -21,6 +21,7 @@ use super::wire::{
     NotificationStoreStatsWire, NotificationUpdateOutcomeWire,
     NotificationUpsertActionWire, NotificationUpsertOutcomeWire,
     NotificationUpsertRequestWire, NotificationWire,
+    NOTIFICATION_PLUS_ONE_COALESCE_WINDOW_SECONDS,
     NOTIFICATION_PLUS_ONE_MAX_ENTRIES, NOTIFICATION_PLUS_ONE_NOTE_MAX_CHARS,
     NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
     NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES,
@@ -655,6 +656,14 @@ pub fn append_notification_plus_one(
                 notification: None,
             });
         };
+        if let Some(action) = plus_one_no_op_action(
+            &rows[index],
+            &prepared,
+            request.plus_one_dismissed,
+            request.coalesce_window_seconds,
+        ) {
+            return Ok(plus_one_no_op_outcome(rows[index].clone(), action));
+        }
         apply_prepared_plus_one(&mut rows[index], &prepared);
         let notification = rows[index].clone();
         merge_and_rewrite_notifications_unlocked(path, &rows)?;
@@ -719,6 +728,14 @@ pub fn upsert_notification(
             row.sender == notification.sender
                 && row.dedup_key.as_deref() == Some(dedup_key)
         }) {
+            if let Some(action) = plus_one_no_op_action(
+                &rows[index],
+                &prepared,
+                request.plus_one_dismissed,
+                request.coalesce_window_seconds,
+            ) {
+                return Ok(upsert_no_op_outcome(rows[index].clone(), action));
+            }
             apply_prepared_plus_one(&mut rows[index], &prepared);
             let updated = rows[index].clone();
             merge_and_rewrite_notifications_unlocked(path, &rows)?;
@@ -782,6 +799,55 @@ fn normalize_plus_one_note(note: &str) -> Result<String, String> {
         .chars()
         .take(NOTIFICATION_PLUS_ONE_NOTE_MAX_CHARS)
         .collect())
+}
+
+fn plus_one_no_op_action(
+    row: &NotificationWire,
+    prepared: &PreparedPlusOne,
+    plus_one_dismissed: bool,
+    coalesce_window_seconds: Option<u64>,
+) -> Option<NotificationPlusOneActionWire> {
+    if row.dismissed && !plus_one_dismissed {
+        return Some(NotificationPlusOneActionWire::SkippedDismissed);
+    }
+    identical_plus_one_within_window(row, prepared, coalesce_window_seconds)
+        .then_some(NotificationPlusOneActionWire::Coalesced)
+}
+
+fn identical_plus_one_within_window(
+    row: &NotificationWire,
+    prepared: &PreparedPlusOne,
+    coalesce_window_seconds: Option<u64>,
+) -> bool {
+    let window = coalesce_window_seconds
+        .unwrap_or(NOTIFICATION_PLUS_ONE_COALESCE_WINDOW_SECONDS);
+    if window == 0 {
+        return false;
+    }
+    let Some(last) = row.plus_ones.last() else {
+        return false;
+    };
+    if last.sender.trim() != prepared.sender
+        || normalize_plus_one_note(&last.note).ok().as_deref()
+            != Some(prepared.note.as_str())
+    {
+        return false;
+    }
+    let Ok(previous_at) =
+        parse_aware_utc(&last.timestamp, "plus-one timestamp")
+    else {
+        return false;
+    };
+    let Ok(current_at) =
+        parse_aware_utc(&prepared.timestamp, "plus-one timestamp")
+    else {
+        return false;
+    };
+    let Ok(elapsed) = current_at.signed_duration_since(previous_at).to_std()
+    else {
+        return false;
+    };
+    elapsed <= Duration::from_secs(window)
 }
 
 fn validate_plus_one_target(
@@ -914,9 +980,23 @@ fn append_as_created(
 fn applied_plus_one_outcome(
     notification: NotificationWire,
 ) -> NotificationPlusOneOutcomeWire {
+    plus_one_outcome(notification, NotificationPlusOneActionWire::Applied)
+}
+
+fn plus_one_no_op_outcome(
+    notification: NotificationWire,
+    action: NotificationPlusOneActionWire,
+) -> NotificationPlusOneOutcomeWire {
+    plus_one_outcome(notification, action)
+}
+
+fn plus_one_outcome(
+    notification: NotificationWire,
+    action: NotificationPlusOneActionWire,
+) -> NotificationPlusOneOutcomeWire {
     NotificationPlusOneOutcomeWire {
         schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
-        action: NotificationPlusOneActionWire::Applied,
+        action,
         id: Some(notification.id.clone()),
         plus_one_count: notification.plus_one_count(),
         plus_ones_dropped: notification.plus_ones_dropped,
@@ -930,6 +1010,30 @@ fn plus_oned_upsert_outcome(
     NotificationUpsertOutcomeWire {
         schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
         action: NotificationUpsertActionWire::PlusOned,
+        id: Some(notification.id.clone()),
+        plus_one_count: notification.plus_one_count(),
+        plus_ones_dropped: notification.plus_ones_dropped,
+        superseded_ids: Vec::new(),
+        notification: Some(notification),
+    }
+}
+
+fn upsert_no_op_outcome(
+    notification: NotificationWire,
+    action: NotificationPlusOneActionWire,
+) -> NotificationUpsertOutcomeWire {
+    NotificationUpsertOutcomeWire {
+        schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+        action: match action {
+            NotificationPlusOneActionWire::Coalesced => {
+                NotificationUpsertActionWire::Coalesced
+            }
+            NotificationPlusOneActionWire::SkippedDismissed => {
+                NotificationUpsertActionWire::SkippedDismissed
+            }
+            NotificationPlusOneActionWire::Applied
+            | NotificationPlusOneActionWire::NoMatch => unreachable!(),
+        },
         id: Some(notification.id.clone()),
         plus_one_count: notification.plus_one_count(),
         plus_ones_dropped: notification.plus_ones_dropped,

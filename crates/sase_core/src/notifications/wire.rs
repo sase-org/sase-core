@@ -10,6 +10,9 @@ pub const NOTIFICATION_PLUS_ONE_NOTE_MAX_CHARS: usize = 2000;
 /// Hard cap on stored plus-one entries per notification row.
 pub const NOTIFICATION_PLUS_ONE_MAX_ENTRIES: usize = 500;
 
+/// Default interval in which identical notification +1s coalesce.
+pub const NOTIFICATION_PLUS_ONE_COALESCE_WINDOW_SECONDS: u64 = 10 * 60;
+
 /// Live cap on stored plus-one entries for `wait_checks` rows.
 pub const NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES: usize = 32;
 
@@ -94,6 +97,13 @@ pub struct NotificationPlusOneRequestWire {
     pub sender: String,
     #[serde(default)]
     pub note: String,
+    /// Permit appending a +1 to a dismissed row. Defaults to false.
+    #[serde(default)]
+    pub plus_one_dismissed: bool,
+    /// Identical +1s coalesce inside this window. Omitted means 10 minutes;
+    /// zero disables coalescing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coalesce_window_seconds: Option<u64>,
 }
 
 #[derive(
@@ -102,6 +112,8 @@ pub struct NotificationPlusOneRequestWire {
 #[serde(rename_all = "snake_case")]
 pub enum NotificationPlusOneActionWire {
     Applied,
+    Coalesced,
+    SkippedDismissed,
     #[default]
     NoMatch,
 }
@@ -128,6 +140,13 @@ pub struct NotificationUpsertRequestWire {
     pub plus_one_timestamp: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<String>,
+    /// Permit appending a +1 to a dismissed matching row. Defaults to false.
+    #[serde(default)]
+    pub plus_one_dismissed: bool,
+    /// Identical +1s coalesce inside this window. Omitted means 10 minutes;
+    /// zero disables coalescing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coalesce_window_seconds: Option<u64>,
 }
 
 #[derive(
@@ -138,6 +157,8 @@ pub enum NotificationUpsertActionWire {
     #[default]
     Created,
     PlusOned,
+    Coalesced,
+    SkippedDismissed,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

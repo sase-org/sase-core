@@ -161,10 +161,27 @@ fn notification_plus_one_by_key_picks_newest_including_dismissed() {
     newer.dismissed = true;
     append_notification(&path, &older).unwrap();
     append_notification(&path, &newer).unwrap();
+    let before_bytes = fs::read(&path).unwrap();
+    let before_generation =
+        read_notifications_snapshot(&path, true).unwrap().generation;
 
     let outcome =
         append_notification_plus_one(&path, &plus_one_by_key("combo", "quiet"))
             .unwrap();
+    assert_eq!(
+        outcome.action,
+        NotificationPlusOneActionWire::SkippedDismissed
+    );
+    assert_eq!(outcome.id.as_deref(), Some("newer"));
+    assert_eq!(fs::read(&path).unwrap(), before_bytes);
+    assert_eq!(
+        read_notifications_snapshot(&path, true).unwrap().generation,
+        before_generation
+    );
+
+    let mut opted_in = plus_one_by_key("combo", "quiet");
+    opted_in.plus_one_dismissed = true;
+    let outcome = append_notification_plus_one(&path, &opted_in).unwrap();
     assert_eq!(outcome.action, NotificationPlusOneActionWire::Applied);
     assert_eq!(outcome.id.as_deref(), Some("newer"));
 
@@ -320,6 +337,7 @@ fn notification_upsert_creates_then_plus_ones_by_dedup_key() {
             plus_one_note: Some("initial".to_string()),
             plus_one_timestamp: Some("2026-05-01T03:00:00+00:00".to_string()),
             supersedes: None,
+            ..NotificationUpsertRequestWire::default()
         },
     )
     .unwrap();
@@ -337,6 +355,7 @@ fn notification_upsert_creates_then_plus_ones_by_dedup_key() {
             plus_one_note: Some("churn".to_string()),
             plus_one_timestamp: Some("2026-05-01T04:00:00+00:00".to_string()),
             supersedes: None,
+            ..NotificationUpsertRequestWire::default()
         },
     )
     .unwrap();
@@ -367,6 +386,7 @@ fn notification_upsert_rejects_dedup_key_without_plus_one_note() {
             plus_one_note: None,
             plus_one_timestamp: None,
             supersedes: None,
+            ..NotificationUpsertRequestWire::default()
         },
     )
     .unwrap_err();
@@ -384,6 +404,9 @@ fn notification_upsert_matches_dismissed_and_snoozed_rows() {
     dismissed.muted = true;
     dismissed.snooze_until = Some("2026-05-12T10:00:00+00:00".to_string());
     append_notification(&path, &dismissed).unwrap();
+    let before_bytes = fs::read(&path).unwrap();
+    let before_generation =
+        read_notifications_snapshot(&path, true).unwrap().generation;
 
     let mut incoming = notification("ignored-id");
     incoming.dedup_key = Some("combo".to_string());
@@ -394,6 +417,31 @@ fn notification_upsert_matches_dismissed_and_snoozed_rows() {
             plus_one_note: Some("still accruing".to_string()),
             plus_one_timestamp: Some("2026-05-01T04:00:00+00:00".to_string()),
             supersedes: None,
+            ..NotificationUpsertRequestWire::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.action,
+        NotificationUpsertActionWire::SkippedDismissed
+    );
+    assert_eq!(outcome.id.as_deref(), Some("quiet"));
+    assert_eq!(fs::read(&path).unwrap(), before_bytes);
+    assert_eq!(
+        read_notifications_snapshot(&path, true).unwrap().generation,
+        before_generation
+    );
+
+    let mut incoming = notification("ignored-id");
+    incoming.dedup_key = Some("combo".to_string());
+    let outcome = upsert_notification(
+        &path,
+        &NotificationUpsertRequestWire {
+            notification: incoming,
+            plus_one_note: Some("still accruing".to_string()),
+            plus_one_timestamp: Some("2026-05-01T04:00:00+00:00".to_string()),
+            plus_one_dismissed: true,
+            ..NotificationUpsertRequestWire::default()
         },
     )
     .unwrap();
@@ -406,6 +454,86 @@ fn notification_upsert_matches_dismissed_and_snoozed_rows() {
     assert_eq!(
         snapshot.notifications[0].plus_ones[0].note,
         "still accruing"
+    );
+}
+
+#[test]
+fn notification_plus_ones_coalesce_inside_window_and_append_outside_it() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let mut row = notification("coalesce");
+    row.plus_ones = vec![NotificationPlusOneWire {
+        timestamp: "2026-05-01T03:00:00+00:00".to_string(),
+        sender: "test-sender".to_string(),
+        note: " same   note ".to_string(),
+    }];
+    append_notification(&path, &row).unwrap();
+    let before_bytes = fs::read(&path).unwrap();
+    let before_generation =
+        read_notifications_snapshot(&path, true).unwrap().generation;
+
+    let mut within_window = plus_one_by_id("coalesce", " same   note ");
+    within_window.timestamp = "2026-05-01T03:05:00+00:00".to_string();
+    let coalesced =
+        append_notification_plus_one(&path, &within_window).unwrap();
+    assert_eq!(coalesced.action, NotificationPlusOneActionWire::Coalesced);
+    assert_eq!(coalesced.plus_one_count, 1);
+    assert_eq!(fs::read(&path).unwrap(), before_bytes);
+    assert_eq!(
+        read_notifications_snapshot(&path, true).unwrap().generation,
+        before_generation
+    );
+
+    let mut outside_window = plus_one_by_id("coalesce", "same note");
+    outside_window.timestamp = "2026-05-01T03:11:00+00:00".to_string();
+    let appended =
+        append_notification_plus_one(&path, &outside_window).unwrap();
+    assert_eq!(appended.action, NotificationPlusOneActionWire::Applied);
+    assert_eq!(appended.plus_one_count, 2);
+
+    let mut disabled = plus_one_by_id("coalesce", "same note");
+    disabled.timestamp = "2026-05-01T03:12:00+00:00".to_string();
+    disabled.coalesce_window_seconds = Some(0);
+    let appended = append_notification_plus_one(&path, &disabled).unwrap();
+    assert_eq!(appended.action, NotificationPlusOneActionWire::Applied);
+    assert_eq!(appended.plus_one_count, 3);
+}
+
+#[test]
+fn notification_upsert_coalesces_matching_plus_one_without_rewrite() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let mut row = notification("upsert-coalesce");
+    row.dedup_key = Some("coalesce".to_string());
+    row.plus_ones = vec![NotificationPlusOneWire {
+        timestamp: "2026-05-01T03:00:00+00:00".to_string(),
+        sender: "test-sender".to_string(),
+        note: "same note".to_string(),
+    }];
+    append_notification(&path, &row).unwrap();
+    let before_bytes = fs::read(&path).unwrap();
+    let before_generation =
+        read_notifications_snapshot(&path, true).unwrap().generation;
+
+    let mut incoming = notification("ignored");
+    incoming.dedup_key = Some("coalesce".to_string());
+    let outcome = upsert_notification(
+        &path,
+        &NotificationUpsertRequestWire {
+            notification: incoming,
+            plus_one_note: Some(" same   note ".to_string()),
+            plus_one_timestamp: Some("2026-05-01T03:05:00+00:00".to_string()),
+            ..NotificationUpsertRequestWire::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome.action, NotificationUpsertActionWire::Coalesced);
+    assert_eq!(outcome.id.as_deref(), Some("upsert-coalesce"));
+    assert_eq!(outcome.plus_one_count, 1);
+    assert_eq!(fs::read(&path).unwrap(), before_bytes);
+    assert_eq!(
+        read_notifications_snapshot(&path, true).unwrap().generation,
+        before_generation
     );
 }
 
@@ -437,6 +565,7 @@ fn notification_upsert_supersedes_matching_rows_only_on_create() {
             plus_one_note: Some("rolled".to_string()),
             plus_one_timestamp: Some("2026-05-01T04:00:00+00:00".to_string()),
             supersedes: Some("old".to_string()),
+            ..NotificationUpsertRequestWire::default()
         },
     )
     .unwrap();
@@ -490,6 +619,7 @@ fn notification_upsert_supersede_no_match_is_silent() {
             plus_one_note: Some("first".to_string()),
             plus_one_timestamp: Some("2026-05-01T04:00:00+00:00".to_string()),
             supersedes: Some("missing".to_string()),
+            ..NotificationUpsertRequestWire::default()
         },
     )
     .unwrap();
@@ -522,6 +652,7 @@ fn notification_upsert_does_not_supersede_when_plus_oning() {
             plus_one_note: Some("delta".to_string()),
             plus_one_timestamp: Some("2026-05-01T04:00:00+00:00".to_string()),
             supersedes: Some("old".to_string()),
+            ..NotificationUpsertRequestWire::default()
         },
     )
     .unwrap();
@@ -612,6 +743,7 @@ fn notification_wait_checks_upsert_caps_at_32_while_others_keep_500() {
             plus_one_note: Some("wait-newest".to_string()),
             plus_one_timestamp: Some("2026-05-01T04:00:00+00:00".to_string()),
             supersedes: None,
+            ..NotificationUpsertRequestWire::default()
         },
     )
     .unwrap();
@@ -627,6 +759,7 @@ fn notification_wait_checks_upsert_caps_at_32_while_others_keep_500() {
             plus_one_note: Some("other-newest".to_string()),
             plus_one_timestamp: Some("2026-05-01T04:00:00+00:00".to_string()),
             supersedes: None,
+            ..NotificationUpsertRequestWire::default()
         },
     )
     .unwrap();
