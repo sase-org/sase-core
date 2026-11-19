@@ -881,7 +881,7 @@ fn publication_recovery_bindings_select_and_complete() {
             .unwrap()
             .contains("linked-scope"));
 
-        assert_eq!(py_default_publication_cleanup_timeout(), 1.0);
+        assert_eq!(py_default_publication_cleanup_timeout(), 15.0);
     });
 }
 

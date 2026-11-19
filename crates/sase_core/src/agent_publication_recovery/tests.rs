@@ -1351,7 +1351,7 @@ fn stale_repair_rejects_unknown_scopes() {
 }
 
 #[test]
-fn cleanup_budget_is_one_second() {
-    assert_eq!(default_publication_cleanup_timeout(), 1.0);
-    assert_eq!(DEFAULT_PUBLICATION_CLEANUP_TIMEOUT_SECONDS, 1.0);
+fn cleanup_budget_covers_measured_cleanup_max() {
+    assert_eq!(default_publication_cleanup_timeout(), 15.0);
+    assert_eq!(DEFAULT_PUBLICATION_CLEANUP_TIMEOUT_SECONDS, 15.0);
 }
