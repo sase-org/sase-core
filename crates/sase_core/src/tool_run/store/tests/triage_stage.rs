@@ -8,8 +8,12 @@ use crate::tool_run::store::{
     triage_stage,
 };
 use crate::tool_run::triage::{
-    ToolRunFailuresRequestWire, ToolRunTriageSettleRequestWire,
-    ToolRunTriageStageInputWire, ToolRunTriageStageRequestWire,
+    extract_triage_items, ToolRunFailuresRequestWire,
+    ToolRunFailuresResultWire, ToolRunTriageExtractRequestWire,
+    ToolRunTriageFlakeEntryWire, ToolRunTriageLabelWire,
+    ToolRunTriageOwnerCandidateWire, ToolRunTriageSettleRequestWire,
+    ToolRunTriageSettleResultWire, ToolRunTriageStageInputWire,
+    ToolRunTriageStageRequestWire, ToolRunTriageStageResultWire,
 };
 use crate::tool_run::wire::{
     ToolArgsPolicyWire, ToolDefinitionWire, ToolDirtyPathWire,
@@ -173,6 +177,144 @@ fn finish_failed(
 
 fn mypy_output() -> String {
     "src/foo.py:10:5: error: Bad thing  [attr-defined]\n".to_string()
+}
+
+fn pytest_probe_output() -> String {
+    "FAILED tests/triage_probe.py::test_owner - AssertionError\n".to_string()
+}
+
+fn exited() -> Option<crate::tool_run::handoff_wire::ToolRunTerminalCauseWire> {
+    Some(crate::tool_run::handoff_wire::ToolRunTerminalCauseWire::Exited)
+}
+
+fn open_candidate(
+    node_id: &str,
+    location: Option<&str>,
+    title: Option<&str>,
+) -> ToolRunTriageOwnerCandidateWire {
+    ToolRunTriageOwnerCandidateWire {
+        node_id: node_id.to_string(),
+        location: location.map(str::to_string),
+        title: title.map(str::to_string),
+        status: "open".to_string(),
+        closed_ts: None,
+    }
+}
+
+fn expected_location_owner(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "status": "open",
+        "reason": "possible owner",
+        "matched_on": "location",
+    })
+}
+
+fn stage_input(output: String) -> ToolRunTriageStageInputWire {
+    ToolRunTriageStageInputWire {
+        stage_key: "test (scoped)".to_string(),
+        stage_id: Some("stage-1".to_string()),
+        output: Some(output),
+        truncated: false,
+        output_path: None,
+    }
+}
+
+fn stage_with_candidates(
+    path: &Path,
+    run_id: &str,
+    output: String,
+    candidates: Vec<ToolRunTriageOwnerCandidateWire>,
+    now: i64,
+) -> ToolRunTriageStageResultWire {
+    triage_stage(
+        path,
+        ToolRunTriageStageRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: run_id.to_string(),
+            stage: stage_input(output),
+            project_root: None,
+            workspace_roots: Vec::new(),
+            ancestry: vec!["head-3".to_string()],
+            flake_baseline: Vec::new(),
+            selection_records: Vec::new(),
+            owner_candidates: candidates,
+            knobs: Default::default(),
+            now_ts: Some(now),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap()
+}
+
+fn settle_with_candidates(
+    path: &Path,
+    run_id: &str,
+    stages: Vec<ToolRunTriageStageInputWire>,
+    candidates: Vec<ToolRunTriageOwnerCandidateWire>,
+    now: i64,
+) -> ToolRunTriageSettleResultWire {
+    triage_settle(
+        path,
+        ToolRunTriageSettleRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: run_id.to_string(),
+            stages,
+            run_output: None,
+            run_output_truncated: false,
+            project_root: None,
+            workspace_roots: Vec::new(),
+            ancestry: vec!["head-3".to_string()],
+            flake_baseline: Vec::new(),
+            selection_records: Vec::new(),
+            owner_candidates: candidates,
+            knobs: Default::default(),
+            continuation_mode: None,
+            recipe_finished_ts: Some(now),
+            now_ts: Some(now),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap()
+}
+
+fn label_snapshot(
+    label: &ToolRunTriageLabelWire,
+) -> (
+    String,
+    Option<bool>,
+    u32,
+    serde_json::Value,
+    serde_json::Value,
+    i64,
+) {
+    (
+        label.class.as_str().to_string(),
+        label.touched,
+        label.rule_version,
+        label.knobs.clone(),
+        label.evidence.clone(),
+        label.classified_ts,
+    )
+}
+
+fn failures_for(path: &Path, now: i64) -> ToolRunFailuresResultWire {
+    tool_run_failures(
+        path,
+        ToolRunFailuresRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            project: Some("sase".to_string()),
+            all_projects: false,
+            tool: Some("check".to_string()),
+            class: None,
+            days: 7,
+            limit: 50,
+            now_ts: Some(now),
+            runs_limit: 0,
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -824,4 +966,407 @@ fn failures_affected_runs_bounded_newest_first() {
     .unwrap();
     assert!(capped.groups[0].affected_runs.len() <= 50);
     assert_eq!(capped.groups[0].affected_runs.len(), 3);
+}
+
+#[test]
+fn settle_attaches_owners_to_staged_items_without_rewriting_labels() {
+    let probe_node = "tests/triage_probe.py::test_owner";
+    let probe_file = "tests/triage_probe.py";
+    // Fresh-settle control: an exact pytest node attaches on first
+    // classification.
+    let (_fresh_temp, fresh_path) = store();
+    let fresh = begin_named(&fresh_path, "fresh-1", Some("ws-a"), 1);
+    observe_fp(&fresh_path, &fresh.run_id, "head-3", vec![]);
+    finish_failed(&fresh_path, &fresh.run_id, 50, exited());
+    let fresh_settled = settle_with_candidates(
+        &fresh_path,
+        &fresh.run_id,
+        vec![stage_input(pytest_probe_output())],
+        vec![open_candidate("sase-probe", Some(probe_node), None)],
+        100,
+    );
+    assert!(fresh_settled.refused.is_none());
+    assert!(fresh_settled.triaged);
+    assert_eq!(fresh_settled.items.len(), 1);
+    let fresh_label = fresh_settled.items[0].label.as_ref().unwrap();
+    assert_eq!(fresh_label.class.as_str(), "unknown");
+    assert_eq!(
+        fresh_label.possible_owners,
+        serde_json::Value::Array(vec![expected_location_owner("sase-probe")])
+    );
+    // Stage-before-settle: the stage persists the classification with an
+    // empty owner list, and settle backfills it from stored locators.
+    let (_temp, path) = store();
+    let run = begin_named(&path, "staged-1", Some("ws-a"), 1);
+    observe_fp(&path, &run.run_id, "head-3", vec![]);
+    finish_failed(&path, &run.run_id, 50, exited());
+    let staged = stage_with_candidates(
+        &path,
+        &run.run_id,
+        pytest_probe_output(),
+        Vec::new(),
+        60,
+    );
+    assert!(staged.refused.is_none());
+    assert_eq!(staged.items.len(), 1);
+    let staged_label = staged.items[0].label.as_ref().unwrap();
+    assert_eq!(staged_label.class.as_str(), "unknown");
+    assert_eq!(
+        staged_label.possible_owners,
+        serde_json::Value::Array(Vec::new())
+    );
+    let before = label_snapshot(staged_label);
+    // Stored-only settlement: no stages and no run output, so the owner can
+    // only come from the already-classified stored item.
+    let settled = settle_with_candidates(
+        &path,
+        &run.run_id,
+        Vec::new(),
+        vec![open_candidate("sase-probe", Some(probe_file), None)],
+        100,
+    );
+    assert!(settled.refused.is_none());
+    assert!(settled.triaged);
+    assert_eq!(settled.items.len(), 1);
+    let label = settled.items[0].label.as_ref().unwrap();
+    assert_eq!(label_snapshot(label), before);
+    assert_eq!(
+        label.possible_owners,
+        serde_json::Value::Array(vec![expected_location_owner("sase-probe")])
+    );
+    assert_eq!(settled.failure_kind.as_deref(), Some("verification"));
+    // Show and failure aggregation agree on the annotation.
+    let shown = triage_show(
+        &path,
+        crate::tool_run::triage::ToolRunTriageShowRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: run.run_id.clone(),
+            owner_kind: None,
+            owner_id: None,
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(shown.items.len(), 1);
+    assert_eq!(
+        shown.items[0].label.as_ref().unwrap().possible_owners,
+        serde_json::Value::Array(vec![expected_location_owner("sase-probe")])
+    );
+    let groups = failures_for(&path, 2000);
+    assert_eq!(groups.groups.len(), 1);
+    assert_eq!(
+        groups.groups[0].newest_owners,
+        serde_json::Value::Array(vec![expected_location_owner("sase-probe")])
+    );
+}
+
+#[test]
+fn settle_owner_enrichment_keeps_evidence_for_every_class() {
+    let combined = [
+        "FAILED tests/known_probe.py::test_seen - assert\n",
+        "FAILED tests/flaky_probe.py::test_flake - assert\n",
+        "FAILED tests/new_probe.py::test_new - assert\n",
+        "FAILED tests/lonely_probe.py::test_lonely - assert\n",
+    ]
+    .concat();
+    // Witness in another workspace at an ancestor head for the known item.
+    // It records the same triple under an unrelated stage key so it never
+    // serves as a pass witness for the other subjects below.
+    let (_temp, path) = store();
+    let witness = begin_named(&path, "witness-1", Some("ws-b"), 1);
+    observe_fp(&path, &witness.run_id, "head-2", vec![]);
+    finish_failed(&path, &witness.run_id, 50, exited());
+    triage_stage(
+        &path,
+        ToolRunTriageStageRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: witness.run_id.clone(),
+            stage: ToolRunTriageStageInputWire {
+                stage_key: "test (other)".to_string(),
+                stage_id: Some("stage-1".to_string()),
+                output: Some(
+                    "FAILED tests/known_probe.py::test_seen - assert\n"
+                        .to_string(),
+                ),
+                truncated: false,
+                output_path: None,
+            },
+            project_root: None,
+            workspace_roots: Vec::new(),
+            ancestry: vec!["head-2".to_string()],
+            flake_baseline: Vec::new(),
+            selection_records: Vec::new(),
+            owner_candidates: Vec::new(),
+            knobs: Default::default(),
+            now_ts: Some(60),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    // The flaky triple is known before settlement via pure extraction.
+    let extracted = extract_triage_items(ToolRunTriageExtractRequestWire {
+        schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+        stage_key: "test (scoped)".to_string(),
+        stage_id: None,
+        output: Some(combined.clone()),
+        truncated: false,
+        project_root: None,
+        workspace_roots: Vec::new(),
+    })
+    .unwrap();
+    let flaky = extracted
+        .items
+        .iter()
+        .find(|item| item.locator_paths == vec!["tests/flaky_probe.py"])
+        .unwrap();
+    // The new item is touched through the subject fingerprint; the lonely
+    // item has no witness, baseline, or touch.
+    let subject = begin_named(&path, "subject-1", Some("ws-a"), 70);
+    observe_fp(&path, &subject.run_id, "head-3", vec!["tests/new_probe.py"]);
+    finish_failed(&path, &subject.run_id, 80, exited());
+    let settled = triage_settle(
+        &path,
+        ToolRunTriageSettleRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: subject.run_id.clone(),
+            stages: vec![stage_input(combined)],
+            run_output: None,
+            run_output_truncated: false,
+            project_root: None,
+            workspace_roots: Vec::new(),
+            ancestry: vec!["head-3".to_string(), "head-2".to_string()],
+            flake_baseline: vec![ToolRunTriageFlakeEntryWire {
+                extractor: flaky.extractor.clone(),
+                extractor_version: flaky.extractor_version,
+                signature: flaky.signature.clone(),
+                source: Some("test-baseline".to_string()),
+            }],
+            selection_records: Vec::new(),
+            owner_candidates: vec![
+                open_candidate(
+                    "sase-known",
+                    Some("tests/known_probe.py"),
+                    None,
+                ),
+                open_candidate(
+                    "sase-flaky",
+                    Some("tests/flaky_probe.py"),
+                    None,
+                ),
+                open_candidate("sase-new", Some("tests/new_probe.py"), None),
+                open_candidate(
+                    "sase-lonely",
+                    Some("tests/lonely_probe.py"),
+                    None,
+                ),
+            ],
+            knobs: Default::default(),
+            continuation_mode: None,
+            recipe_finished_ts: Some(100),
+            now_ts: Some(100),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert!(settled.refused.is_none());
+    assert!(settled.triaged);
+    assert_eq!(settled.items.len(), 4);
+    let by_locator = |locator: &str| {
+        settled
+            .items
+            .iter()
+            .find(|item| item.locator_paths == vec![locator])
+            .unwrap()
+    };
+    let known = by_locator("tests/known_probe.py");
+    let known_label = known.label.as_ref().unwrap();
+    assert_eq!(known_label.class.as_str(), "known");
+    assert_eq!(
+        known_label.possible_owners,
+        serde_json::Value::Array(vec![expected_location_owner("sase-known")])
+    );
+    assert!(known_label.evidence["witness_run_ids"]
+        .as_array()
+        .is_some_and(|ids| !ids.is_empty()));
+    let flaky_item = by_locator("tests/flaky_probe.py");
+    let flaky_label = flaky_item.label.as_ref().unwrap();
+    assert_eq!(flaky_label.class.as_str(), "flaky");
+    assert_eq!(
+        flaky_label.possible_owners,
+        serde_json::Value::Array(vec![expected_location_owner("sase-flaky")])
+    );
+    assert_eq!(
+        flaky_label.evidence["baseline_source"],
+        serde_json::json!("test-baseline")
+    );
+    let new_item = by_locator("tests/new_probe.py");
+    let new_label = new_item.label.as_ref().unwrap();
+    assert_eq!(new_label.class.as_str(), "new");
+    assert_eq!(new_label.touched, Some(true));
+    assert_eq!(
+        new_label.possible_owners,
+        serde_json::Value::Array(vec![expected_location_owner("sase-new")])
+    );
+    let lonely = by_locator("tests/lonely_probe.py");
+    let lonely_label = lonely.label.as_ref().unwrap();
+    assert_eq!(lonely_label.class.as_str(), "unknown");
+    assert_eq!(lonely_label.touched, Some(false));
+    assert_eq!(
+        lonely_label.possible_owners,
+        serde_json::Value::Array(vec![expected_location_owner("sase-lonely")])
+    );
+}
+
+#[test]
+fn settle_owner_enrichment_is_idempotent_and_conservative() {
+    let probe_node = "tests/triage_probe.py::test_owner";
+    let (_temp, path) = store();
+    // Two staged runs: only the first is settled below.
+    for (run_id, workspace) in [("run-a", "ws-a"), ("run-b", "ws-b")] {
+        let run = begin_named(&path, run_id, Some(workspace), 1);
+        observe_fp(&path, &run.run_id, "head-3", vec![]);
+        finish_failed(&path, &run.run_id, 50, exited());
+        stage_with_candidates(
+            &path,
+            &run.run_id,
+            pytest_probe_output(),
+            Vec::new(),
+            60,
+        );
+    }
+    let candidate = open_candidate("sase-probe", Some(probe_node), None);
+    let settled =
+        settle_with_candidates(&path, "run-a", Vec::new(), vec![candidate], 70);
+    assert!(settled.triaged);
+    let label = settled.items[0].label.as_ref().unwrap();
+    let before = label_snapshot(label);
+    let owners =
+        serde_json::Value::Array(vec![expected_location_owner("sase-probe")]);
+    assert_eq!(label.possible_owners, owners);
+    // Replay with the same candidates preserves the enriched list and the
+    // classification evidence.
+    let replayed = settle_with_candidates(
+        &path,
+        "run-a",
+        Vec::new(),
+        vec![open_candidate("sase-probe", Some(probe_node), None)],
+        80,
+    );
+    let replayed_label = replayed.items[0].label.as_ref().unwrap();
+    assert_eq!(replayed_label.possible_owners, owners);
+    assert_eq!(label_snapshot(replayed_label), before);
+    // An empty gather is a no-op: it never erases an enriched list.
+    let emptied =
+        settle_with_candidates(&path, "run-a", Vec::new(), vec![], 90);
+    let emptied_label = emptied.items[0].label.as_ref().unwrap();
+    assert_eq!(emptied_label.possible_owners, owners);
+    assert_eq!(label_snapshot(emptied_label), before);
+    // A nonmatching candidate neither replaces nor extends the list.
+    let token_only = settle_with_candidates(
+        &path,
+        "run-a",
+        Vec::new(),
+        vec![
+            open_candidate(
+                "sase-106",
+                None,
+                Some("Restore gate creator handoff exports"),
+            ),
+            open_candidate("sase-boundary", Some("tests/triage_prob"), None),
+        ],
+        100,
+    );
+    let token_label = token_only.items[0].label.as_ref().unwrap();
+    assert_eq!(token_label.possible_owners, owners);
+    assert_eq!(label_snapshot(token_label), before);
+    // The unsettled sibling run is untouched: no cross-run bleed.
+    let shown_b = triage_show(
+        &path,
+        crate::tool_run::triage::ToolRunTriageShowRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: "run-b".to_string(),
+            owner_kind: None,
+            owner_id: None,
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(shown_b.items.len(), 1);
+    assert_eq!(
+        shown_b.items[0].label.as_ref().unwrap().possible_owners,
+        serde_json::Value::Array(Vec::new())
+    );
+    // A settle with only false owners leaves the other run empty too.
+    let settled_b = settle_with_candidates(
+        &path,
+        "run-b",
+        Vec::new(),
+        vec![open_candidate(
+            "sase-106",
+            None,
+            Some("Restore gate creator handoff exports"),
+        )],
+        110,
+    );
+    assert!(settled_b.triaged);
+    assert_eq!(
+        settled_b.items[0].label.as_ref().unwrap().possible_owners,
+        serde_json::Value::Array(Vec::new())
+    );
+}
+
+#[test]
+fn settle_owner_enrichment_skips_suppressed_runs() {
+    let (_temp, path) = store();
+    let run = begin_named(&path, "suppressed-1", Some("ws-a"), 1);
+    observe_fp(&path, &run.run_id, "head-3", vec![]);
+    finish(
+        &path,
+        ToolRunFinishRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: run.run_id.clone(),
+            event_id: None,
+            state: ToolRunStateWire::Signaled,
+            exit_code: None,
+            signal: Some(15),
+            interruption_reason: None,
+            lost_reason: None,
+            child_pid: None,
+            child_pgid: None,
+            child_process_start_identity: None,
+            duration_ms: Some(1),
+            fingerprint_before: None,
+            fingerprint_after: None,
+            mutated_input: None,
+            now_ts: Some(50),
+            terminal_cause: Some(
+                crate::tool_run::handoff_wire::ToolRunTerminalCauseWire::Timeout,
+            ),
+            diagnostics: Vec::new(),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let staged = stage_with_candidates(
+        &path,
+        &run.run_id,
+        pytest_probe_output(),
+        Vec::new(),
+        60,
+    );
+    assert!(staged.items[0].label.is_none());
+    let settled = settle_with_candidates(
+        &path,
+        &run.run_id,
+        Vec::new(),
+        vec![open_candidate(
+            "sase-probe",
+            Some("tests/triage_probe.py::test_owner"),
+            None,
+        )],
+        70,
+    );
+    assert!(settled.triaged);
+    assert_eq!(settled.items.len(), 1);
+    assert!(settled.items[0].label.is_none());
 }

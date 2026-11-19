@@ -388,7 +388,7 @@ fn owner_title_hit(locator_paths: &[String], title: &str) -> bool {
     false
 }
 
-fn match_owners(
+pub(crate) fn match_owners(
     locator_paths: &[String],
     candidates: &[ToolRunTriageOwnerCandidateWire],
     now_ts: i64,

@@ -11,6 +11,7 @@ pub(crate) mod tests;
 mod verdict;
 pub(crate) mod wire;
 
+pub(crate) use classify::match_owners;
 pub use classify::{
     tool_run_triage_classify, ToolRunTriageClassifyLabelWire,
     ToolRunTriageClassifyRequestWire, ToolRunTriageClassifyResultWire,

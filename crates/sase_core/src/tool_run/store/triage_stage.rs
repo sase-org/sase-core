@@ -5,15 +5,15 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
 use super::super::triage::{
-    extract_triage_items, tool_run_triage_classify,
+    extract_triage_items, match_owners, tool_run_triage_classify,
     ToolRunTriageClassifyRequestWire, ToolRunTriageEvidenceItemWire,
     ToolRunTriageEvidenceRunWire, ToolRunTriageItemWire,
-    ToolRunTriageLabelWire, ToolRunTriageSubjectItemWire,
-    ToolRunTriageSubjectRunWire, TOOL_RUN_TRIAGE_LOOKBACK_SECS,
-    TOOL_RUN_TRIAGE_RULE_VERSION,
+    ToolRunTriageLabelWire, ToolRunTriageOwnerCandidateWire,
+    ToolRunTriageSubjectItemWire, ToolRunTriageSubjectRunWire,
+    TOOL_RUN_TRIAGE_LOOKBACK_SECS, TOOL_RUN_TRIAGE_RULE_VERSION,
 };
 use super::super::triage::{
     ToolRunTriageExtractRequestWire, ToolRunTriageRecordRequestWire,
@@ -315,6 +315,95 @@ fn label_to_stored(
         possible_owners: label.possible_owners.clone(),
         classified_ts: now_ts,
     }
+}
+
+fn stored_owners_are_empty(raw: Option<&str>) -> bool {
+    match raw {
+        None => true,
+        Some(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return true;
+            }
+            match serde_json::from_str::<serde_json::Value>(trimmed) {
+                Ok(serde_json::Value::Array(items)) => items.is_empty(),
+                Ok(serde_json::Value::Null) => true,
+                Ok(_) => false,
+                Err(_) => false,
+            }
+        }
+    }
+}
+
+/// Fill empty owner annotations on already-classified items.
+///
+/// A stage-first run persists labels with no candidates, and the generic
+/// record path keeps those labels first-writer-wins. Settlement is the only
+/// later pass that sees candidates, so it backfills `possible_owners_json`
+/// where it is still empty (`[]` or legacy NULL) and the matcher finds an
+/// owner. Classification columns are never touched: class, touched, rule
+/// version, knobs, evidence, and classified timestamp stay byte-for-byte
+/// stable. A settle with no candidates is a no-op, and replaying after
+/// enrichment preserves the nonempty list.
+fn enrich_stored_owner_annotations(
+    store_path: &Path,
+    run_id: &str,
+    candidates: &[ToolRunTriageOwnerCandidateWire],
+    now_ts: i64,
+    busy_timeout: Duration,
+) -> Result<(), ToolRunError> {
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    with_write_store(store_path, busy_timeout, |conn| {
+        if !triage_tables_present(conn)? {
+            return Ok(());
+        }
+        let tx =
+            conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let rows: Vec<(String, String, Option<String>)> = {
+            let mut stmt = tx.prepare(
+                "SELECT item_id, locator_paths_json, possible_owners_json
+                 FROM tool_triage_items
+                 WHERE run_id = ?1 AND class IS NOT NULL",
+            )?;
+            let mapped = stmt.query_map([run_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in mapped {
+                out.push(row?);
+            }
+            out
+        };
+        for (item_id, locators_raw, owners_raw) in rows {
+            if !stored_owners_are_empty(owners_raw.as_deref()) {
+                continue;
+            }
+            let locator_paths: Vec<String> =
+                serde_json::from_str(&locators_raw).unwrap_or_default();
+            let owners = match_owners(&locator_paths, candidates, now_ts);
+            if owners.is_empty() {
+                continue;
+            }
+            let owners_json = serde_json::to_string(&owners)
+                .map_err(|error| ToolRunError::store(error.to_string()))?;
+            tx.execute(
+                "UPDATE tool_triage_items
+                 SET possible_owners_json = ?2
+                 WHERE item_id = ?1
+                   AND (possible_owners_json IS NULL
+                        OR possible_owners_json = '[]')",
+                params![item_id, owners_json],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
 }
 
 pub fn triage_stage(
@@ -903,6 +992,18 @@ pub fn triage_settle(
                 busy_timeout,
             )?;
         }
+    }
+    // Owner enrichment for already-classified items (the stage-before-settle
+    // case): attach matching owners without rewriting any classification
+    // evidence. Suppressed runs carry no labels and gain none here.
+    if !suppressed {
+        enrich_stored_owner_annotations(
+            store_path,
+            &request.run_id,
+            &request.owner_candidates,
+            now,
+            busy_timeout,
+        )?;
     }
     let shown = triage_show(
         store_path,
