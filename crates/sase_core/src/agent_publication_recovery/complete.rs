@@ -7,7 +7,8 @@ use super::wire::{
     PublicationContainerObservationWire, PublicationRecoveryError,
     PublicationRunObservationWire, PROMPT_STATUS_ALREADY_ARCHIVED,
     PROMPT_STATUS_FAILED, PROMPT_STATUS_NOT_APPLICABLE, PROMPT_STATUS_RESTORED,
-    PROMPT_STATUS_UNAVAILABLE, PUBLICATION_KIND_RUN, PUBLICATION_KIND_SESSION,
+    PROMPT_STATUS_UNAVAILABLE, PROMPT_STATUS_UNRECOVERABLE,
+    PUBLICATION_KIND_RUN, PUBLICATION_KIND_SESSION,
     PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION, PUBLICATION_SCOPE_LINKED,
 };
 
@@ -128,6 +129,21 @@ pub fn classify_deferred_prompt_obligation(
             reason:
                 "published run has no prompt file and no local prompt source"
                     .to_string(),
+        });
+    }
+    if request.past_grace_period
+        && request.attempts_exhausted
+        && !request.local_source_present
+        && !request.archive_present
+    {
+        return Ok(DeferredPromptClassifyResponseWire {
+            schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+            status: PROMPT_STATUS_UNRECOVERABLE.to_string(),
+            blocks_acknowledgment: true,
+            reason: "prompt archive source is unrecoverable: no local source \
+                and no archived copy after the grace period with attempts \
+                exhausted"
+                .to_string(),
         });
     }
     Ok(DeferredPromptClassifyResponseWire {

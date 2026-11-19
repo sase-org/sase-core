@@ -16,6 +16,7 @@ pub const PROMPT_STATUS_ALREADY_ARCHIVED: &str = "already_archived";
 pub const PROMPT_STATUS_NOT_APPLICABLE: &str = "not_applicable";
 pub const PROMPT_STATUS_UNAVAILABLE: &str = "unavailable";
 pub const PROMPT_STATUS_FAILED: &str = "failed";
+pub const PROMPT_STATUS_UNRECOVERABLE: &str = "unrecoverable";
 
 pub const PUBLICATION_LIFECYCLE_ACTIVE: &str = "active";
 pub const PUBLICATION_LIFECYCLE_QUARANTINED: &str = "quarantined";
@@ -307,6 +308,12 @@ pub struct DeferredPromptClassifyRequestWire {
     pub archive_present: bool,
     #[serde(default)]
     pub prompt_file_in_snapshot: Option<bool>,
+    /// Whether the row is past the deferred-prompt grace period.
+    #[serde(default)]
+    pub past_grace_period: bool,
+    /// Whether the row exhausted its attempts or is quarantined.
+    #[serde(default)]
+    pub attempts_exhausted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

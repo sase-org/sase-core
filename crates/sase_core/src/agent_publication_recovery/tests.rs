@@ -1201,6 +1201,8 @@ fn missing_local_prompt_source_does_not_clear_an_unknown_obligation() {
             local_source_present: false,
             archive_present: false,
             prompt_file_in_snapshot: None,
+            past_grace_period: false,
+            attempts_exhausted: false,
         },
     )
     .unwrap();
@@ -1218,6 +1220,8 @@ fn existing_archive_or_snapshot_without_prompt_file_are_not_losses() {
             local_source_present: false,
             archive_present: true,
             prompt_file_in_snapshot: Some(true),
+            past_grace_period: true,
+            attempts_exhausted: true,
         },
     )
     .unwrap();
@@ -1232,11 +1236,96 @@ fn existing_archive_or_snapshot_without_prompt_file_are_not_losses() {
             local_source_present: false,
             archive_present: false,
             prompt_file_in_snapshot: Some(false),
+            past_grace_period: true,
+            attempts_exhausted: true,
         },
     )
     .unwrap();
     assert_eq!(not_applicable.status, PROMPT_STATUS_NOT_APPLICABLE);
     assert!(!not_applicable.blocks_acknowledgment);
+}
+
+#[test]
+fn exhausted_missing_sources_past_grace_are_unrecoverable() {
+    let decision = classify_deferred_prompt_obligation(
+        &DeferredPromptClassifyRequestWire {
+            schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+            restore_wrote: false,
+            restore_error: None,
+            local_source_present: false,
+            archive_present: false,
+            prompt_file_in_snapshot: None,
+            past_grace_period: true,
+            attempts_exhausted: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(decision.status, PROMPT_STATUS_UNRECOVERABLE);
+    // Terminal still blocks acknowledgment as success: the row must be
+    // retired with an audit record, never acknowledged as published.
+    assert!(decision.blocks_acknowledgment);
+}
+
+#[test]
+fn unrecoverable_needs_both_grace_and_exhaustion() {
+    for (past_grace, exhausted) in
+        [(false, false), (true, false), (false, true)]
+    {
+        let decision = classify_deferred_prompt_obligation(
+            &DeferredPromptClassifyRequestWire {
+                schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+                restore_wrote: false,
+                restore_error: None,
+                local_source_present: false,
+                archive_present: false,
+                prompt_file_in_snapshot: None,
+                past_grace_period: past_grace,
+                attempts_exhausted: exhausted,
+            },
+        )
+        .unwrap();
+        assert_eq!(decision.status, PROMPT_STATUS_UNAVAILABLE);
+        assert!(decision.blocks_acknowledgment);
+    }
+}
+
+#[test]
+fn unrecoverable_needs_every_source_missing() {
+    // An archived copy settles the row even past grace with attempts spent.
+    for (local_source, archive) in [(false, true), (true, true)] {
+        let decision = classify_deferred_prompt_obligation(
+            &DeferredPromptClassifyRequestWire {
+                schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+                restore_wrote: false,
+                restore_error: None,
+                local_source_present: local_source,
+                archive_present: archive,
+                prompt_file_in_snapshot: None,
+                past_grace_period: true,
+                attempts_exhausted: true,
+            },
+        )
+        .unwrap();
+        assert_ne!(decision.status, PROMPT_STATUS_UNRECOVERABLE);
+        assert!(!decision.blocks_acknowledgment);
+    }
+    // A present local source with nothing written is still unresolved, but it
+    // is not terminal: the bytes exist to retry with.
+    let decision = classify_deferred_prompt_obligation(
+        &DeferredPromptClassifyRequestWire {
+            schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+            restore_wrote: false,
+            restore_error: None,
+            local_source_present: true,
+            archive_present: false,
+            prompt_file_in_snapshot: None,
+            past_grace_period: true,
+            attempts_exhausted: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(decision.status, PROMPT_STATUS_UNAVAILABLE);
+    assert!(decision.blocks_acknowledgment);
 }
 
 fn stale_request(
