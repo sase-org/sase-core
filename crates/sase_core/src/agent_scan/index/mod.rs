@@ -34,7 +34,8 @@ pub use alias_history::query_agent_alias_history;
 
 pub use checkpoint::{
     checkpoint_agent_artifact_index_wal_if_oversized,
-    AgentArtifactIndexWalCheckpointWire,
+    checkpoint_agent_artifact_index_wal_if_oversized_with_mode,
+    AgentArtifactIndexWalCheckpointMode, AgentArtifactIndexWalCheckpointWire,
 };
 
 pub use dismissal::{

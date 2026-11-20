@@ -13,9 +13,10 @@ use std::{
 
 use sase_core::{
     agent_scan::{
-        checkpoint_agent_artifact_index_wal_if_oversized,
+        checkpoint_agent_artifact_index_wal_if_oversized_with_mode,
         AgentArtifactIndexFreshnessWire, AgentArtifactIndexQueryWire,
-        AgentArtifactRecordShapeWire, AgentArtifactScanOptionsWire,
+        AgentArtifactIndexWalCheckpointMode, AgentArtifactRecordShapeWire,
+        AgentArtifactScanOptionsWire,
         AgentSessionDismissalLineageCandidateWire,
         AGENT_ARTIFACT_INDEX_WAL_SIZE_LIMIT_BYTES,
     },
@@ -955,7 +956,8 @@ impl FleetReadService {
         });
         tokio::spawn(async move {
             let refresh_timeout = inner.refresh_timeout;
-            let outcome = run_scoped_build(&inner, scope, build, started).await;
+            let (outcome, post_build) =
+                run_scoped_build(&inner, scope, build, started).await;
             let duration_ms = started.elapsed().as_millis() as u64;
             let timed_out_waiters =
                 timed_out.load(std::sync::atomic::Ordering::Relaxed);
@@ -1008,7 +1010,15 @@ impl FleetReadService {
                     state.in_flight = None;
                 }
             }
+            let succeeded = outcome.snapshot.is_some();
             let _ = sender.send(Some(outcome));
+            // Waiters are already woken: WAL housekeeping runs after the
+            // response path, still under the index permit.
+            if let Some(post_build) = post_build {
+                if succeeded {
+                    run_checkpoint_hook(&inner, post_build).await;
+                }
+            }
         });
     }
 
@@ -1303,75 +1313,118 @@ fn scope_state_for(
     }
 }
 
+/// The index permit and index path a successful Presentation build hands
+/// back so WAL housekeeping can run after its waiters are woken.
+struct PostBuildCheckpoint {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    index_path: PathBuf,
+}
+
 /// Run one snapshot build while holding a gateway-wide index permit for
-/// the whole blocking build. Successful Presentation builds checkpoint an
-/// oversized index WAL best-effort while still holding the permit.
+/// the whole blocking build. A Presentation build returns the permit so
+/// the caller can checkpoint an oversized index WAL after waking waiters.
 async fn run_scoped_build(
     inner: &Arc<FleetReadServiceInner>,
     scope: SnapshotScope,
     build: BuildSnapshotRequest,
     started: Instant,
-) -> RefreshOutcome {
+) -> (RefreshOutcome, Option<PostBuildCheckpoint>) {
     let permit = inner.index_permits.clone().acquire_owned().await;
-    let Ok(_permit) = permit else {
-        return RefreshOutcome {
-            started,
-            snapshot: None,
-            error: Some(FleetReadError::Backend("index_permits".to_string())),
-        };
+    let Ok(permit) = permit else {
+        return (
+            RefreshOutcome {
+                started,
+                snapshot: None,
+                error: Some(FleetReadError::Backend(
+                    "index_permits".to_string(),
+                )),
+            },
+            None,
+        );
     };
     let index_path = build.index_path.clone();
     let is_presentation = matches!(scope, SnapshotScope::Presentation);
+    let result =
+        tokio::task::spawn_blocking(move || build_snapshot_blocking(build))
+            .await;
+    let post_build = is_presentation.then(|| PostBuildCheckpoint {
+        _permit: permit,
+        index_path,
+    });
+    match result {
+        Ok(Ok(snapshot)) => (
+            RefreshOutcome {
+                started,
+                snapshot: Some(snapshot),
+                error: None,
+            },
+            post_build,
+        ),
+        Ok(Err(error)) => (
+            RefreshOutcome {
+                started,
+                snapshot: None,
+                error: Some(error),
+            },
+            None,
+        ),
+        Err(_) => (
+            RefreshOutcome {
+                started,
+                snapshot: None,
+                error: Some(FleetReadError::Backend(
+                    "snapshot_join".to_string(),
+                )),
+            },
+            None,
+        ),
+    }
+}
+
+/// Best-effort passive WAL checkpoint after a successful Presentation
+/// build. PASSIVE never waits on readers, so a busy index is a normal
+/// outcome; the permit is released when this returns.
+async fn run_checkpoint_hook(
+    inner: &Arc<FleetReadServiceInner>,
+    post_build: PostBuildCheckpoint,
+) {
     #[cfg(test)]
-    let hook_inner = Arc::clone(inner);
-    let result = tokio::task::spawn_blocking(move || {
-        let snapshot = build_snapshot_blocking(build)?;
-        if is_presentation {
-            #[cfg(test)]
-            hook_inner
-                .checkpoint_hook_calls
-                .fetch_add(1, Ordering::Relaxed);
-            match checkpoint_agent_artifact_index_wal_if_oversized(
-                &index_path,
-                AGENT_ARTIFACT_INDEX_WAL_SIZE_LIMIT_BYTES,
-            ) {
-                Ok(outcome) if outcome.checkpoint_attempted => {
-                    tracing::info!(
-                        target: FLEET_READS_TRACE_TARGET,
-                        wal_bytes_before = outcome.wal_bytes_before,
-                        wal_bytes_after = outcome.wal_bytes_after,
-                        "fleet index WAL checkpointed",
-                    );
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        target: FLEET_READS_TRACE_TARGET,
-                        error = error.as_str(),
-                        "fleet index WAL checkpoint failed",
-                    );
-                }
-            }
-        }
-        Ok::<_, FleetReadError>(snapshot)
+    inner.checkpoint_hook_calls.fetch_add(1, Ordering::Relaxed);
+    #[cfg(not(test))]
+    let _ = inner;
+    let index_path = post_build.index_path.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        checkpoint_agent_artifact_index_wal_if_oversized_with_mode(
+            &index_path,
+            AGENT_ARTIFACT_INDEX_WAL_SIZE_LIMIT_BYTES,
+            AgentArtifactIndexWalCheckpointMode::Passive,
+        )
     })
     .await;
-    match result {
-        Ok(Ok(snapshot)) => RefreshOutcome {
-            started,
-            snapshot: Some(snapshot),
-            error: None,
-        },
-        Ok(Err(error)) => RefreshOutcome {
-            started,
-            snapshot: None,
-            error: Some(error),
-        },
-        Err(_) => RefreshOutcome {
-            started,
-            snapshot: None,
-            error: Some(FleetReadError::Backend("snapshot_join".to_string())),
-        },
+    match joined {
+        Ok(Ok(outcome)) if outcome.checkpoint_attempted => {
+            tracing::info!(
+                target: FLEET_READS_TRACE_TARGET,
+                wal_bytes_before = outcome.wal_bytes_before,
+                wal_bytes_after = outcome.wal_bytes_after,
+                checkpoint_busy = outcome.checkpoint_busy,
+                "fleet index WAL checkpointed",
+            );
+        }
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(
+                target: FLEET_READS_TRACE_TARGET,
+                error = error.as_str(),
+                "fleet index WAL checkpoint failed",
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: FLEET_READS_TRACE_TARGET,
+                "fleet index WAL checkpoint task failed",
+            );
+        }
     }
 }
 

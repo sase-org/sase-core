@@ -182,3 +182,41 @@ fn checkpoint_reports_busy_instead_of_failing() {
     assert!(retried.checkpoint_attempted);
     assert!(!retried.checkpoint_busy);
 }
+
+#[test]
+fn frame_counts_of_minus_one_read_as_zero() {
+    assert_eq!(super::super::checkpoint::frame_count(-1), 0);
+    assert_eq!(super::super::checkpoint::frame_count(7), 7);
+}
+
+#[test]
+fn passive_checkpoint_on_busy_index_reports_busy_without_error() {
+    use super::super::checkpoint::{
+        checkpoint_agent_artifact_index_wal_if_oversized_with_mode,
+        AgentArtifactIndexWalCheckpointMode,
+    };
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let dir = artifact(&projects, "20260521170300");
+    write_json(&dir.join("agent_meta.json"), json!({"name": "passive"}));
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    let holder = grow_wal(&index, 4096);
+    holder.execute_batch("BEGIN").unwrap();
+    let _probe: i64 = holder
+        .query_row("SELECT COUNT(*) FROM agent_artifacts", [], |row| row.get(0))
+        .unwrap();
+    let outcome = checkpoint_agent_artifact_index_wal_if_oversized_with_mode(
+        &index,
+        1,
+        AgentArtifactIndexWalCheckpointMode::Passive,
+    )
+    .unwrap();
+    holder.execute_batch("ROLLBACK").unwrap();
+    assert!(outcome.checkpoint_attempted);
+}
