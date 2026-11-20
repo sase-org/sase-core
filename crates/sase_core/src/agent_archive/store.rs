@@ -1191,9 +1191,11 @@ fn open_queryable_archive_store(root: &Path) -> Option<Connection> {
 fn identity_filters_are_vacuous(
     request: &DismissedBundleIndexQueryWire,
 ) -> bool {
-    let either_present =
-        request.agent_names.is_some() || request.source_run_ids.is_some();
-    let names_empty = request.agent_names.as_ref().is_none_or(Vec::is_empty);
+    let either_present = request.agent_names.is_some()
+        || request.identity_prefixes.is_some()
+        || request.source_run_ids.is_some();
+    let names_empty = request.agent_names.as_ref().is_none_or(Vec::is_empty)
+        && request.identity_prefixes.as_ref().is_none_or(Vec::is_empty);
     let runs_empty = request.source_run_ids.as_ref().is_none_or(Vec::is_empty);
     either_present && names_empty && runs_empty
 }
@@ -1694,6 +1696,32 @@ fn in_clause(
     format!("{column} IN ({placeholders})")
 }
 
+fn prefix_clause(
+    column: &str,
+    prefixes: &[String],
+    params: &mut Vec<rusqlite::types::Value>,
+) -> Option<String> {
+    let prefixes: Vec<_> = prefixes
+        .iter()
+        .filter(|prefix| !prefix.is_empty())
+        .collect();
+    if prefixes.is_empty() {
+        return None;
+    }
+    let alternatives = prefixes
+        .iter()
+        .map(|prefix| {
+            let escaped = prefix
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            params.push(rusqlite::types::Value::Text(format!("{escaped}%")));
+            format!("{column} LIKE ? ESCAPE '\\'")
+        })
+        .collect::<Vec<_>>();
+    Some(format!("({})", alternatives.join(" OR ")))
+}
+
 /// Shared non-identity filters (suffixes, runs, cl, project, child, visibility).
 fn push_shared_clauses(
     request: &DismissedBundleIndexQueryWire,
@@ -1704,9 +1732,11 @@ fn push_shared_clauses(
         clauses.push(in_clause("s.raw_suffix", &suffixes, params));
     }
     if let Some(runs) = nonempty_sorted(request.source_run_ids.as_ref()) {
-        // When agent_names is also present the caller unions the agent and
-        // workflow branches; the run match joins each branch as an OR.
-        if request.agent_names.as_ref().is_none_or(Vec::is_empty) {
+        // When a name or prefix filter is present the caller unions the
+        // agent, workflow, and run branches.
+        if request.agent_names.as_ref().is_none_or(Vec::is_empty)
+            && request.identity_prefixes.as_ref().is_none_or(Vec::is_empty)
+        {
             clauses.push(in_clause("s.source_run_id", &runs, params));
         }
     }
@@ -1740,17 +1770,50 @@ fn build_summary_query(
     // by the same output names.
     const UNION_ORDER_BY: &str =
         " ORDER BY COALESCE(start_time, raw_suffix) DESC, filename ASC";
-    if let Some(names) = nonempty_sorted(request.agent_names.as_ref()) {
-        // Match `agent_names` against the source bundle's `agent_name` or its
-        // `workflow_name` (never the display `workflow` field). Each UNION
-        // branch filters one indexed column with no OR so the planner keeps
-        // single-column index seeks; UNION (not UNION ALL) dedups rows that
-        // match both. The legacy scan matched either column.
+    let names =
+        nonempty_sorted(request.agent_names.as_ref()).unwrap_or_default();
+    let prefixes =
+        nonempty_sorted(request.identity_prefixes.as_ref()).unwrap_or_default();
+    if !names.is_empty() || !prefixes.is_empty() {
+        // Exact names match `agent_name` and `workflow_name`. Identity
+        // prefixes also cover session and cl names used by the inventory
+        // classifier's legacy fallbacks. UNION deduplicates matching rows.
         let runs = nonempty_sorted(request.source_run_ids.as_ref());
         let mut branches = Vec::new();
         let mut params = Vec::new();
         for column in ["s.agent_name", "s.workflow_name"] {
-            let mut clauses = vec![in_clause(column, &names, &mut params)];
+            let mut name_alternatives = Vec::new();
+            if !names.is_empty() {
+                name_alternatives.push(in_clause(column, &names, &mut params));
+            }
+            if let Some(prefixes) =
+                prefix_clause(column, &prefixes, &mut params)
+            {
+                name_alternatives.push(prefixes);
+            }
+            let mut clauses =
+                vec![format!("({})", name_alternatives.join(" OR "))];
+            let mut shared_clauses = Vec::new();
+            let mut shared_params = Vec::new();
+            push_shared_without_runs_or_names(
+                request,
+                &mut shared_clauses,
+                &mut shared_params,
+            );
+            clauses.extend(shared_clauses);
+            params.extend(shared_params);
+            let mut branch = SUMMARY_SELECT.to_string();
+            branch.push_str(" WHERE ");
+            branch.push_str(&clauses.join(" AND "));
+            branches.push(branch);
+        }
+        for column in ["s.agent_session", "s.cl_name", "s.meta_patch"] {
+            let Some(identity_prefixes) =
+                prefix_clause(column, &prefixes, &mut params)
+            else {
+                continue;
+            };
+            let mut clauses = vec![identity_prefixes];
             let mut shared_clauses = Vec::new();
             let mut shared_params = Vec::new();
             push_shared_without_runs_or_names(

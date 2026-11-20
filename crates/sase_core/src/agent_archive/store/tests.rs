@@ -574,6 +574,43 @@ fn store_query_filters_by_exact_run_identity() {
 }
 
 #[test]
+fn store_query_filters_by_literal_agent_name_prefixes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    for (filename, suffix, agent_name) in [
+        ("child.json", "child", "wanted.child"),
+        ("role.json", "role", "wanted--worker"),
+        ("lookalike.json", "lookalike", "wantedish.child"),
+        ("wildcard.json", "wildcard", "wanted_%_child"),
+    ] {
+        upsert_custom_bundle(root, filename, suffix, |bundle| {
+            bundle["agent_name"] = json!(agent_name);
+        });
+    }
+
+    let descendants = query_suffixes(
+        root,
+        DismissedBundleIndexQueryWire {
+            identity_prefixes: Some(vec![
+                "wanted.".to_string(),
+                "wanted--".to_string(),
+            ]),
+            ..Default::default()
+        },
+    );
+    assert_eq!(descendants, vec!["child", "role"]);
+
+    let literal_wildcards = query_suffixes(
+        root,
+        DismissedBundleIndexQueryWire {
+            identity_prefixes: Some(vec!["wanted_%_".to_string()]),
+            ..Default::default()
+        },
+    );
+    assert_eq!(literal_wildcards, vec!["wildcard"]);
+}
+
+#[test]
 fn store_agent_names_match_workflow_name_projection() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
@@ -626,6 +663,7 @@ fn query_wire_omitted_identity_fields_deserialize_to_none() {
     }))
     .unwrap();
     assert_eq!(parsed.agent_names, None);
+    assert_eq!(parsed.identity_prefixes, None);
     assert_eq!(parsed.source_run_ids, None);
 }
 
