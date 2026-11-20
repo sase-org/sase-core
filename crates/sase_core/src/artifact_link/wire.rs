@@ -61,31 +61,60 @@ impl From<ArtifactRefError> for ArtifactLinkError {
 }
 
 /// How a stored link row was created.
+///
+/// sase writes every variant; its `ARTIFACT_LINK_HOST_ORIGINS` constant lists
+/// them, and a sase contract test round-trips each through
+/// `artifact_link_validate_row`, so a host origin missing here fails there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactLinkOriginWire {
     Manual,
     Migrated,
+    /// An explicit artifact reference in an agent prompt (`plan:...`).
     PromptRef,
+    /// A plan or research citation detected in an agent prompt's prose
+    /// rather than written as an explicit reference. Kept distinct from
+    /// [`Self::PromptRef`] so recorded provenance is never relabeled, but
+    /// otherwise treated the same: automatic, drained at commit scope, and
+    /// usage-bearing (see [`Self::increments_uses`]).
+    PromptProse,
     Read,
     Derived,
     Projected,
 }
 
 impl ArtifactLinkOriginWire {
+    /// Every variant, in declaration order.
+    pub const ALL: [Self; 7] = [
+        Self::Manual,
+        Self::Migrated,
+        Self::PromptRef,
+        Self::PromptProse,
+        Self::Read,
+        Self::Derived,
+        Self::Projected,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Manual => "manual",
             Self::Migrated => "migrated",
             Self::PromptRef => "prompt_ref",
+            Self::PromptProse => "prompt_prose",
             Self::Read => "read",
             Self::Derived => "derived",
             Self::Projected => "projected",
         }
     }
 
+    /// Whether a repeat observation of the same edge counts as another use.
+    ///
+    /// The usage-bearing origins are the ones sase's canonical-event path
+    /// turns into `observation` events: `prompt_ref`, `prompt_prose`, and
+    /// `read`. A prose citation counts a use exactly like an explicit
+    /// prompt reference does.
     pub fn increments_uses(self) -> bool {
-        matches!(self, Self::PromptRef | Self::Read)
+        matches!(self, Self::PromptRef | Self::PromptProse | Self::Read)
     }
 
     pub fn from_name(value: &str) -> Option<Self> {
@@ -93,6 +122,7 @@ impl ArtifactLinkOriginWire {
             "manual" => Some(Self::Manual),
             "migrated" => Some(Self::Migrated),
             "prompt_ref" => Some(Self::PromptRef),
+            "prompt_prose" => Some(Self::PromptProse),
             "read" => Some(Self::Read),
             "derived" => Some(Self::Derived),
             "projected" => Some(Self::Projected),
@@ -534,6 +564,94 @@ mod tests {
         assert_eq!(rows[0].created_by, "bbugyi200.athena.y2");
         assert_eq!(rows[0].created_at, "2026-08-18T23:40:00Z");
         assert_eq!(rows[0].description, "cited again");
+    }
+
+    #[test]
+    fn origin_all_lists_every_variant_and_round_trips() {
+        // Exhaustive on purpose: a new variant fails to compile here until it
+        // gets a slot, and that slot must be its index in `ALL`.
+        fn slot(origin: ArtifactLinkOriginWire) -> usize {
+            match origin {
+                ArtifactLinkOriginWire::Manual => 0,
+                ArtifactLinkOriginWire::Migrated => 1,
+                ArtifactLinkOriginWire::PromptRef => 2,
+                ArtifactLinkOriginWire::PromptProse => 3,
+                ArtifactLinkOriginWire::Read => 4,
+                ArtifactLinkOriginWire::Derived => 5,
+                ArtifactLinkOriginWire::Projected => 6,
+            }
+        }
+        for (index, origin) in
+            ArtifactLinkOriginWire::ALL.iter().copied().enumerate()
+        {
+            assert_eq!(slot(origin), index, "{origin:?} is out of place");
+            let name = origin.as_str();
+            assert_eq!(ArtifactLinkOriginWire::from_name(name), Some(origin));
+            let json = serde_json::to_string(&origin).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            let parsed: ArtifactLinkOriginWire =
+                serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, origin);
+        }
+        let names: Vec<&str> = ArtifactLinkOriginWire::ALL
+            .iter()
+            .map(|origin| origin.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "manual",
+                "migrated",
+                "prompt_ref",
+                "prompt_prose",
+                "read",
+                "derived",
+                "projected",
+            ]
+        );
+        assert_eq!(ArtifactLinkOriginWire::from_name("nonsense"), None);
+    }
+
+    #[test]
+    fn origin_usage_bearing_set_matches_host_observation_origins() {
+        let usage_bearing: Vec<&str> = ArtifactLinkOriginWire::ALL
+            .iter()
+            .filter(|origin| origin.increments_uses())
+            .map(|origin| origin.as_str())
+            .collect();
+        assert_eq!(usage_bearing, ["prompt_ref", "prompt_prose", "read"]);
+    }
+
+    #[test]
+    fn prompt_prose_row_validates_and_keeps_its_origin() {
+        let validated = validate_artifact_link_row(&ArtifactLinkRowWire {
+            origin: ArtifactLinkOriginWire::PromptProse,
+            ..row("agent:alice", "cites", "plan:202611/a.md")
+        })
+        .unwrap();
+        assert_eq!(validated.origin, ArtifactLinkOriginWire::PromptProse);
+        let value = serde_json::to_value(&validated).unwrap();
+        assert_eq!(value["origin"], "prompt_prose");
+        let parsed: ArtifactLinkRowWire =
+            serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.origin, ArtifactLinkOriginWire::PromptProse);
+    }
+
+    #[test]
+    fn prompt_prose_rewrite_increments_uses_without_relabeling() {
+        let mut rows = Vec::new();
+        let prose = |description: &str| ArtifactLinkRowWire {
+            origin: ArtifactLinkOriginWire::PromptProse,
+            description: description.to_string(),
+            ..row("agent:alice", "cites", "plan:a.md")
+        };
+        upsert_artifact_link_row(&mut rows, prose("cited in prose")).unwrap();
+        let again =
+            upsert_artifact_link_row(&mut rows, prose("cited in prose"))
+                .unwrap();
+        assert_eq!(again.kind, ArtifactLinkUpsertKindWire::Updated);
+        assert_eq!(rows[0].uses, 2);
+        assert_eq!(rows[0].origin, ArtifactLinkOriginWire::PromptProse);
     }
 
     #[test]

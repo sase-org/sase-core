@@ -1344,4 +1344,30 @@ mod tests {
         .unwrap();
         assert_eq!(covered.outcome, "covered");
     }
+
+    #[test]
+    fn prompt_prose_legacy_row_converts_to_an_observation() {
+        let event = event_from_legacy_row(
+            "gh_acme__widget".to_string(),
+            "a".repeat(32),
+            ArtifactLinkRowWire {
+                source_ref: "agent:citer".to_string(),
+                relation: "cites".to_string(),
+                description: "cited in prose".to_string(),
+                origin: ArtifactLinkOriginWire::PromptProse,
+                created_by: "agent:citer".to_string(),
+                uses: 3,
+                ..row()
+            },
+            "2026-11-20T00:00:00Z".to_string(),
+        )
+        .unwrap();
+        assert_eq!(event.origin, ArtifactLinkOriginWire::PromptProse);
+        match event.kind {
+            ArtifactLinkEventKindWire::Observation { occurrences, .. } => {
+                assert_eq!(occurrences, 3);
+            }
+            other => panic!("expected an observation, got {other:?}"),
+        }
+    }
 }

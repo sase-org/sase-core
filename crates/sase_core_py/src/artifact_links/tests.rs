@@ -789,3 +789,31 @@ fn artifact_link_collision_bindings_round_trip() {
         assert!(canonical.contains(&replay_digest));
     });
 }
+
+#[test]
+fn artifact_link_validate_row_keeps_every_origin() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        for origin in ArtifactLinkOriginWire::ALL {
+            let row = request_dict(
+                py,
+                json!({
+                    "schema_version": 2,
+                    "source_ref": "agent:citer",
+                    "relation": "cites",
+                    "target_ref": "plan:202611/a.md",
+                    "description": "contract row",
+                    "origin": origin.as_str(),
+                    "created_by": "agent:citer",
+                    "created_at": "2026-11-20T00:00:00Z",
+                    "uses": 1,
+                }),
+            );
+            let validated = py_to_json_value(
+                py_artifact_link_validate_row(py, &row).unwrap().bind(py),
+            )
+            .unwrap();
+            assert_eq!(validated["origin"], json!(origin.as_str()));
+        }
+    });
+}
