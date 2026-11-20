@@ -24,6 +24,7 @@ fn reconcile_request(
     NotificationReconcileRequestWire {
         notifications: rows,
         reversible_dismiss_marker_key: Some(MARKER_KEY.to_string()),
+        resurface_on_change_key: None,
         refresh_files: false,
     }
 }
@@ -241,6 +242,7 @@ fn reconcile_refresh_files_replaces_files_without_moving_cursors() {
     let request = NotificationReconcileRequestWire {
         notifications: vec![incoming],
         reversible_dismiss_marker_key: None,
+        resurface_on_change_key: None,
         refresh_files: true,
     };
     let outcome = reconcile_notification_rows(&path, &request).unwrap();
@@ -348,6 +350,7 @@ fn reconcile_without_a_marker_key_never_changes_dismissals() {
     let request = NotificationReconcileRequestWire {
         notifications: vec![notification("remote-1")],
         reversible_dismiss_marker_key: None,
+        resurface_on_change_key: None,
         refresh_files: false,
     };
     let outcome = reconcile_notification_rows(&path, &request).unwrap();

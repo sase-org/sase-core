@@ -856,6 +856,70 @@ fn notification_reconcile_binding_applies_field_scoped_write() {
 }
 
 #[test]
+fn notification_reconcile_binding_resurfaces_on_revision_change() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("notifications.jsonl");
+        let row_obj = json_value_to_py(
+            py,
+            &json!({
+                "id": "remote-1",
+                "timestamp": "2026-04-30T12:00:00+00:00",
+                "sender": "remote-attention",
+                "action_data": {"revision": "1"},
+                "read": true,
+                "dismissed": true,
+            }),
+        )
+        .unwrap();
+        let row = row_obj.bind(py).downcast::<PyDict>().unwrap();
+        py_append_notification(py, path.to_str().unwrap(), row).unwrap();
+
+        let request_obj = json_value_to_py(
+            py,
+            &json!({
+                "notifications": [{
+                    "id": "remote-1",
+                    "timestamp": "2026-04-30T12:00:00+00:00",
+                    "sender": "remote-attention",
+                    "action_data": {"revision": "2"},
+                    "resurfaced_at": "2026-04-30T13:00:00+00:00",
+                }],
+                "reversible_dismiss_marker_key": "test_marker",
+                "resurface_on_change_key": "revision",
+            }),
+        )
+        .unwrap();
+        let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+        let outcome =
+            py_reconcile_notification_rows(py, path.to_str().unwrap(), request)
+                .unwrap();
+        let value = py_to_json_value(outcome.bind(py)).unwrap();
+        assert_eq!(value["resurfaced"], json!(1));
+        assert_eq!(value["updated"], json!(0));
+
+        let snapshot = py_read_notifications_snapshot(
+            py,
+            path.to_str().unwrap(),
+            true,
+            false,
+        )
+        .unwrap();
+        let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
+        let rows = snapshot_value["notifications"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["dismissed"], json!(false));
+        assert_eq!(rows[0]["read"], json!(false));
+        assert_eq!(rows[0]["action_data"]["revision"], json!("2"));
+        assert_eq!(
+            rows[0]["resurfaced_at"],
+            json!("2026-04-30T13:00:00+00:00")
+        );
+    });
+}
+
+#[test]
 fn notification_reconcile_binding_rejects_malformed_requests() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

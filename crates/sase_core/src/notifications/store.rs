@@ -1236,15 +1236,22 @@ fn notification_should_archive(
 ///   `dismissed=true` with the marker. An on-disk dismissal without the
 ///   marker is a user dismissal: it stays dismissed and the marker is never
 ///   added.
+/// - revision change: when `resurface_on_change_key` is set and the input
+///   row's `action_data` value for it differs from the on-disk value (a
+///   missing key counts as a value), the row takes the input's `read`,
+///   `dismissed` and `resurfaced_at` before any marker rule applies. A user
+///   dismissal therefore sticks only for the revision it was made on.
 /// - `id`, `timestamp`, `sender`, `files`, `muted`, `snooze_until`,
-///   `resurfaced_at`, `plus_ones`, `plus_ones_dropped` and `dedup_key`
-///   always come from disk.
+///   `plus_ones`, `plus_ones_dropped` and `dedup_key` always come from disk,
+///   and so does `resurfaced_at` unless the revision changed.
 ///
 /// Rows absent from the input are untouched, so a dismissal committed by
 /// another writer between the caller's snapshot read and this write
-/// survives. The file is not rewritten when nothing changed. Each input row
-/// lands in at most one outcome bucket (created, resurfaced, dismissed,
-/// updated, in that priority). Input rows with an empty id are skipped.
+/// survives. The file is not rewritten (and the store generation does not
+/// move) when nothing changed. Each input row lands in at most one outcome
+/// bucket (created, resurfaced, dismissed, updated, in that priority); a
+/// revision change that undismisses a dismissed row counts as resurfaced.
+/// Input rows with an empty id are skipped.
 pub fn reconcile_notification_rows(
     path: &Path,
     request: &NotificationReconcileRequestWire,
@@ -1262,6 +1269,10 @@ fn reconcile_notification_rows_unlocked(
 ) -> Result<NotificationReconcileOutcomeWire, String> {
     let marker = request
         .reversible_dismiss_marker_key
+        .as_deref()
+        .filter(|key| !key.is_empty());
+    let change_key = request
+        .resurface_on_change_key
         .as_deref()
         .filter(|key| !key.is_empty());
     let (mut rows, _) = read_rows_unlocked(path, true)?;
@@ -1296,8 +1307,22 @@ fn reconcile_notification_rows_unlocked(
         let input_has_marker = marker.is_some_and(|key| {
             input.action_data.get(key) == Some(&"true".to_string())
         });
+        let revision_changed = change_key.is_some_and(|key| {
+            on_disk.action_data.get(key) != input.action_data.get(key)
+        });
         let mut transition: Option<&str> = None;
-        if on_disk.dismissed && !disk_has_marker {
+        if revision_changed {
+            // A new revision needs renewed review: the input decides the
+            // browsing state, whatever dismissal the old revision carried.
+            merged.read = input.read;
+            merged.dismissed = input.dismissed;
+            merged.resurfaced_at.clone_from(&input.resurfaced_at);
+            if on_disk.dismissed && !merged.dismissed {
+                transition = Some("resurfaced");
+            } else if !on_disk.dismissed && merged.dismissed {
+                transition = Some("dismissed");
+            }
+        } else if on_disk.dismissed && !disk_has_marker {
             // User dismissal: stays dismissed and the marker is never added.
             merged.dismissed = true;
             if let Some(key) = marker {

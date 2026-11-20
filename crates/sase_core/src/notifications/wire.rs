@@ -328,12 +328,22 @@ pub struct UnreadCompletionIndexWire {
 /// names the `action_data` key whose `"true"` value marks a dismissal the
 /// reconciler itself owns (and may therefore resurface or re-apply); `None`
 /// disables both transitions and every dismissal stays as it is on disk.
+/// `resurface_on_change_key` names an `action_data` key whose value is the
+/// row's content revision: when the input row's value differs from the
+/// on-disk value, the row takes the input's `read`, `dismissed` and
+/// `resurfaced_at` instead of keeping the on-disk state, so a new revision
+/// resurfaces even a user dismissal. An equal value leaves dismissals as the
+/// marker rules decide; `None` disables the check.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationReconcileRequestWire {
     #[serde(default)]
     pub notifications: Vec<NotificationWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reversible_dismiss_marker_key: Option<String>,
+    /// Default `None` and omitted from the wire when unset, so older cores
+    /// and callers that never send it keep today's behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resurface_on_change_key: Option<String>,
     /// When true, copy `files` from the input row onto the on-disk row.
     /// Default false so existing callers never move evidence links.
     /// Does not touch timestamps or delivery cursors.
