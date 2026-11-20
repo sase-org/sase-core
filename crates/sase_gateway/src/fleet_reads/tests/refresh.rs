@@ -22,7 +22,9 @@ use tempfile::{tempdir, TempDir};
 
 use super::super::errors::FleetReadError;
 use super::super::resolution::FLEET_SNAPSHOT_STALE_SECONDS;
-use super::super::service::FleetReadService;
+use super::super::service::{
+    FleetReadService, SNAPSHOT_STALE_SERVE_GRACE_SECONDS,
+};
 use super::support::*;
 use crate::fleet_auth::current_unix_time;
 use crate::fleet_launch::FleetLaunchStore;
@@ -157,12 +159,75 @@ async fn late_build_result_fills_cache_for_later_reads() {
     let stale = service.summary().await.unwrap();
     assert_eq!(stale.freshness.freshness, ObservationFreshnessWire::Stale);
     assert!(stale.freshness.partial);
-    assert_eq!(stale.freshness.error.as_deref(), Some("timeout"));
+    assert_eq!(stale.freshness.error.as_deref(), Some("revalidating"));
 
     poll_until(|| service.refresh_count_for_test() == 2).await;
     let fresh = service.summary().await.unwrap();
     assert_eq!(fresh.freshness.freshness, ObservationFreshnessWire::Fresh);
     assert_eq!(service.builds_started_for_test(), 2);
+}
+
+#[tokio::test]
+async fn stale_cache_is_served_immediately_while_one_rebuild_runs() {
+    let (_temp, home, _projects) = seed_two_agent_home();
+    let (observer, service) = slow_service(&home, Duration::from_secs(1), 0);
+    service.summary().await.unwrap();
+    poll_until(|| service.refresh_count_for_test() == 1).await;
+
+    observer.set_delay_ms(500);
+    service.age_cache_for_test(FLEET_SNAPSHOT_STALE_SECONDS + 1.0);
+    let stale =
+        tokio::time::timeout(Duration::from_millis(500), service.summary())
+            .await
+            .expect("ordinary stale reads must not wait for the build")
+            .unwrap();
+    assert_eq!(stale.freshness.freshness, ObservationFreshnessWire::Stale);
+    assert!(stale.freshness.partial);
+    assert!(stale.freshness.refreshed_at_unix.is_some());
+    assert_eq!(stale.freshness.error.as_deref(), Some("revalidating"));
+    assert_eq!(service.builds_started_for_test(), 2);
+    assert!(service.snapshot_build_in_flight_for_test());
+
+    let second = service.summary().await.unwrap();
+    assert_eq!(second.freshness.error.as_deref(), Some("revalidating"));
+    assert_eq!(service.builds_started_for_test(), 2);
+    poll_until(|| service.refresh_count_for_test() == 2).await;
+    assert_eq!(observer.max_concurrent(), 1);
+}
+
+#[tokio::test]
+async fn stale_cache_past_grace_uses_bounded_wait_then_returns_stale() {
+    let (_temp, home, _projects) = seed_two_agent_home();
+    let (observer, service) =
+        slow_service(&home, Duration::from_millis(500), 0);
+    service.summary().await.unwrap();
+    poll_until(|| service.refresh_count_for_test() == 1).await;
+
+    observer.set_delay_ms(350);
+    service.age_cache_for_test(SNAPSHOT_STALE_SERVE_GRACE_SECONDS + 1.0);
+    let started = tokio::time::Instant::now();
+    let stale = service.summary().await.unwrap();
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_millis(450));
+    assert!(elapsed < Duration::from_secs(2));
+    assert_eq!(stale.freshness.freshness, ObservationFreshnessWire::Stale);
+    assert_eq!(stale.freshness.error.as_deref(), Some("timeout"));
+    poll_until(|| service.refresh_count_for_test() == 2).await;
+}
+
+#[tokio::test]
+async fn queued_snapshot_build_releases_its_slot_after_bounded_permit_wait() {
+    let (_temp, home, _projects) = seed_two_agent_home();
+    let (_observer, service) =
+        slow_service(&home, Duration::from_millis(50), 0);
+    let permits = service.hold_all_index_permits_for_test().await;
+    let started = tokio::time::Instant::now();
+    let result = service.summary().await;
+    assert!(matches!(result, Err(FleetReadError::Timeout(_))));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    poll_until(|| !service.snapshot_build_in_flight_for_test()).await;
+    assert_eq!(service.builds_started_for_test(), 1);
+    drop(permits);
 }
 
 #[tokio::test]
@@ -172,7 +237,7 @@ async fn failed_builds_back_off_and_reset_on_success() {
     service.summary().await.unwrap();
     assert_eq!(service.builds_started_for_test(), 1);
 
-    service.age_cache_for_test(FLEET_SNAPSHOT_STALE_SECONDS + 1.0);
+    service.age_cache_for_test(SNAPSHOT_STALE_SERVE_GRACE_SECONDS + 1.0);
     // Replace the index file with a directory so rebuild attempts fail
     // deterministically instead of relying on timing.
     fs::remove_file(service.index_path()).unwrap();
@@ -475,7 +540,7 @@ async fn checkpoint_hook_runs_after_presentation_success_only() {
     poll_until(|| service.checkpoint_hook_calls_for_test() == 1).await;
     assert_eq!(service.checkpoint_hook_calls_for_test(), 1);
 
-    service.age_cache_for_test(FLEET_SNAPSHOT_STALE_SECONDS + 1.0);
+    service.age_cache_for_test(SNAPSHOT_STALE_SERVE_GRACE_SECONDS + 1.0);
     fs::remove_file(service.index_path()).unwrap();
     fs::create_dir_all(service.index_path()).unwrap();
     let failed = service.summary().await.unwrap();

@@ -14,7 +14,7 @@ use sase_core::{
 };
 use tempfile::tempdir;
 
-use super::super::resolution::FLEET_SNAPSHOT_STALE_SECONDS;
+use super::super::service::SNAPSHOT_STALE_SERVE_GRACE_SECONDS;
 use super::support::*;
 
 #[tokio::test]
@@ -32,7 +32,7 @@ async fn aged_cache_triggers_exactly_one_coalesced_rebuild() {
     service.summary().await.unwrap();
     assert_eq!(service.refresh_count_for_test(), 1);
 
-    service.age_cache_for_test(FLEET_SNAPSHOT_STALE_SECONDS + 1.0);
+    service.age_cache_for_test(SNAPSHOT_STALE_SERVE_GRACE_SECONDS + 1.0);
     let (left, right) = tokio::join!(service.summary(), service.summary());
     assert!(left.is_ok());
     assert!(right.is_ok());
@@ -51,7 +51,7 @@ async fn failed_rebuild_retains_stale_partial_prior_snapshot() {
     assert_eq!(first.counts.logical_agent_total, 2);
     assert_eq!(service.refresh_count_for_test(), 1);
 
-    service.age_cache_for_test(FLEET_SNAPSHOT_STALE_SECONDS + 1.0);
+    service.age_cache_for_test(SNAPSHOT_STALE_SERVE_GRACE_SECONDS + 1.0);
     // Replace the index file with a directory so the next rebuild
     // attempt fails deterministically instead of relying on timing.
     fs::remove_file(service.index_path()).unwrap();
@@ -178,7 +178,7 @@ async fn stale_snapshot_bound_cursor_returns_restart_page() {
         AgentArtifactScanOptionsWire::default(),
     )
     .unwrap();
-    service.age_cache_for_test(FLEET_SNAPSHOT_STALE_SECONDS + 1.0);
+    service.age_cache_for_test(SNAPSHOT_STALE_SERVE_GRACE_SECONDS + 1.0);
 
     let restart = service
         .catalog(FleetCatalogQueryWire {
@@ -222,7 +222,8 @@ async fn failed_history_rebuild_retains_stale_partial_prior_snapshot() {
     assert_eq!(first.page.total_matching_rows, 1);
     assert_eq!(service.history_refresh_count_for_test(), 1);
 
-    service.age_history_cache_for_test(FLEET_SNAPSHOT_STALE_SECONDS + 1.0);
+    service
+        .age_history_cache_for_test(SNAPSHOT_STALE_SERVE_GRACE_SECONDS + 1.0);
     fs::remove_file(service.index_path()).unwrap();
     fs::create_dir_all(service.index_path()).unwrap();
 

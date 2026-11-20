@@ -299,6 +299,14 @@ overlay passes log at `debug`. Successful Presentation builds also
 checkpoint an oversized artifact-index WAL best-effort without failing the
 build.
 
+Ordinary readers receive a cached snapshot marked stale as soon as its age reaches
+60 seconds. For the next five minutes of snapshot age, the gateway starts or joins one
+single-flight background rebuild and returns the stale copy immediately with freshness
+reason `revalidating`. Older snapshots use the bounded four-second refresh wait before
+stale fallback. Cold-cache reads keep their bounded wait and timeout, while explicit
+forced refreshes keep their join-and-wait behavior. A build waiting for an index permit
+gives up within the refresh timeout so it cannot hold the in-flight slot indefinitely.
+
 ## Local Run
 
 ```bash

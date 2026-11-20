@@ -64,6 +64,12 @@ use crate::fleet_auth::current_unix_time;
 use crate::fleet_launch::FleetLaunchStore;
 
 pub(super) const SNAPSHOT_REFRESH_TIMEOUT: Duration = Duration::from_secs(4);
+/// Ordinary reads serve stale snapshots immediately only during this
+/// grace window. Older snapshots still use the bounded refresh wait.
+pub(super) const SNAPSHOT_STALE_SERVE_GRACE_SECONDS: f64 = 5.0 * 60.0;
+/// A queued build must release its single-flight slot even when another
+/// gateway operation holds every index permit.
+const SNAPSHOT_INDEX_PERMIT_WAIT_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// First back-off window after one failed snapshot build. The window
 /// doubles per consecutive failure up to [`SNAPSHOT_BACKOFF_MAX`].
@@ -746,11 +752,11 @@ impl FleetReadService {
 
     /// Single-flight snapshot refresh for one scope.
     ///
-    /// At most one build runs per scope. The first caller that needs a
-    /// rebuild spawns a detached task that always fills the cache when it
-    /// finishes, even after every waiter has timed out; every other caller
-    /// joins that build and waits at most `refresh_timeout`. No caller can
-    /// drop, abort, or start a second build while one is in flight.
+    /// At most one build runs per scope. Fresh reads return the cache;
+    /// ordinary reads in the stale grace window return it immediately and
+    /// start or join a detached rebuild. Older or cold reads wait at most
+    /// `refresh_timeout`. A detached build always fills the cache when it
+    /// finishes, even after every waiter has timed out.
     async fn refresh_scope(
         &self,
         scope: SnapshotScope,
@@ -772,15 +778,52 @@ impl FleetReadService {
                     self.scope_state(scope).lock().map_err(|_| {
                         FleetReadError::Backend("snapshot_cache".to_string())
                     })?;
-                if let Some(cached) = state.cache.clone() {
-                    let fresh = cached.build_instant.elapsed().as_secs_f64()
-                        < FLEET_SNAPSHOT_STALE_SECONDS;
+                let cached = state.cache.clone();
+                if let Some(cached) = cached.as_ref() {
+                    let age = cached.build_instant.elapsed().as_secs_f64();
+                    let fresh = age < FLEET_SNAPSHOT_STALE_SECONDS;
                     if fresh && (!force || cached.build_instant >= force_since)
                     {
-                        return Ok(cached);
+                        return Ok(cached.clone());
                     }
                 }
-                if let Some(in_flight) = state.in_flight.as_ref() {
+                let stale_cache_is_in_grace = !force
+                    && cached.as_ref().is_some_and(|snapshot| {
+                        let age =
+                            snapshot.build_instant.elapsed().as_secs_f64();
+                        (FLEET_SNAPSHOT_STALE_SECONDS
+                            ..SNAPSHOT_STALE_SERVE_GRACE_SECONDS)
+                            .contains(&age)
+                    });
+                if stale_cache_is_in_grace {
+                    let snapshot =
+                        cached.expect("grace cache was checked above");
+                    if state.in_flight.is_some() {
+                        RefreshDecision::ServeStale {
+                            snapshot: Box::new(snapshot),
+                            reason: "revalidating".to_string(),
+                            start: None,
+                        }
+                    } else if state.backoff_remaining().is_some() {
+                        RefreshDecision::ServeStale {
+                            snapshot: Box::new(snapshot),
+                            reason: state
+                                .last_error
+                                .as_ref()
+                                .map(FleetReadError::safe_code)
+                                .unwrap_or_else(|| "backend".to_string()),
+                            start: None,
+                        }
+                    } else {
+                        let start =
+                            self.prepare_scoped_build(scope, &mut state);
+                        RefreshDecision::ServeStale {
+                            snapshot: Box::new(snapshot),
+                            reason: "revalidating".to_string(),
+                            start: Some(start),
+                        }
+                    }
+                } else if let Some(in_flight) = state.in_flight.as_ref() {
                     RefreshDecision::Join {
                         receiver: in_flight.receiver.clone(),
                         timed_out: Arc::clone(&in_flight.timed_out),
@@ -801,48 +844,9 @@ impl FleetReadService {
                         window_secs: remaining.as_secs(),
                     }
                 } else {
-                    let (sender, receiver) =
-                        watch::channel::<Option<RefreshOutcome>>(None);
-                    state.generation = state.generation.saturating_add(1);
-                    let generation = state.generation;
-                    state.builds_started =
-                        state.builds_started.saturating_add(1);
-                    let started = Instant::now();
-                    let build = BuildSnapshotRequest {
-                        sase_home: self.inner.sase_home.clone(),
-                        index_path: self.inner.index_path.clone(),
-                        projects_root: self.inner.projects_root.clone(),
-                        cursor: self.inner.events.current_cursor(),
-                        prior_refresh_count: state
-                            .cache
-                            .as_ref()
-                            .map(|snapshot| snapshot.refresh_count)
-                            .unwrap_or(0),
-                        scope: match scope {
-                            SnapshotScope::Presentation => {
-                                FleetCatalogScopeWire::Presentation
-                            }
-                            SnapshotScope::History => {
-                                FleetCatalogScopeWire::History
-                            }
-                        },
-                        liveness: Arc::clone(&self.inner.liveness),
-                        owner_files: Arc::clone(&self.inner.owner_files),
-                    };
-                    let timed_out = Arc::new(AtomicU64::new(0));
-                    state.in_flight = Some(InFlightJoin {
-                        generation,
-                        receiver: receiver.clone(),
-                        timed_out: Arc::clone(&timed_out),
-                    });
-                    RefreshDecision::Start {
-                        sender,
-                        receiver,
-                        generation,
-                        started,
-                        build,
-                        timed_out,
-                    }
+                    RefreshDecision::Start(
+                        self.prepare_scoped_build(scope, &mut state),
+                    )
                 }
             };
             match decision {
@@ -884,14 +888,32 @@ impl FleetReadService {
                         return Ok(snapshot);
                     }
                 }
-                RefreshDecision::Start {
-                    sender,
-                    receiver,
-                    generation,
-                    started,
-                    build,
-                    timed_out,
+                RefreshDecision::ServeStale {
+                    snapshot,
+                    reason,
+                    start,
                 } => {
+                    if let Some(start) = start {
+                        self.spawn_scoped_build(
+                            scope,
+                            start.sender,
+                            start.generation,
+                            start.started,
+                            start.build,
+                            start.timed_out,
+                        );
+                    }
+                    return Ok(mark_stale(*snapshot, reason));
+                }
+                RefreshDecision::Start(start) => {
+                    let RefreshStart {
+                        sender,
+                        receiver,
+                        generation,
+                        started,
+                        build,
+                        timed_out,
+                    } = start;
                     self.spawn_scoped_build(
                         scope,
                         sender,
@@ -915,6 +937,52 @@ impl FleetReadService {
                     }
                 }
             }
+        }
+    }
+
+    /// Reserve the one build for a scope while its state lock is held.
+    fn prepare_scoped_build(
+        &self,
+        scope: SnapshotScope,
+        state: &mut ScopeState,
+    ) -> RefreshStart {
+        let (sender, receiver) = watch::channel::<Option<RefreshOutcome>>(None);
+        state.generation = state.generation.saturating_add(1);
+        let generation = state.generation;
+        state.builds_started = state.builds_started.saturating_add(1);
+        let started = Instant::now();
+        let build = BuildSnapshotRequest {
+            sase_home: self.inner.sase_home.clone(),
+            index_path: self.inner.index_path.clone(),
+            projects_root: self.inner.projects_root.clone(),
+            cursor: self.inner.events.current_cursor(),
+            prior_refresh_count: state
+                .cache
+                .as_ref()
+                .map(|snapshot| snapshot.refresh_count)
+                .unwrap_or(0),
+            scope: match scope {
+                SnapshotScope::Presentation => {
+                    FleetCatalogScopeWire::Presentation
+                }
+                SnapshotScope::History => FleetCatalogScopeWire::History,
+            },
+            liveness: Arc::clone(&self.inner.liveness),
+            owner_files: Arc::clone(&self.inner.owner_files),
+        };
+        let timed_out = Arc::new(AtomicU64::new(0));
+        state.in_flight = Some(InFlightJoin {
+            generation,
+            receiver: receiver.clone(),
+            timed_out: Arc::clone(&timed_out),
+        });
+        RefreshStart {
+            sender,
+            receiver,
+            generation,
+            started,
+            build,
+            timed_out,
         }
     }
 
@@ -1155,10 +1223,9 @@ impl FleetReadService {
             .map(|state| state.cache.clone())
     }
 
-    /// The cached snapshot, unless it has reached the stale threshold: an
-    /// aged-out entry is treated as a cache miss so the caller falls through
-    /// to a genuine rebuild attempt instead of serving a frozen snapshot
-    /// forever.
+    /// Return only a fresh cached snapshot. Older entries fall through to
+    /// `refresh_scope`, which decides whether the stale grace window allows
+    /// an immediate response or requires the bounded refresh wait.
     fn unexpired_scoped_snapshot(
         &self,
         scope: SnapshotScope,
@@ -1287,13 +1354,11 @@ enum RefreshDecision {
         receiver: watch::Receiver<Option<RefreshOutcome>>,
         timed_out: Arc<AtomicU64>,
     },
-    Start {
-        sender: watch::Sender<Option<RefreshOutcome>>,
-        receiver: watch::Receiver<Option<RefreshOutcome>>,
-        generation: u64,
-        started: Instant,
-        build: BuildSnapshotRequest,
-        timed_out: Arc<AtomicU64>,
+    Start(RefreshStart),
+    ServeStale {
+        snapshot: Box<CachedFleetSnapshot>,
+        reason: String,
+        start: Option<RefreshStart>,
     },
     Backoff {
         code: String,
@@ -1301,6 +1366,15 @@ enum RefreshDecision {
         consecutive_failures: u32,
         window_secs: u64,
     },
+}
+
+struct RefreshStart {
+    sender: watch::Sender<Option<RefreshOutcome>>,
+    receiver: watch::Receiver<Option<RefreshOutcome>>,
+    generation: u64,
+    started: Instant,
+    build: BuildSnapshotRequest,
+    timed_out: Arc<AtomicU64>,
 }
 
 fn scope_state_for(
@@ -1329,18 +1403,40 @@ async fn run_scoped_build(
     build: BuildSnapshotRequest,
     started: Instant,
 ) -> (RefreshOutcome, Option<PostBuildCheckpoint>) {
-    let permit = inner.index_permits.clone().acquire_owned().await;
-    let Ok(permit) = permit else {
-        return (
-            RefreshOutcome {
-                started,
-                snapshot: None,
-                error: Some(FleetReadError::Backend(
-                    "index_permits".to_string(),
-                )),
-            },
-            None,
-        );
+    let permit_wait = inner
+        .refresh_timeout
+        .min(SNAPSHOT_INDEX_PERMIT_WAIT_TIMEOUT);
+    let permit = tokio::time::timeout(
+        permit_wait,
+        inner.index_permits.clone().acquire_owned(),
+    )
+    .await;
+    let permit = match permit {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) => {
+            return (
+                RefreshOutcome {
+                    started,
+                    snapshot: None,
+                    error: Some(FleetReadError::Backend(
+                        "index_permits".to_string(),
+                    )),
+                },
+                None,
+            );
+        }
+        Err(_) => {
+            return (
+                RefreshOutcome {
+                    started,
+                    snapshot: None,
+                    error: Some(FleetReadError::Timeout(
+                        "index_permit".to_string(),
+                    )),
+                },
+                None,
+            );
+        }
     };
     let index_path = build.index_path.clone();
     let is_presentation = matches!(scope, SnapshotScope::Presentation);
