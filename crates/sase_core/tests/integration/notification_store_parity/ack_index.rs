@@ -113,6 +113,7 @@ fn notification_store_writes_bump_generation_and_noops_do_not() {
             reversible_dismiss_marker_key: None,
             resurface_on_change_key: None,
             refresh_files: false,
+            externalize_limit_bytes: None,
         },
     )
     .unwrap();

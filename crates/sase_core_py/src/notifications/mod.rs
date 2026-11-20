@@ -4,6 +4,7 @@ use crate::prelude::*;
 
 use crate::json_bridge::{
     json_record_from_pydict, json_value_to_py, py_to_json_value,
+    strings_from_py_list,
 };
 
 use pyo3::wrap_pyfunction;
@@ -53,6 +54,45 @@ fn py_read_current_notifications_snapshot<'py>(
         .map_err(|e| {
             PyValueError::new_err(format!("internal serialize error: {e}"))
         })?;
+    json_value_to_py(py, &value)
+}
+
+/// Resolve notification payload values; ordinary values pass through and
+/// references to missing sidecars return `None` at the corresponding index.
+#[pyfunction]
+#[pyo3(name = "resolve_notification_payloads")]
+fn py_resolve_notification_payloads<'py>(
+    py: Python<'py>,
+    path: &str,
+    values: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let values = strings_from_py_list(values, "values")?;
+    let path = PathBuf::from(path);
+    let result =
+        py.allow_threads(|| core_resolve_notification_payloads(&path, &values));
+    let value = serde_json::to_value(result.map_err(PyValueError::new_err)?)
+        .map_err(|error| {
+            PyValueError::new_err(format!("internal serialize error: {error}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
+/// Run notification compaction, optional payload externalization, and sidecar GC.
+#[pyfunction]
+#[pyo3(name = "compact_notification_store")]
+fn py_compact_notification_store<'py>(
+    py: Python<'py>,
+    path: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = compaction_request_from_pydict(request)?;
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_compact_notification_store(&path, &request));
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
     json_value_to_py(py, &value)
 }
 
@@ -134,6 +174,46 @@ fn py_append_notification_counts<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Append one notification with optional content-addressed sidecars.
+#[pyfunction]
+#[pyo3(name = "append_notification_with_options")]
+fn py_append_notification_with_options<'py>(
+    py: Python<'py>,
+    path: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = append_request_from_pydict(request)?;
+    let path = PathBuf::from(path);
+    let outcome = py.allow_threads(|| {
+        core_append_notification_with_options(&path, &request)
+    });
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Append one notification with optional sidecars and return mutation counts only.
+#[pyfunction]
+#[pyo3(name = "append_notification_counts_with_options")]
+fn py_append_notification_counts_with_options<'py>(
+    py: Python<'py>,
+    path: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = append_request_from_pydict(request)?;
+    let path = PathBuf::from(path);
+    let outcome = py.allow_threads(|| {
+        core_append_notification_counts_with_options(&path, &request)
+    });
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Append one plus-one entry by id or `(sender, dedup_key)`.
 #[pyfunction]
 #[pyo3(name = "append_notification_plus_one")]
@@ -168,6 +248,25 @@ fn py_upsert_notification<'py>(
     let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
         .map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Create or +1 a notification with explicit sidecar options enabled.
+#[pyfunction]
+#[pyo3(name = "upsert_notification_with_options")]
+fn py_upsert_notification_with_options<'py>(
+    py: Python<'py>,
+    path: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = upsert_request_from_pydict(request)?;
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_upsert_notification(&path, &request));
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
     })?;
     json_value_to_py(py, &value)
 }
@@ -230,6 +329,25 @@ fn py_reconcile_notification_rows<'py>(
     let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
         .map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Reconcile notification rows with explicit sidecar options enabled.
+#[pyfunction]
+#[pyo3(name = "reconcile_notification_rows_with_options")]
+fn py_reconcile_notification_rows_with_options<'py>(
+    py: Python<'py>,
+    path: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = reconcile_request_from_pydict(request)?;
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_reconcile_notification_rows(&path, &request));
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
     })?;
     json_value_to_py(py, &value)
 }
@@ -454,6 +572,28 @@ fn notification_from_pydict(
     })
 }
 
+fn append_request_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<NotificationAppendRequestWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid NotificationAppendRequestWire dict: {error}"
+        ))
+    })
+}
+
+fn compaction_request_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<NotificationCompactionRequestWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid NotificationCompactionRequestWire dict: {error}"
+        ))
+    })
+}
+
 fn notifications_from_py_list(
     list: &Bound<'_, PyList>,
 ) -> PyResult<Vec<NotificationWire>> {
@@ -585,6 +725,8 @@ pub(crate) fn register_notifications(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_read_current_notifications_snapshot,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_notification_payloads, m)?)?;
+    m.add_function(wrap_pyfunction!(py_compact_notification_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_apply_notification_state_update, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_apply_notification_state_update_counts,
@@ -592,11 +734,21 @@ pub(crate) fn register_notifications(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_append_notification, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_notification_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_append_notification_with_options, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_append_notification_counts_with_options,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_append_notification_plus_one, m)?)?;
     m.add_function(wrap_pyfunction!(py_upsert_notification, m)?)?;
+    m.add_function(wrap_pyfunction!(py_upsert_notification_with_options, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications_counts, m)?)?;
     m.add_function(wrap_pyfunction!(py_reconcile_notification_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_reconcile_notification_rows_with_options,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_ack_agent_completions, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_unread_completion_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_notification_tabs, m)?)?;

@@ -147,6 +147,10 @@ pub struct NotificationUpsertRequestWire {
     /// zero disables coalescing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coalesce_window_seconds: Option<u64>,
+    /// When set, action data values and notes over this byte limit are stored
+    /// as notification sidecars on the create branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub externalize_limit_bytes: Option<u64>,
 }
 
 #[derive(
@@ -257,6 +261,34 @@ pub struct NotificationUpdateOutcomeWire {
     pub stats: NotificationStoreStatsWire,
 }
 
+/// Append one row with optional content-addressed payload storage.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationAppendRequestWire {
+    pub notification: NotificationWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub externalize_limit_bytes: Option<u64>,
+}
+
+/// Request for an explicit notification compaction pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationCompactionRequestWire {
+    /// When set, existing live values over this byte limit are externalized.
+    /// Omitted by default so compaction preserves inline payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub externalize_limit_bytes: Option<u64>,
+}
+
+/// Counts reported by one explicit notification compaction pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationCompactionOutcomeWire {
+    pub schema_version: u32,
+    pub archived_count: u64,
+    pub externalized_count: u64,
+    pub broken_files_dropped: u64,
+    pub sidecars_deleted: u64,
+    pub rewritten: bool,
+}
+
 pub fn notification_activity_at(notification: &NotificationWire) -> &str {
     notification
         .resurfaced_at
@@ -349,6 +381,10 @@ pub struct NotificationReconcileRequestWire {
     /// Does not touch timestamps or delivery cursors.
     #[serde(default)]
     pub refresh_files: bool,
+    /// When set, action data values and notes over this byte limit are stored
+    /// as notification sidecars before the rows are reconciled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub externalize_limit_bytes: Option<u64>,
 }
 
 /// Outcome counts for one [`super::store::reconcile_notification_rows`] call.

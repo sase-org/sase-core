@@ -11,9 +11,12 @@ use fs2::FileExt;
 use super::generation::{
     bump_generation, generation_for_missing_store, read_generation,
 };
+use super::payloads::{self, BLOB_GC_GRACE};
 use super::tabs::{tab_key_for, tabs_and_counts_for};
 use super::wire::{
-    notification_activity_at, NotificationAgentKeyWire, NotificationCountsWire,
+    notification_activity_at, NotificationAgentKeyWire,
+    NotificationAppendRequestWire, NotificationCompactionOutcomeWire,
+    NotificationCompactionRequestWire, NotificationCountsWire,
     NotificationPlusOneActionWire, NotificationPlusOneOutcomeWire,
     NotificationPlusOneRequestWire, NotificationPlusOneWire,
     NotificationReconcileOutcomeWire, NotificationReconcileRequestWire,
@@ -51,6 +54,53 @@ pub fn read_current_notifications_snapshot(
         include_dismissed,
         DateTime::<Utc>::from(SystemTime::now()),
     )
+}
+
+/// Resolve payload values, returning `None` when a referenced sidecar is missing.
+pub fn resolve_notification_payloads(
+    path: &Path,
+    values: &[String],
+) -> Result<Vec<Option<String>>, String> {
+    payloads::resolve_payloads(path, values)
+}
+
+/// Run an explicit compaction pass, optional payload externalization, and sidecar GC.
+pub fn compact_notification_store(
+    path: &Path,
+    request: &NotificationCompactionRequestWire,
+) -> Result<NotificationCompactionOutcomeWire, String> {
+    let lock = open_lock_file(path)?;
+    lock.lock_exclusive().map_err(|error| error.to_string())?;
+    let result = (|| {
+        let (rows, _) = read_rows_unlocked(path, true)?;
+        let compaction = maybe_compact_notifications_unlocked(
+            path,
+            rows,
+            DateTime::<Utc>::from(SystemTime::now()),
+            request.externalize_limit_bytes,
+            true,
+        )?;
+        let rewritten = compaction.rewritten();
+        if rewritten {
+            write_notifications_atomic(path, &compaction.rows)?;
+        }
+        let sidecars_deleted = payloads::delete_unreferenced(
+            path,
+            &compaction.rows,
+            SystemTime::now(),
+            BLOB_GC_GRACE,
+        )?;
+        Ok(NotificationCompactionOutcomeWire {
+            schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+            archived_count: compaction.archived_count,
+            externalized_count: compaction.externalized_count,
+            broken_files_dropped: compaction.broken_files_dropped,
+            sidecars_deleted,
+            rewritten,
+        })
+    })();
+    unlock(lock)?;
+    result
 }
 
 pub fn read_notifications_snapshot_with_options(
@@ -163,12 +213,18 @@ fn read_notifications_snapshot_rewriting_if_needed(
     } else {
         Vec::new()
     };
-    let compaction = maybe_compact_notifications_unlocked(path, rows, now)?;
-    if !expired_ids.is_empty()
-        || compaction.archived_count > 0
-        || compaction.normalized_count > 0
-    {
+    let compaction =
+        maybe_compact_notifications_unlocked(path, rows, now, None, false)?;
+    if !expired_ids.is_empty() || compaction.rewritten() {
         write_notifications_atomic(path, &compaction.rows)?;
+        if compaction.should_gc {
+            let _ = payloads::delete_unreferenced(
+                path,
+                &compaction.rows,
+                SystemTime::now(),
+                BLOB_GC_GRACE,
+            )?;
+        }
     }
     let (notifications, stats) = read_rows_unlocked(path, include_dismissed)?;
     // Sampled under the same exclusive lock after any write above, so
@@ -192,9 +248,19 @@ pub(crate) fn compact_notifications_for_index_unlocked(
         path,
         rows,
         DateTime::<Utc>::from(SystemTime::now()),
+        None,
+        false,
     )?;
-    if compaction.archived_count > 0 || compaction.normalized_count > 0 {
+    if compaction.rewritten() {
         write_notifications_atomic(path, &compaction.rows)?;
+        if compaction.should_gc {
+            let _ = payloads::delete_unreferenced(
+                path,
+                &compaction.rows,
+                SystemTime::now(),
+                BLOB_GC_GRACE,
+            )?;
+        }
         let (rows, _) = read_rows_unlocked(path, true)?;
         return Ok(rows);
     }
@@ -205,25 +271,58 @@ pub fn append_notification(
     path: &Path,
     notification: &NotificationWire,
 ) -> Result<NotificationUpdateOutcomeWire, String> {
-    append_notification_with_options(path, notification, true)
+    append_notification_with_externalize_limit(path, notification, None, true)
+}
+
+/// Append one notification, optionally storing oversized values in sidecars.
+pub fn append_notification_with_options(
+    path: &Path,
+    request: &NotificationAppendRequestWire,
+) -> Result<NotificationUpdateOutcomeWire, String> {
+    append_notification_with_externalize_limit(
+        path,
+        &request.notification,
+        request.externalize_limit_bytes,
+        true,
+    )
 }
 
 pub fn append_notification_counts(
     path: &Path,
     notification: &NotificationWire,
 ) -> Result<NotificationUpdateOutcomeWire, String> {
-    append_notification_with_options(path, notification, false)
+    append_notification_with_externalize_limit(path, notification, None, false)
 }
 
-fn append_notification_with_options(
+/// Append one notification with optional sidecars, returning mutation counts only.
+pub fn append_notification_counts_with_options(
+    path: &Path,
+    request: &NotificationAppendRequestWire,
+) -> Result<NotificationUpdateOutcomeWire, String> {
+    append_notification_with_externalize_limit(
+        path,
+        &request.notification,
+        request.externalize_limit_bytes,
+        false,
+    )
+}
+
+fn append_notification_with_externalize_limit(
     path: &Path,
     notification: &NotificationWire,
+    externalize_limit_bytes: Option<u64>,
     include_notifications: bool,
 ) -> Result<NotificationUpdateOutcomeWire, String> {
     let lock = open_lock_file(path)?;
     lock.lock_exclusive().map_err(|e| e.to_string())?;
 
-    let append_result = append_notification_unlocked(path, notification);
+    let append_result = (|| {
+        let mut stored = notification.clone();
+        if let Some(limit) = externalize_limit_bytes {
+            payloads::externalize_notification(path, &mut stored, limit)?;
+        }
+        append_notification_unlocked(path, &stored)
+    })();
 
     let result = match append_result {
         Ok(()) => {
@@ -688,7 +787,11 @@ pub fn upsert_notification(
         .as_deref()
         .filter(|key| !key.is_empty());
     let Some(dedup_key) = dedup_key else {
-        return append_as_created(path, notification);
+        return append_as_created(
+            path,
+            notification,
+            request.externalize_limit_bytes,
+        );
     };
 
     let plus_one_note = request
@@ -755,9 +858,13 @@ pub fn upsert_notification(
             }
         }
 
-        rows.push(notification.clone());
+        let mut stored = notification.clone();
+        if let Some(limit) = request.externalize_limit_bytes {
+            payloads::externalize_notification(path, &mut stored, limit)?;
+        }
+        rows.push(stored.clone());
         merge_and_rewrite_notifications_unlocked(path, &rows)?;
-        Ok(created_upsert_outcome(notification.clone(), superseded_ids))
+        Ok(created_upsert_outcome(stored, superseded_ids))
     })();
 
     unlock(lock)?;
@@ -967,8 +1074,20 @@ fn supersede_note(notification: &NotificationWire) -> String {
 fn append_as_created(
     path: &Path,
     notification: &NotificationWire,
+    externalize_limit_bytes: Option<u64>,
 ) -> Result<NotificationUpsertOutcomeWire, String> {
-    let outcome = append_notification(path, notification)?;
+    let outcome = if let Some(externalize_limit_bytes) = externalize_limit_bytes
+    {
+        append_notification_with_options(
+            path,
+            &NotificationAppendRequestWire {
+                notification: notification.clone(),
+                externalize_limit_bytes: Some(externalize_limit_bytes),
+            },
+        )?
+    } else {
+        append_notification(path, notification)?
+    };
     let stored = outcome
         .notifications
         .into_iter()
@@ -1123,6 +1242,18 @@ struct NotificationCompaction {
     rows: Vec<NotificationWire>,
     archived_count: u64,
     normalized_count: u64,
+    externalized_count: u64,
+    broken_files_dropped: u64,
+    should_gc: bool,
+}
+
+impl NotificationCompaction {
+    fn rewritten(&self) -> bool {
+        self.archived_count > 0
+            || self.normalized_count > 0
+            || self.externalized_count > 0
+            || self.broken_files_dropped > 0
+    }
 }
 
 fn should_recheck_for_notification_compaction(
@@ -1163,18 +1294,49 @@ fn maybe_compact_notifications_unlocked(
     path: &Path,
     rows: Vec<NotificationWire>,
     now: DateTime<Utc>,
+    externalize_limit_bytes: Option<u64>,
+    force: bool,
 ) -> Result<NotificationCompaction, String> {
     let mut rows = rows;
     let normalized_count = trim_plus_one_caps(&mut rows);
-    if notification_file_size(path)
-        < NOTIFICATION_COMPACTION_FILE_SIZE_THRESHOLD_BYTES
-        && notification_compaction_candidate_count(&rows)
-            < NOTIFICATION_COMPACTION_DISMISSED_ROW_THRESHOLD
+    let mut externalized_count = 0;
+    if let Some(limit) = externalize_limit_bytes {
+        for row in &mut rows {
+            externalized_count +=
+                payloads::externalize_notification(path, row, limit)?;
+        }
+    }
+    let archive_due = notification_file_size(path)
+        >= NOTIFICATION_COMPACTION_FILE_SIZE_THRESHOLD_BYTES
+        || notification_compaction_candidate_count(&rows)
+            >= NOTIFICATION_COMPACTION_DISMISSED_ROW_THRESHOLD;
+    if !force
+        && !archive_due
+        && normalized_count == 0
+        && externalized_count == 0
     {
         return Ok(NotificationCompaction {
             rows,
             archived_count: 0,
             normalized_count,
+            externalized_count,
+            broken_files_dropped: 0,
+            should_gc: false,
+        });
+    }
+
+    let broken_files_dropped = payloads::prune_broken_files(&mut rows);
+    if !archive_due {
+        return Ok(NotificationCompaction {
+            rows,
+            archived_count: 0,
+            normalized_count,
+            externalized_count,
+            broken_files_dropped,
+            should_gc: force
+                || normalized_count > 0
+                || externalized_count > 0
+                || broken_files_dropped > 0,
         });
     }
 
@@ -1195,6 +1357,12 @@ fn maybe_compact_notifications_unlocked(
             rows: kept,
             archived_count: 0,
             normalized_count,
+            externalized_count,
+            broken_files_dropped,
+            should_gc: force
+                || normalized_count > 0
+                || externalized_count > 0
+                || broken_files_dropped > 0,
         });
     }
 
@@ -1203,6 +1371,9 @@ fn maybe_compact_notifications_unlocked(
         rows: kept,
         archived_count: archived.len() as u64,
         normalized_count,
+        externalized_count,
+        broken_files_dropped,
+        should_gc: true,
     })
 }
 
@@ -1284,6 +1455,11 @@ fn reconcile_notification_rows_unlocked(
         if input.id.is_empty() {
             continue;
         }
+        let mut stored_input = input.clone();
+        if let Some(limit) = request.externalize_limit_bytes {
+            payloads::externalize_notification(path, &mut stored_input, limit)?;
+        }
+        let input = &stored_input;
         let Some(index) = rows.iter().position(|row| row.id == input.id) else {
             rows.push(input.clone());
             outcome.created += 1;
@@ -1378,8 +1554,19 @@ pub(crate) fn merge_and_rewrite_notifications_unlocked(
         path,
         merged,
         DateTime::<Utc>::from(SystemTime::now()),
+        None,
+        false,
     )?;
-    write_notifications_atomic(path, &compaction.rows)
+    write_notifications_atomic(path, &compaction.rows)?;
+    if compaction.should_gc {
+        let _ = payloads::delete_unreferenced(
+            path,
+            &compaction.rows,
+            SystemTime::now(),
+            BLOB_GC_GRACE,
+        )?;
+    }
+    Ok(())
 }
 
 fn append_notifications_to_archive(

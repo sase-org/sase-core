@@ -12,6 +12,7 @@ mod mute_snooze_expiry;
 mod plus_one_upsert;
 mod reconcile_resurface;
 mod reconcile_upsert;
+mod sidecars;
 mod state_updates;
 mod store_io;
 mod support;

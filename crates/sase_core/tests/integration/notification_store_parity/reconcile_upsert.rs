@@ -26,6 +26,7 @@ fn reconcile_request(
         reversible_dismiss_marker_key: Some(MARKER_KEY.to_string()),
         resurface_on_change_key: None,
         refresh_files: false,
+        externalize_limit_bytes: None,
     }
 }
 
@@ -244,6 +245,7 @@ fn reconcile_refresh_files_replaces_files_without_moving_cursors() {
         reversible_dismiss_marker_key: None,
         resurface_on_change_key: None,
         refresh_files: true,
+        externalize_limit_bytes: None,
     };
     let outcome = reconcile_notification_rows(&path, &request).unwrap();
     assert_eq!(outcome.updated, 1);
@@ -352,6 +354,7 @@ fn reconcile_without_a_marker_key_never_changes_dismissals() {
         reversible_dismiss_marker_key: None,
         resurface_on_change_key: None,
         refresh_files: false,
+        externalize_limit_bytes: None,
     };
     let outcome = reconcile_notification_rows(&path, &request).unwrap();
     assert_eq!(outcome.resurfaced, 0);

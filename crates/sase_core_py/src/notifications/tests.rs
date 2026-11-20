@@ -81,6 +81,124 @@ fn notification_store_binding_round_trips_json_shape() {
 }
 
 #[test]
+fn notification_payload_bindings_externalize_resolve_missing_and_compact() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (_temp, path) = temp_notification_path("notifications.jsonl");
+        let large = "notification payload".repeat(20);
+        let request_obj = json_value_to_py(
+            py,
+            &json!({
+                "notification": {
+                    "id": "payload-binding",
+                    "timestamp": "2026-04-30T12:00:00+00:00",
+                    "sender": "axe",
+                    "notes": [large],
+                    "action_data": {"payload": large, "small": "ok"}
+                },
+                "externalize_limit_bytes": 3
+            }),
+        )
+        .unwrap();
+        let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+        let appended = py_append_notification_counts_with_options(
+            py,
+            path.to_str().unwrap(),
+            request,
+        )
+        .unwrap();
+        let appended_value = py_to_json_value(appended.bind(py)).unwrap();
+        assert_eq!(appended_value["appended_count"], json!(1));
+
+        let snapshot = py_read_notifications_snapshot(
+            py,
+            path.to_str().unwrap(),
+            true,
+            false,
+        )
+        .unwrap();
+        let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
+        let payload_ref = snapshot_value["notifications"][0]["action_data"]
+            ["payload"]
+            .as_str()
+            .unwrap();
+        assert!(payload_ref.starts_with("sase-notification-blob:v1:"));
+        assert_eq!(
+            snapshot_value["notifications"][0]["action_data"]["small"],
+            "ok"
+        );
+
+        let missing = format!("sase-notification-blob:v1:{}:9", "f".repeat(64));
+        let values_obj = json_value_to_py(
+            py,
+            &json!(["inline value", payload_ref, missing]),
+        )
+        .unwrap();
+        let values = values_obj.bind(py).downcast::<PyList>().unwrap();
+        let resolved = py_resolve_notification_payloads(
+            py,
+            path.to_str().unwrap(),
+            values,
+        )
+        .unwrap();
+        let resolved_value = py_to_json_value(resolved.bind(py)).unwrap();
+        assert_eq!(resolved_value[0], "inline value");
+        assert_eq!(resolved_value[1], large);
+        assert_eq!(resolved_value[2], serde_json::Value::Null);
+
+        let upsert_obj = json_value_to_py(
+            py,
+            &json!({
+                "notification": {
+                    "id": "upsert-payload",
+                    "timestamp": "2026-04-30T12:00:00+00:00",
+                    "sender": "axe",
+                    "action_data": {"payload": "large upsert value"}
+                },
+                "externalize_limit_bytes": 3
+            }),
+        )
+        .unwrap();
+        let upsert = upsert_obj.bind(py).downcast::<PyDict>().unwrap();
+        py_upsert_notification_with_options(py, path.to_str().unwrap(), upsert)
+            .unwrap();
+
+        let reconcile_obj = json_value_to_py(
+            py,
+            &json!({
+                "notifications": [{
+                    "id": "reconcile-payload",
+                    "timestamp": "2026-04-30T12:00:00+00:00",
+                    "sender": "axe",
+                    "notes": ["large reconcile note"]
+                }],
+                "externalize_limit_bytes": 3
+            }),
+        )
+        .unwrap();
+        let reconcile = reconcile_obj.bind(py).downcast::<PyDict>().unwrap();
+        py_reconcile_notification_rows_with_options(
+            py,
+            path.to_str().unwrap(),
+            reconcile,
+        )
+        .unwrap();
+
+        let compact_obj = json_value_to_py(py, &json!({})).unwrap();
+        let compact_request =
+            compact_obj.bind(py).downcast::<PyDict>().unwrap();
+        let compacted = py_compact_notification_store(
+            py,
+            path.to_str().unwrap(),
+            compact_request,
+        )
+        .unwrap();
+        let compacted_value = py_to_json_value(compacted.bind(py)).unwrap();
+        assert_eq!(compacted_value["schema_version"], 1);
+    });
+}
+
+#[test]
 fn notification_plus_one_binding_round_trips_noop_actions_and_opt_in() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

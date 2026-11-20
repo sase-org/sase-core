@@ -28,6 +28,7 @@ fn revision_request(
         reversible_dismiss_marker_key: Some(MARKER_KEY.to_string()),
         resurface_on_change_key: Some(REVISION_KEY.to_string()),
         refresh_files: false,
+        externalize_limit_bytes: None,
     }
 }
 

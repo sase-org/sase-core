@@ -2,6 +2,7 @@
 pub mod ack;
 pub(crate) mod generation;
 pub mod mobile;
+mod payloads;
 pub mod pending_actions;
 pub mod rules;
 pub mod store;
@@ -47,11 +48,13 @@ pub use rules::{
 };
 pub use store::{
     append_notification, append_notification_counts,
-    append_notification_plus_one, apply_notification_state_update,
-    apply_notification_state_update_counts,
+    append_notification_counts_with_options, append_notification_plus_one,
+    append_notification_with_options, apply_notification_state_update,
+    apply_notification_state_update_counts, compact_notification_store,
     read_current_notifications_snapshot, read_notifications_snapshot,
     read_notifications_snapshot_with_options, reconcile_notification_rows,
-    rewrite_notifications, rewrite_notifications_counts, upsert_notification,
+    resolve_notification_payloads, rewrite_notifications,
+    rewrite_notifications_counts, upsert_notification,
 };
 pub use tabs::{
     classify_notification_tabs, tab_key_for, tab_label, DONE_TAB_KEY,
@@ -61,16 +64,17 @@ pub use tabs::{
 pub use wire::{
     notification_activity_at, notification_activity_cursor,
     NotificationAckOutcomeWire, NotificationAckRequestWire,
-    NotificationAgentKeyWire, NotificationCountsWire,
-    NotificationPlusOneActionWire, NotificationPlusOneOutcomeWire,
-    NotificationPlusOneRequestWire, NotificationPlusOneWire,
-    NotificationReconcileOutcomeWire, NotificationReconcileRequestWire,
-    NotificationStateUpdateWire, NotificationStoreSnapshotWire,
-    NotificationStoreStatsWire, NotificationTabClassificationWire,
-    NotificationTabWire, NotificationUpdateOutcomeWire,
-    NotificationUpsertActionWire, NotificationUpsertOutcomeWire,
-    NotificationUpsertRequestWire, NotificationWire,
-    UnreadCompletionIndexRowWire, UnreadCompletionIndexWire,
+    NotificationAgentKeyWire, NotificationAppendRequestWire,
+    NotificationCompactionOutcomeWire, NotificationCompactionRequestWire,
+    NotificationCountsWire, NotificationPlusOneActionWire,
+    NotificationPlusOneOutcomeWire, NotificationPlusOneRequestWire,
+    NotificationPlusOneWire, NotificationReconcileOutcomeWire,
+    NotificationReconcileRequestWire, NotificationStateUpdateWire,
+    NotificationStoreSnapshotWire, NotificationStoreStatsWire,
+    NotificationTabClassificationWire, NotificationTabWire,
+    NotificationUpdateOutcomeWire, NotificationUpsertActionWire,
+    NotificationUpsertOutcomeWire, NotificationUpsertRequestWire,
+    NotificationWire, UnreadCompletionIndexRowWire, UnreadCompletionIndexWire,
     NOTIFICATION_PLUS_ONE_MAX_ENTRIES, NOTIFICATION_PLUS_ONE_NOTE_MAX_CHARS,
     NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
     NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES,
