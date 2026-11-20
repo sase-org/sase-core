@@ -412,8 +412,76 @@ fn validate_sections(
         validate_section_lifecycle(section, manifest)?;
         validate_section_provider_specific(section, manifest)?;
         validate_section_required(section)?;
+        validate_section_compaction(section, manifest)?;
     }
     validate_offsets(manifest)?;
+    validate_bundle_compaction(manifest)?;
+    Ok(())
+}
+
+fn validate_section_compaction(
+    section: &super::wire::SectionWire,
+    manifest: &InstructionManifestWire,
+) -> Result<(), InstructionManifestError> {
+    let Some(compaction) = section.compaction.as_ref() else {
+        return Ok(());
+    };
+    if section.status != SectionStatusWire::Included {
+        return Err(invalid(format!(
+            "excluded section {:?} must not carry compaction",
+            section.id
+        )));
+    }
+    let Some(bundle_compaction) = manifest.bundle.compaction.as_ref() else {
+        return Err(invalid(format!(
+            "section {:?} carries compaction but bundle.compaction is absent",
+            section.id
+        )));
+    };
+    if compaction.step > bundle_compaction.step {
+        return Err(invalid(format!(
+            "section {:?} compaction step is past bundle.compaction.step",
+            section.id
+        )));
+    }
+    let length = section.length.unwrap_or(0);
+    if compaction.uncompacted_length <= length {
+        return Err(invalid(format!(
+            "section {:?} compaction.uncompacted_length {} must exceed length {length}",
+            section.id, compaction.uncompacted_length
+        )));
+    }
+    Ok(())
+}
+
+fn validate_bundle_compaction(
+    manifest: &InstructionManifestWire,
+) -> Result<(), InstructionManifestError> {
+    let Some(compaction) = manifest.bundle.compaction.as_ref() else {
+        return Ok(());
+    };
+    if compaction.uncompacted_bytes <= manifest.bundle.bytes {
+        return Err(invalid(format!(
+            "bundle.compaction.uncompacted_bytes {} must exceed bundle.bytes {}",
+            compaction.uncompacted_bytes, manifest.bundle.bytes
+        )));
+    }
+    if compaction.max_bytes == 0 {
+        return Err(invalid(
+            "bundle.compaction.max_bytes must be positive".to_string(),
+        ));
+    }
+    let compacted = manifest
+        .sections
+        .iter()
+        .filter(|section| section.compaction.is_some())
+        .count();
+    if compacted == 0 {
+        return Err(invalid(
+            "bundle.compaction requires at least one compacted section"
+                .to_string(),
+        ));
+    }
     Ok(())
 }
 

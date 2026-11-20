@@ -144,6 +144,20 @@ pub enum CacheWire {
     Bypass,
 }
 
+/// Compile-time compaction ladder step that fit a provider byte cap.
+///
+/// Steps are ordered: `superseded_summaries` drops the summaries of
+/// superseded entries in `roster: list` memory webs, and `list_rosters`
+/// renders whole list rosters one line per entry.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionStepWire {
+    SupersededSummaries,
+    ListRosters,
+}
+
 /// Observation status vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -186,6 +200,31 @@ pub struct BundleWire {
     pub lines: u64,
     pub tokens_est: u64,
     pub store_path: String,
+    /// Present only when compile compacted the bundle to fit a provider cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<BundleCompactionWire>,
+}
+
+/// Bundle-level record of the compaction ladder compile applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleCompactionWire {
+    /// Last ladder step that changed the bundle.
+    pub step: CompactionStepWire,
+    /// Provider root-slot cap on the delivered text, in bytes.
+    pub max_bytes: u64,
+    /// Bundle bytes before any compaction step ran.
+    pub uncompacted_bytes: u64,
+}
+
+/// Section-level record of the compaction step applied to one section.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SectionCompactionWire {
+    /// Highest ladder step applied to this section.
+    pub step: CompactionStepWire,
+    /// Section bytes before compaction.
+    pub uncompacted_length: u64,
 }
 
 /// Per-layer budget entry.
@@ -239,6 +278,9 @@ pub struct SectionWire {
     pub reason: Option<SectionReasonWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadowed_by: Option<String>,
+    /// Present only on an included section that compile compacted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<SectionCompactionWire>,
 }
 
 /// Reason and optional detail for retaining native instruction discovery.

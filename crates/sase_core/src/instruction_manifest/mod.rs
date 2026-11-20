@@ -13,10 +13,11 @@ pub use normalize::{
     InstructionManifestError,
 };
 pub use wire::{
-    instruction_manifest_wire_schema_version, BudgetWire, BundleWire,
-    CompilerWire, DeliveryFallbackWire, DeliverySubagentWire, DeliveryWire,
-    FactsWire, FallbackReasonWire, InstructionManifestWire, LayerBudgetWire,
-    ObservationWire, SectionWire, SourceWire,
+    instruction_manifest_wire_schema_version, BudgetWire, BundleCompactionWire,
+    BundleWire, CompactionStepWire, CompilerWire, DeliveryFallbackWire,
+    DeliverySubagentWire, DeliveryWire, FactsWire, FallbackReasonWire,
+    InstructionManifestWire, LayerBudgetWire, ObservationWire,
+    SectionCompactionWire, SectionWire, SourceWire,
     INSTRUCTION_MANIFEST_WIRE_SCHEMA_VERSION,
 };
 

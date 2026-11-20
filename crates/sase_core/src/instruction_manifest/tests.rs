@@ -380,3 +380,91 @@ fn unsupported_schema_is_reported() {
     let error = normalize_instruction_manifest(&value).unwrap_err();
     assert_eq!(error, InstructionManifestError::UnsupportedSchema(99));
 }
+
+fn compacted_v2_fixture() -> JsonValue {
+    let mut fixture = root_v2_fixture();
+    fixture["bundle"]["compaction"] = json!({
+        "step": "list_rosters",
+        "max_bytes": 32768,
+        "uncompacted_bytes": 120,
+    });
+    fixture["sections"][1]["compaction"] = json!({
+        "step": "superseded_summaries",
+        "uncompacted_length": 50,
+    });
+    fixture["sections"][2]["compaction"] = json!({
+        "step": "list_rosters",
+        "uncompacted_length": 38,
+    });
+    fixture
+}
+
+#[test]
+fn compaction_records_normalize_unchanged() {
+    let fixture = compacted_v2_fixture();
+    let normalized = normalize_instruction_manifest(&fixture)
+        .expect("compacted manifest must normalize");
+    assert_eq!(normalized, fixture);
+}
+
+#[test]
+fn compaction_records_do_not_change_common_digest() {
+    let plain = root_v2_fixture();
+    let compacted = compacted_v2_fixture();
+    assert_eq!(
+        plain["bundle"]["common_digest"],
+        compacted["bundle"]["common_digest"]
+    );
+    normalize_instruction_manifest(&compacted)
+        .expect("supplied common_digest still matches");
+}
+
+#[test]
+fn compaction_invariants_are_enforced() {
+    let mut fixture = compacted_v2_fixture();
+    fixture["bundle"]["compaction"]["step"] = json!("drop_everything");
+    assert_v2_rejected(fixture, "not a valid InstructionManifestWire");
+
+    let mut fixture = compacted_v2_fixture();
+    fixture["bundle"]["compaction"]["extra"] = json!(1);
+    assert_v2_rejected(fixture, "unknown field `extra`");
+
+    let mut fixture = compacted_v2_fixture();
+    fixture["bundle"]
+        .as_object_mut()
+        .unwrap()
+        .remove("compaction");
+    assert_v2_rejected(fixture, "bundle.compaction is absent");
+
+    let mut fixture = compacted_v2_fixture();
+    fixture["sections"][4]["compaction"] = json!({
+        "step": "superseded_summaries",
+        "uncompacted_length": 10,
+    });
+    assert_v2_rejected(fixture, "must not carry compaction");
+
+    let mut fixture = compacted_v2_fixture();
+    fixture["bundle"]["compaction"]["step"] = json!("superseded_summaries");
+    assert_v2_rejected(fixture, "past bundle.compaction.step");
+
+    let mut fixture = compacted_v2_fixture();
+    fixture["sections"][1]["compaction"]["uncompacted_length"] = json!(30);
+    assert_v2_rejected(fixture, "must exceed length 30");
+
+    let mut fixture = compacted_v2_fixture();
+    fixture["bundle"]["compaction"]["uncompacted_bytes"] = json!(80);
+    assert_v2_rejected(fixture, "must exceed bundle.bytes 80");
+
+    let mut fixture = compacted_v2_fixture();
+    fixture["bundle"]["compaction"]["max_bytes"] = json!(0);
+    assert_v2_rejected(fixture, "max_bytes must be positive");
+
+    let mut fixture = compacted_v2_fixture();
+    for index in [1, 2] {
+        fixture["sections"][index]
+            .as_object_mut()
+            .unwrap()
+            .remove("compaction");
+    }
+    assert_v2_rejected(fixture, "at least one compacted section");
+}
