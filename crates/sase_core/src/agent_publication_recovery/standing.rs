@@ -6,6 +6,12 @@
 //! report an `opened`, `changed`, `escalated` (once after 24 h), or
 //! `cleared` transition, or to stay silent (`none`).
 //!
+//! Only the alert key (project and signature), the failure kind, and the
+//! error class decide whether a repeat is a `changed` transition. The raw
+//! `detail` text can carry volatile tokens (a pid, an age, `agent@sha`, a
+//! path), so a detail-only difference is not a transition: the alert keeps
+//! the newest detail as its current sample without reporting.
+//!
 //! Project-scoped kinds back off with a capped exponential schedule (1 min
 //! doubling to a 30 min cap) so the scheduler can skip the drain and the
 //! doorbell until the alert is due. Row-scoped kinds take no new backoff:
@@ -136,13 +142,14 @@ pub fn decide_publication_standing(
         (Some(previous), Some(observation)) => {
             let key_changed = observation.project != previous.project
                 || observation.signature != previous.signature;
-            let detail_changed = observation.failure_kind
+            // Raw detail is deliberately excluded: it may differ only in
+            // volatile tokens while the cause is unchanged.
+            let cause_changed = observation.failure_kind
                 != previous.failure_kind
-                || observation.error_class != previous.error_class
-                || observation.detail != previous.detail;
+                || observation.error_class != previous.error_class;
             let attempts = previous.attempts.saturating_add(1);
             let project_scoped = is_project_scoped(&observation.failure_kind);
-            if key_changed || detail_changed {
+            if key_changed || cause_changed {
                 Ok(PublicationStandingDecideResponseWire {
                     schema_version: PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
                     transition: PUBLICATION_STANDING_TRANSITION_CHANGED
@@ -180,7 +187,7 @@ pub fn decide_publication_standing(
                         signature: previous.signature.clone(),
                         failure_kind: previous.failure_kind.clone(),
                         error_class: previous.error_class.clone(),
-                        detail: previous.detail.clone(),
+                        detail: observation.detail.clone(),
                         attempts,
                         first_seen: previous.first_seen,
                         last_seen: now,
@@ -205,7 +212,7 @@ pub fn decide_publication_standing(
                         signature: previous.signature.clone(),
                         failure_kind: previous.failure_kind.clone(),
                         error_class: previous.error_class.clone(),
-                        detail: previous.detail.clone(),
+                        detail: observation.detail.clone(),
                         attempts,
                         first_seen: previous.first_seen,
                         last_seen: now,
