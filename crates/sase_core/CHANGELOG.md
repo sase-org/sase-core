@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.45.0](https://github.com/sase-org/sase-core/compare/v0.44.2...v0.45.0) - 2026-11-21
+
+### Added
+
+- *(notifications)* store oversized payloads in sidecars
+- *(notifications)* resurface reconciled rows when a named revision key changes
+- *(artifact-link)* add prompt_prose origin to ArtifactLinkOriginWire
+- *(instruction_manifest)* record compile-time bundle compaction
+- *(agent-archive)* filter dismissed bundles by identity prefix
+- *(agent-publication-recovery)* add terminal unrecoverable deferred-prompt outcome
+- *(publication)* add standing-alert decider with capped backoff
+- *(bead)* project triage owner candidates from the read model
+- *(publication)* raise cleanup timeout to 15s
+- *(axe-error)* add volatile-token normalizer and signature grouping
+- [**breaking**] bump disk-inventory wire to v2 with per-row size state
+- *(notifications)* coalesce plus-one updates
+- *(axe-chop)* add clan-scoped generation match and cancelled settlement
+- *(agent-scan)* preserve monitor identity in compact rows
+- *(finalizer)* add shared unscanned-writes coverage and repair policy
+- *(audit-query)* query artifact-read audit logs
+- *(axe-chop)* versioned crash-safe chop batch contract
+- *(bead)* add member-targeted touch index query with streaming views fold
+- *(audit-query)* add targeted memory audit query over JSONL
+- *(artifact-file)* add targeted association query over JSONL index
+- add compact agent-list wire contracts and PyO3 bindings
+- add prompt command-substitution source policy
+- *(agent-scan)* add bounded named lookup selection
+- *(agent-hijack)* decide running and latched monitor occupancy
+- *(agent-scan)* select indexed session and clan generations
+- *(agent-hijack)* monitor-only rerun preview and validation
+- *(agent-hijack)* add monitor-scope recovery preview rows
+- *(agent-scan)* terminalize stale running index rows with lifecycle witnesses
+- *(agent-archive)* project workflow_name column with name-or-workflow lookup
+- *(agent-hijack)* latch finalizer turns with staged-adoption boundary wire
+- *(agent-scan)* add read-only indexed artifact identity lookups
+- *(agent-hijack)* add latch ledger policy and bindings
+- *(agent-hijack)* add pre-provider decisions
+- *(agent-hijack)* return queued resolving records to held after dispatch bound
+- *(agent-hijack)* add eligibility v2 wire, occupant selection, stop_blocked ledger
+- *(agent-scan)* prove archive-scale scan budgets with verdict-cache warm path
+- *(agent-scan)* persist validated never-live capacity verdicts across processes
+- *(agent-scan)* add compact capacity projection and parity oracle
+- *(agent-scan)* project process identity in scans
+- *(continuation)* report fingerprint mismatch details
+- *(config)* persist digest-pinned local command trust
+- *(config)* add digest-pinned local-command trust contract and bindings
+
+### Fixed
+
+- *(agent-index)* treat busy -1 WAL checkpoint as busy and checkpoint passively in the gateway
+- *(agent-publication)* ignore volatile detail in standing alert decisions
+- *(triage)* backfill staged owners at settle without rewriting verdicts
+- *(axe-chop)* refuse older kills of unrecorded clan generations
+- *(axe-chop)* settle in-flight launches after cancellation
+- *(bead)* stream touch member index queries
+- *(agent-hijack)* allow held monitor rerun resolution in ledger
+- *(agent-archive)* compile corpus against current store schema
+- *(artifact-files)* support missing payloads in trash
+- *(continuation)* report authored request byte limits
+- *(stranded_work)* stop dead monitors with stale followup_pending from owning beads
+- *(agent_auto_restart)* managed-root precedence and exception-scoped never-restart markers
+
+### Other
+
+- *(bead)* add bead_stranded_snapshot slim projection
+- *(agent-hijack)* cover pre-provider hijack decisions
+- match word and agent catalog copy to the charset rule
+- *(agent-scan)* prove capacity cache write safety
+
 ## [0.44.2](https://github.com/sase-org/sase-core/compare/v0.44.1...v0.44.2) - 2026-11-09
 
 ### Added
