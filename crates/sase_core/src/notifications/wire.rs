@@ -66,6 +66,11 @@ pub struct NotificationWire {
     pub snooze_until: Option<String>,
     #[serde(default)]
     pub resurfaced_at: Option<String>,
+    /// When the row was dismissed, as a Python-ISO UTC timestamp. Set on
+    /// dismiss, cleared on undismiss. Additive: old rows omit it and read
+    /// as never-timestamped (legacy first-observation fallback applies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dismissed_at: Option<String>,
     /// Append-only occurrence notes. Empty on rows that have never been +1'd.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plus_ones: Vec<NotificationPlusOneWire>,

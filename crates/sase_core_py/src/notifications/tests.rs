@@ -1197,3 +1197,88 @@ fn notification_ack_and_index_bindings_round_trip() {
         assert!(err.to_string().contains("NotificationAckRequestWire"));
     });
 }
+
+#[test]
+fn dismissal_timestamp_sets_and_clears() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (_temp, path) = temp_notification_path("dismissed_at.jsonl");
+        let notification_obj = json_value_to_py(
+            py,
+            &json!({
+                "id": "n-dismiss",
+                "timestamp": "2026-11-21T12:00:00+00:00",
+                "sender": "gate",
+                "notes": ["gate failed"],
+                "action": "GateExecutionFailed",
+                "action_data": {},
+            }),
+        )
+        .unwrap();
+        let notification =
+            notification_obj.bind(py).downcast::<PyDict>().unwrap();
+        py_append_notification(py, path.to_str().unwrap(), notification)
+            .unwrap();
+
+        let dismiss_obj = json_value_to_py(
+            py,
+            &json!({"kind": "mark_dismissed", "id": "n-dismiss"}),
+        )
+        .unwrap();
+        let dismiss = dismiss_obj.bind(py).downcast::<PyDict>().unwrap();
+        let outcome = py_apply_notification_state_update(
+            py,
+            path.to_str().unwrap(),
+            dismiss,
+        )
+        .unwrap();
+        let outcome_value = py_to_json_value(outcome.bind(py)).unwrap();
+        assert_eq!(outcome_value["changed_count"], json!(1));
+
+        let snapshot = py_read_notifications_snapshot(
+            py,
+            path.to_str().unwrap(),
+            true,
+            false,
+        )
+        .unwrap();
+        let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
+        let row = &snapshot_value["notifications"][0];
+        assert_eq!(row["dismissed"], json!(true));
+        assert!(row.get("dismissed_at").is_some());
+        assert_ne!(
+            row.get("dismissed_at").unwrap(),
+            &json!(serde_json::Value::Null)
+        );
+
+        let undismiss_obj = json_value_to_py(
+            py,
+            &json!({"kind": "mark_undismissed", "id": "n-dismiss"}),
+        )
+        .unwrap();
+        let undismiss = undismiss_obj.bind(py).downcast::<PyDict>().unwrap();
+        let outcome = py_apply_notification_state_update(
+            py,
+            path.to_str().unwrap(),
+            undismiss,
+        )
+        .unwrap();
+        let outcome_value = py_to_json_value(outcome.bind(py)).unwrap();
+        assert_eq!(outcome_value["changed_count"], json!(1));
+
+        let snapshot = py_read_notifications_snapshot(
+            py,
+            path.to_str().unwrap(),
+            true,
+            false,
+        )
+        .unwrap();
+        let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
+        let row = &snapshot_value["notifications"][0];
+        assert_eq!(row["dismissed"], json!(false));
+        assert!(
+            row.get("dismissed_at").is_none()
+                || row.get("dismissed_at").unwrap().is_null()
+        );
+    });
+}

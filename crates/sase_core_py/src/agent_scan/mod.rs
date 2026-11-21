@@ -1305,6 +1305,41 @@ fn py_agent_stats_query_activity<'py>(
     telemetry_result_to_py(py, &result)
 }
 
+/// Decide whether a dismissed gate-failure notification may resurface.
+///
+/// Shared policy owned by `sase_core`: once per acceptance, only after a
+/// full hour since dismissal, only when the receipt still names the same
+/// acceptance, never on a terminal member, and never when already visible.
+#[pyfunction]
+#[pyo3(name = "gate_failure_resurface_decision")]
+fn py_gate_failure_resurface_decision<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let json = py_to_json_value(request)?;
+    let wire: GateFailureResurfaceRequestWire =
+        serde_json::from_value(json).map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid GateFailureResurfaceRequestWire dict: {e}"
+            ))
+        })?;
+    let decision =
+        py.allow_threads(|| core_gate_failure_resurface_decision(&wire));
+    serialize_to_py(py, &decision)
+}
+
+/// Return whether a persisted gate failure projects attention.
+///
+/// Terminal members never solicit recovery, even with stale failure data.
+#[pyfunction]
+#[pyo3(name = "gate_failure_projects_attention")]
+fn py_gate_failure_projects_attention(
+    is_terminal: bool,
+    has_failure: bool,
+) -> bool {
+    core_gate_failure_projects_attention(is_terminal, has_failure)
+}
+
 pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_scan_agent_artifacts, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_agent_artifacts_list, m)?)?;
@@ -1363,6 +1398,8 @@ pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_load_agent_artifact_records, m)?)?;
     m.add_function(wrap_pyfunction!(py_find_gate_turn_by_gate_id, m)?)?;
+    m.add_function(wrap_pyfunction!(py_gate_failure_resurface_decision, m)?)?;
+    m.add_function(wrap_pyfunction!(py_gate_failure_projects_attention, m)?)?;
     m.add_function(wrap_pyfunction!(py_lookup_agent_artifacts, m)?)?;
     m.add_function(wrap_pyfunction!(py_select_agent_artifact_group, m)?)?;
     m.add_function(wrap_pyfunction!(py_select_named_agent, m)?)?;

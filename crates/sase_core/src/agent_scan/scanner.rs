@@ -43,11 +43,11 @@ use super::wire::{
     AgentMetaWire, AgentSessionTurnGateWire, AgentSessionTurnMonitorWire,
     AgentSessionTurnWire, CreatedEpicWire, DoneMarkerWire,
     FinalizerStatusInstanceWire, FinalizerStatusRunnerWire,
-    FinalizerStatusSummaryWire, ImportedSourceOwnerWire, OutputVariableValue,
-    PendingQuestionMarkerWire, PlanPathMarkerWire, PromptStepMarkerWire,
-    RunningMarkerWire, UsedMacroWire, WaitEpicFollowEntryWire,
-    WaitTurnBindingWire, WaitingMarkerWire, WorkflowStateWire,
-    WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
+    FinalizerStatusSummaryWire, GateExecutionFailureWire,
+    ImportedSourceOwnerWire, OutputVariableValue, PendingQuestionMarkerWire,
+    PlanPathMarkerWire, PromptStepMarkerWire, RunningMarkerWire, UsedMacroWire,
+    WaitEpicFollowEntryWire, WaitTurnBindingWire, WaitingMarkerWire,
+    WorkflowStateWire, WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 use crate::project_spec::{
     list_project_records, preferred_project_spec_path,
@@ -1635,6 +1635,43 @@ fn coerce_float(value: Option<&Value>) -> Option<f64> {
     }
 }
 
+fn coerce_gate_execution_failure(
+    value: Option<&Value>,
+) -> Option<GateExecutionFailureWire> {
+    let obj = value?.as_object()?;
+    if obj.is_empty() {
+        return None;
+    }
+    let failure = GateExecutionFailureWire {
+        stage: coerce_str(obj.get("stage")),
+        code: coerce_str(obj.get("code")),
+        message: coerce_str(obj.get("message")),
+        error_record: coerce_str(obj.get("error_record")),
+        error_report_path: coerce_str(obj.get("error_report_path")),
+        acceptance_id: coerce_str(obj.get("acceptance_id")),
+        attempt_id: coerce_str(obj.get("attempt_id")),
+        outcome_id: coerce_str(obj.get("outcome_id")),
+        at_unix: coerce_float(obj.get("at_unix")),
+        resume_command: coerce_str(obj.get("resume_command")),
+        restart_command: coerce_str(obj.get("restart_command")),
+        cancel_command: coerce_str(obj.get("cancel_command")),
+        recovery_actions: coerce_str(obj.get("recovery_actions")),
+        bundle_path: coerce_str(obj.get("bundle_path")),
+        request_id: coerce_str(obj.get("request_id")),
+        request_kind: coerce_str(obj.get("request_kind")),
+        resurfaced: obj
+            .get("resurfaced")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        resurfaced_at: coerce_str(obj.get("resurfaced_at")),
+    };
+    // All-empty objects carry no signal; preserve old-record defaults.
+    if failure == GateExecutionFailureWire::default() {
+        return None;
+    }
+    Some(failure)
+}
+
 fn coerce_queue_weight(
     data: &Map<String, Value>,
 ) -> (Option<f64>, bool, Option<String>) {
@@ -2608,6 +2645,9 @@ fn agent_session_turn_from_object(
                 notification_id: coerce_str(data.get("gate_notification_id")),
                 decision_path: coerce_str(data.get("gate_decision_path")),
                 claim_holder_pid: coerce_int(data.get("gate_claim_holder_pid")),
+                failure: coerce_gate_execution_failure(
+                    data.get("gate_execution_failure"),
+                ),
             }),
         });
     }

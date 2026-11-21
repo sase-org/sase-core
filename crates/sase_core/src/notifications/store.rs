@@ -503,12 +503,21 @@ fn apply_notification_state_update_with_options(
                 }
             }
             NotificationStateUpdateWire::MarkDismissed { id } => {
+                let dismissed_at =
+                    format_utc_python_iso(DateTime::<Utc>::from(SystemTime::now()));
                 for n in &mut rows {
                     if n.id == *id {
                         matched_count += 1;
                         if !n.dismissed || n.snooze_until.is_some() {
                             n.dismissed = true;
                             n.snooze_until = None;
+                            n.dismissed_at = Some(dismissed_at.clone());
+                            changed_count += 1;
+                        } else if n.dismissed_at.is_none() {
+                            // Backfill the timestamp on an already-dismissed
+                            // legacy row so resurface waits a full hour from
+                            // a known instant instead of inferring it.
+                            n.dismissed_at = Some(dismissed_at.clone());
                             changed_count += 1;
                         }
                         break;
@@ -518,12 +527,18 @@ fn apply_notification_state_update_with_options(
             NotificationStateUpdateWire::MarkManyDismissed { ids } => {
                 let ids: BTreeSet<&str> =
                     ids.iter().map(String::as_str).collect();
+                let dismissed_at =
+                    format_utc_python_iso(DateTime::<Utc>::from(SystemTime::now()));
                 for n in &mut rows {
                     if ids.contains(n.id.as_str()) {
                         matched_count += 1;
                         if !n.dismissed || n.snooze_until.is_some() {
                             n.dismissed = true;
                             n.snooze_until = None;
+                            n.dismissed_at = Some(dismissed_at.clone());
+                            changed_count += 1;
+                        } else if n.dismissed_at.is_none() {
+                            n.dismissed_at = Some(dismissed_at.clone());
                             changed_count += 1;
                         }
                     }
@@ -535,6 +550,7 @@ fn apply_notification_state_update_with_options(
                         matched_count += 1;
                         if n.dismissed {
                             n.dismissed = false;
+                            n.dismissed_at = None;
                             changed_count += 1;
                         }
                         break;
@@ -549,6 +565,7 @@ fn apply_notification_state_update_with_options(
                         matched_count += 1;
                         if n.dismissed {
                             n.dismissed = false;
+                            n.dismissed_at = None;
                             changed_count += 1;
                         }
                     }
@@ -632,6 +649,8 @@ fn apply_notification_state_update_with_options(
                 changed_count = matched_count;
             }
             NotificationStateUpdateWire::DismissMatchingAgents { agents } => {
+                let dismissed_at =
+                    format_utc_python_iso(DateTime::<Utc>::from(SystemTime::now()));
                 for n in &mut rows {
                     if n.dismissed {
                         continue;
@@ -640,6 +659,7 @@ fn apply_notification_state_update_with_options(
                         matched_count += 1;
                         n.dismissed = true;
                         n.snooze_until = None;
+                        n.dismissed_at = Some(dismissed_at.clone());
                         changed_count += 1;
                     }
                 }
@@ -647,6 +667,8 @@ fn apply_notification_state_update_with_options(
             NotificationStateUpdateWire::DismissAgentCompletionsMatchingAgents {
                 agents,
             } => {
+                let dismissed_at =
+                    format_utc_python_iso(DateTime::<Utc>::from(SystemTime::now()));
                 for n in &mut rows {
                     if n.dismissed {
                         continue;
@@ -659,11 +681,14 @@ fn apply_notification_state_update_with_options(
                         matched_count += 1;
                         n.dismissed = true;
                         n.snooze_until = None;
+                        n.dismissed_at = Some(dismissed_at.clone());
                         changed_count += 1;
                     }
                 }
             }
             NotificationStateUpdateWire::DismissAgentCompletions => {
+                let dismissed_at =
+                    format_utc_python_iso(DateTime::<Utc>::from(SystemTime::now()));
                 for n in &mut rows {
                     if n.dismissed {
                         continue;
@@ -672,6 +697,7 @@ fn apply_notification_state_update_with_options(
                         matched_count += 1;
                         n.dismissed = true;
                         n.snooze_until = None;
+                        n.dismissed_at = Some(dismissed_at.clone());
                         changed_count += 1;
                     }
                 }
@@ -1493,9 +1519,16 @@ fn reconcile_notification_rows_unlocked(
             merged.read = input.read;
             merged.dismissed = input.dismissed;
             merged.resurfaced_at.clone_from(&input.resurfaced_at);
+            merged.dismissed_at.clone_from(&input.dismissed_at);
             if on_disk.dismissed && !merged.dismissed {
+                merged.dismissed_at = None;
                 transition = Some("resurfaced");
             } else if !on_disk.dismissed && merged.dismissed {
+                if merged.dismissed_at.is_none() {
+                    merged.dismissed_at = Some(format_utc_python_iso(
+                        DateTime::<Utc>::from(SystemTime::now()),
+                    ));
+                }
                 transition = Some("dismissed");
             }
         } else if on_disk.dismissed && !disk_has_marker {
@@ -1507,9 +1540,13 @@ fn reconcile_notification_rows_unlocked(
         } else if on_disk.dismissed && disk_has_marker && !input.dismissed {
             merged.dismissed = false;
             merged.read = false;
+            merged.dismissed_at = None;
             transition = Some("resurfaced");
         } else if !on_disk.dismissed && input.dismissed && input_has_marker {
             merged.dismissed = true;
+            merged.dismissed_at = Some(format_utc_python_iso(
+                DateTime::<Utc>::from(SystemTime::now()),
+            ));
             transition = Some("dismissed");
         }
         if merged == on_disk {

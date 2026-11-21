@@ -974,6 +974,51 @@ pub struct AgentSessionTurnMonitorWire {
     pub idle_timeout_seconds: Option<f64>,
 }
 
+/// Persisted execution-failure facts for a gate-turn member.
+///
+/// Mirrors `sase.gate_turn.execution_failure.build_gate_execution_failure`:
+/// the current pre-response failure plus recovery commands. `None` on the
+/// gate wire means no current failure; terminal members ignore stale data.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GateExecutionFailureWire {
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub error_record: Option<String>,
+    #[serde(default)]
+    pub error_report_path: Option<String>,
+    #[serde(default)]
+    pub acceptance_id: Option<String>,
+    #[serde(default)]
+    pub attempt_id: Option<String>,
+    #[serde(default)]
+    pub outcome_id: Option<String>,
+    #[serde(default)]
+    pub at_unix: Option<f64>,
+    #[serde(default)]
+    pub resume_command: Option<String>,
+    #[serde(default)]
+    pub restart_command: Option<String>,
+    #[serde(default)]
+    pub cancel_command: Option<String>,
+    #[serde(default)]
+    pub recovery_actions: Option<String>,
+    #[serde(default)]
+    pub bundle_path: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub request_kind: Option<String>,
+    #[serde(default)]
+    pub resurfaced: bool,
+    #[serde(default)]
+    pub resurfaced_at: Option<String>,
+}
+
 /// Gate-only fields of a `agent_session_turn` record.
 ///
 /// `kind` here is the gate's own flavor (e.g. `"approval"`), not the
@@ -998,6 +1043,9 @@ pub struct AgentSessionTurnGateWire {
     pub decision_path: Option<String>,
     #[serde(default)]
     pub claim_holder_pid: Option<i64>,
+    /// Current pre-response execution failure, if any. Old records omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<GateExecutionFailureWire>,
 }
 
 /// One durable agent-session-turn member: a monitor or a gate, never both.
@@ -1462,6 +1510,93 @@ pub struct AgentArtifactScanWire {
     pub index_completeness: Option<AgentArtifactIndexCompletenessWire>,
 }
 
+/// Request for the shared gate-failure resurface eligibility decision.
+///
+/// Python gathers the facts (dismissal age from `dismissed_at` or legacy
+/// first-observation, per-acceptance history, identity match, terminal and
+/// visibility state) and calls
+/// [`gate_failure_resurface_decision`] for the verdict, so every surface
+/// shares one policy.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GateFailureResurfaceRequestWire {
+    #[serde(default)]
+    pub dismissed_age_seconds: f64,
+    #[serde(default)]
+    pub already_resurfaced: bool,
+    #[serde(default)]
+    pub already_visible: bool,
+    #[serde(default)]
+    pub receipt_matches: bool,
+    #[serde(default)]
+    pub is_terminal: bool,
+}
+
+/// Verdict for [`gate_failure_resurface_decision`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateFailureResurfaceDecisionWire {
+    pub eligible: bool,
+    pub reason: String,
+}
+
+/// Decide whether a dismissed gate-failure notification may resurface.
+///
+/// Shared policy: once per acceptance, only after a full hour since
+/// dismissal, only when the journal receipt still names the same
+/// acceptance, never on a terminal member, and never when the row is
+/// already visible. A changed write is the only proof of restoration;
+/// matching alone is not.
+pub fn gate_failure_resurface_decision(
+    request: &GateFailureResurfaceRequestWire,
+) -> GateFailureResurfaceDecisionWire {
+    if request.is_terminal {
+        return GateFailureResurfaceDecisionWire {
+            eligible: false,
+            reason: "terminal".to_string(),
+        };
+    }
+    if !request.receipt_matches {
+        return GateFailureResurfaceDecisionWire {
+            eligible: false,
+            reason: "acceptance_changed".to_string(),
+        };
+    }
+    if request.already_visible {
+        return GateFailureResurfaceDecisionWire {
+            eligible: false,
+            reason: "already_visible".to_string(),
+        };
+    }
+    if request.already_resurfaced {
+        return GateFailureResurfaceDecisionWire {
+            eligible: false,
+            reason: "already_resurfaced".to_string(),
+        };
+    }
+    if request.dismissed_age_seconds < 3600.0 {
+        return GateFailureResurfaceDecisionWire {
+            eligible: false,
+            reason: "too_soon".to_string(),
+        };
+    }
+    GateFailureResurfaceDecisionWire {
+        eligible: true,
+        reason: "eligible".to_string(),
+    }
+}
+
+/// Return whether a gate member's persisted failure should project attention.
+///
+/// Terminal members never solicit recovery, even with stale failure data;
+/// non-terminal members do exactly when a failure object is present.
+/// `followup_needs_attention` is a separate signal and never implies
+/// execution failure.
+pub fn gate_failure_projects_attention(
+    is_terminal: bool,
+    has_failure: bool,
+) -> bool {
+    has_failure && !is_terminal
+}
+
 /// Return true iff `name` is one of the workflow folder names the
 /// scanner walks. Matches `_supported_workflow_dir` in the Python facade.
 pub fn is_supported_workflow_dir(name: &str) -> bool {
@@ -1620,6 +1755,7 @@ mod tests {
                     notification_id: Some("notif-1".to_string()),
                     decision_path: Some("gate_decision.md".to_string()),
                     claim_holder_pid: None,
+                    failure: None,
                 }),
             }),
             turn_kind: Some("gate".to_string()),
@@ -2059,5 +2195,108 @@ mod tests {
         assert_eq!(encoded["wait_turn_bindings"][0]["turn_name"], "16h--gate");
         let decoded: AgentMetaWire = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded, meta);
+    }
+
+    #[test]
+    fn gate_wire_round_trips_execution_failure() {
+        let gate = AgentSessionTurnGateWire {
+            kind: Some("approval".to_string()),
+            bundle_path: Some("gate_bundle.json".to_string()),
+            failure: Some(GateExecutionFailureWire {
+                stage: Some("command".to_string()),
+                code: Some("command_failed".to_string()),
+                message: Some("option replace failed".to_string()),
+                acceptance_id: Some("acc-1".to_string()),
+                attempt_id: Some("attempt-1".to_string()),
+                outcome_id: Some("out-1".to_string()),
+                at_unix: Some(1_000.0),
+                resume_command: Some("sase gate answer --resume".to_string()),
+                request_id: Some("g1".to_string()),
+                request_kind: Some("custom".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&gate).unwrap();
+        assert_eq!(
+            encoded["failure"]["acceptance_id"],
+            serde_json::json!("acc-1")
+        );
+        let decoded: AgentSessionTurnGateWire =
+            serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, gate);
+    }
+
+    #[test]
+    fn gate_wire_without_failure_parses_legacy() {
+        let old = serde_json::json!({"kind": "approval"});
+        let decoded: AgentSessionTurnGateWire =
+            serde_json::from_value(old).unwrap();
+        assert!(decoded.failure.is_none());
+        assert!(serde_json::to_value(&decoded)
+            .unwrap()
+            .get("failure")
+            .is_none());
+    }
+
+    #[test]
+    fn gate_resurface_decision_covers_policy() {
+        let eligible = GateFailureResurfaceRequestWire {
+            dismissed_age_seconds: 3700.0,
+            already_resurfaced: false,
+            already_visible: false,
+            receipt_matches: true,
+            is_terminal: false,
+        };
+        assert!(gate_failure_resurface_decision(&eligible).eligible);
+        for (req, reason) in [
+            (
+                GateFailureResurfaceRequestWire {
+                    is_terminal: true,
+                    ..Default::default()
+                },
+                "terminal",
+            ),
+            (
+                GateFailureResurfaceRequestWire {
+                    dismissed_age_seconds: 9999.0,
+                    ..Default::default()
+                },
+                "acceptance_changed",
+            ),
+            (
+                GateFailureResurfaceRequestWire {
+                    already_visible: true,
+                    receipt_matches: true,
+                    dismissed_age_seconds: 9999.0,
+                    ..Default::default()
+                },
+                "already_visible",
+            ),
+            (
+                GateFailureResurfaceRequestWire {
+                    already_resurfaced: true,
+                    receipt_matches: true,
+                    dismissed_age_seconds: 9999.0,
+                    ..Default::default()
+                },
+                "already_resurfaced",
+            ),
+            (
+                GateFailureResurfaceRequestWire {
+                    receipt_matches: true,
+                    dismissed_age_seconds: 60.0,
+                    ..Default::default()
+                },
+                "too_soon",
+            ),
+        ] {
+            let decision = gate_failure_resurface_decision(&req);
+            assert!(!decision.eligible, "{reason}");
+            assert_eq!(decision.reason, reason);
+        }
+        assert!(gate_failure_projects_attention(false, true));
+        assert!(!gate_failure_projects_attention(true, true));
+        assert!(!gate_failure_projects_attention(false, false));
     }
 }

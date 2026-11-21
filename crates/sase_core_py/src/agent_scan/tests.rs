@@ -1254,3 +1254,65 @@ fn compact_list_binding_keeps_monitor_identity_and_only_typed_output_facts() {
         assert!(serde_json::to_vec(output).unwrap().len() < 4096);
     });
 }
+
+#[test]
+fn gate_failure_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        let dir = root
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20261121090000");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("agent_meta.json"),
+            serde_json::to_vec(&json!({
+                "name": "lane--gate",
+                "agent_session_role": "gate",
+                "gate_id": "g1",
+                "gate_state": "settling",
+                "gate_kind": "custom",
+                "gate_execution_failure": {
+                    "stage": "command",
+                    "code": "command_failed",
+                    "acceptance_id": "acc-1",
+                    "attempt_id": "attempt-1",
+                    "outcome_id": "out-1",
+                    "at_unix": 1000.0,
+                    "request_id": "g1",
+                    "request_kind": "custom",
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let snapshot =
+            py_scan_agent_artifacts(py, root.to_string_lossy().as_ref(), None)
+                .unwrap();
+        let snapshot = py_to_json_value(snapshot.bind(py)).unwrap();
+        let record = &snapshot["records"][0];
+        assert_eq!(
+            record["agent_meta"]["agent_session_turn"]["gate"]["failure"]
+                ["acceptance_id"],
+            json!("acc-1")
+        );
+
+        let decision_dict = pyo3::types::PyDict::new_bound(py);
+        decision_dict
+            .set_item("dismissed_age_seconds", 3700.0)
+            .unwrap();
+        decision_dict.set_item("already_resurfaced", false).unwrap();
+        decision_dict.set_item("already_visible", false).unwrap();
+        decision_dict.set_item("receipt_matches", true).unwrap();
+        decision_dict.set_item("is_terminal", false).unwrap();
+        let decision =
+            py_gate_failure_resurface_decision(py, &decision_dict).unwrap();
+        let decision = py_to_json_value(decision.bind(py)).unwrap();
+        assert_eq!(decision["eligible"], json!(true));
+        assert_eq!(py_gate_failure_projects_attention(false, true), true);
+        assert_eq!(py_gate_failure_projects_attention(true, true), false);
+    });
+}
