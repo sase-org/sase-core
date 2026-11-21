@@ -9,9 +9,13 @@ use std::collections::HashMap;
 
 use rusqlite::{Connection, OptionalExtension};
 
+use super::super::admission_wire::ToolRunAdmissionViewWire;
 use super::super::handoff_wire::ToolRunJoinRecordWire;
 use super::super::store::connection::runs_column_set;
-use super::super::store::{triage_tables_present, typical_duration_for};
+use super::super::store::{
+    admission_views, triage_tables_present, typical_duration_for,
+    AdmissionViews,
+};
 use super::super::triage::{
     tool_run_triage_verdict, ToolRunTriageVerdictItemWire,
     ToolRunTriageVerdictRequestWire, TOOL_RUN_TRIAGE_STAGE_KEY_RUN_OUTPUT,
@@ -833,6 +837,7 @@ pub(super) struct BatchContext {
     stages: HashMap<String, StageAgg>,
     samples: HashMap<String, i64>,
     joins: HashMap<String, (String, String)>,
+    admission: AdmissionViews,
     verdicts: HashMap<String, ToolRunVerdictSummaryWire>,
     references: HashMap<String, Option<(String, Option<u32>)>>,
     typicals: HashMap<String, (Option<i64>, u32)>,
@@ -849,6 +854,7 @@ impl BatchContext {
             stages: batch_stage_aggs(conn, run_ids)?,
             samples: batch_sample_max(conn, run_ids)?,
             joins: batch_joins(conn, run_ids)?,
+            admission: admission_views(conn)?,
             verdicts: verdict_summary_for_runs(conn, run_ids)?,
             references: HashMap::new(),
             typicals: HashMap::new(),
@@ -911,6 +917,17 @@ impl BatchContext {
         Ok(found)
     }
 
+    fn admission_for_row(
+        &self,
+        row: &LeanRunRow,
+    ) -> Option<ToolRunAdmissionViewWire> {
+        if row.state.is_unsettled() {
+            self.admission.get(&row.run_id)
+        } else {
+            None
+        }
+    }
+
     pub(super) fn glance_for_row(
         &mut self,
         conn: &Connection,
@@ -966,6 +983,7 @@ impl BatchContext {
             typical_ms,
             typical_samples,
             stop_requested: row.stop_requested,
+            admission: self.admission_for_row(row),
         })
     }
 
@@ -1008,6 +1026,7 @@ impl BatchContext {
             // settled run with no stages reads as pruned detail.
             detail_pruned: row.state.is_terminal() && stage_total == 0,
             stop_requested: row.stop_requested,
+            admission: self.admission_for_row(row),
         })
     }
 }

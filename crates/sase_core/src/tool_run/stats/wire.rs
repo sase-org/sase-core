@@ -350,6 +350,33 @@ pub struct ToolRunStatsDemandWire {
     pub escalated_grant_runs: usize,
 }
 
+/// Host-wide admission waits for one tool group, kept apart from the
+/// pytest `token_wait_*` fields. Wait percentiles cover every run whose
+/// record carries a `wait_ms` (admitted or abandoned); `waits` counts the
+/// runs whose wait was nonzero.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunStatsAdmissionWire {
+    /// Runs that carry an admission record.
+    #[serde(default)]
+    pub runs: usize,
+    #[serde(default)]
+    pub waits: usize,
+    #[serde(default)]
+    pub wait_ms_total: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms_p50: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms_p95: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms_max: Option<u64>,
+    /// Runs admitted over the limit after max wait.
+    #[serde(default)]
+    pub forced: usize,
+    /// Runs that settled while still waiting.
+    #[serde(default)]
+    pub abandoned: usize,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolRunStatsStageWire {
     #[serde(default)]
@@ -456,6 +483,8 @@ pub struct ToolRunStatsToolWire {
     pub repeats: ToolRunStatsRepeatsWire,
     #[serde(default)]
     pub demand: ToolRunStatsDemandWire,
+    #[serde(default)]
+    pub admission: ToolRunStatsAdmissionWire,
     #[serde(default)]
     pub stages: Vec<ToolRunStatsStageWire>,
     #[serde(default)]

@@ -1,5 +1,6 @@
 //! Versioned ToolRun ledger: records, store, catalog, and fingerprints.
 
+mod admission_wire;
 mod canonical;
 mod catalog;
 mod demand_wire;
@@ -13,6 +14,7 @@ mod store;
 mod triage;
 mod wire;
 
+pub use admission_wire::*;
 pub use catalog::{
     normalize_receipt_policy, normalize_tool_definition, parse_receipt_ttl,
     receipt_ttl_seconds,
@@ -59,12 +61,13 @@ pub use receipt::{
     RECEIPT_MAX_CHANGED_PATHS, RECEIPT_MAX_TTL_SECONDS, RECEIPT_POLICY_VERSION,
 };
 pub use store::{
-    activate_staged_join, append_event, begin, claim, finish, join, list_runs,
-    observe, receipt_lookup, receipt_settle, reconcile, record_demand,
-    release_join, release_staged_join, request_stop, reserve_staged_join,
-    retention_apply, retention_preview, show_run, store_stats, summarize,
-    tool_run_failures, tool_run_receipts_report, tool_run_stats_report,
-    triage_record, triage_settle, triage_show, triage_stage,
+    activate_staged_join, admission_enter, admission_force, admission_poll,
+    append_event, begin, claim, finish, join, list_runs, observe,
+    receipt_lookup, receipt_settle, reconcile, record_demand, release_join,
+    release_staged_join, request_stop, reserve_staged_join, retention_apply,
+    retention_preview, show_run, store_stats, summarize, tool_run_failures,
+    tool_run_receipts_report, tool_run_stats_report, triage_record,
+    triage_settle, triage_show, triage_stage,
 };
 pub use triage::*;
 pub use triage::{

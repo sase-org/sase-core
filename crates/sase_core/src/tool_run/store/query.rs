@@ -20,6 +20,7 @@ use super::super::wire::{
     TOOL_RUN_TYPICAL_WINDOW_DAYS, TOOL_RUN_WIRE_SCHEMA_VERSION,
 };
 use super::super::ToolRunError;
+use super::admission::admission_views;
 use super::connection::{
     runs_column_set, unix_now, validate_schema, with_read_store,
 };
@@ -128,6 +129,7 @@ pub fn show_run(
             stages: Vec::new(),
             samples: Vec::new(),
             diagnostics: vec!["tool run store does not exist".to_string()],
+            admission: None,
         });
     }
     with_read_store(store_path, busy_timeout, |conn| {
@@ -143,7 +145,17 @@ pub fn show_run(
                     "tool run {} was not found",
                     request.run_id
                 )],
+                admission: None,
             });
+        };
+        let has_admission = run
+            .demand
+            .as_ref()
+            .is_some_and(|demand| demand.admission.is_some());
+        let admission = if run.state.is_unsettled() && has_admission {
+            admission_views(conn)?.get(&request.run_id)
+        } else {
+            None
         };
         Ok(ToolRunShowResultWire {
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
@@ -153,6 +165,7 @@ pub fn show_run(
             samples: load_samples(conn, &request.run_id)?,
             run: Some(run),
             diagnostics: Vec::new(),
+            admission,
         })
     })
 }

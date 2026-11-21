@@ -24,6 +24,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
+mod admission;
 mod compat;
 mod contention;
 mod handoff;

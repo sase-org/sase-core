@@ -1312,7 +1312,7 @@ fn gate_failure_bindings_round_trip() {
             py_gate_failure_resurface_decision(py, &decision_dict).unwrap();
         let decision = py_to_json_value(decision.bind(py)).unwrap();
         assert_eq!(decision["eligible"], json!(true));
-        assert_eq!(py_gate_failure_projects_attention(false, true), true);
-        assert_eq!(py_gate_failure_projects_attention(true, true), false);
+        assert!(py_gate_failure_projects_attention(false, true));
+        assert!(!py_gate_failure_projects_attention(true, true));
     });
 }

@@ -3,6 +3,9 @@ use super::report::{
     StatsStageRow,
 };
 use super::wire::*;
+use crate::tool_run::admission_wire::{
+    ToolRunAdmissionStateWire, ToolRunAdmissionWire, ToolRunAdmittedByWire,
+};
 use crate::tool_run::catalog::extra_args_digest;
 use crate::tool_run::demand_wire::{
     ToolRunDemandContextWire, ToolRunDemandWire, ToolRunResourceUsageWire,
@@ -51,6 +54,7 @@ fn demand(provider: Option<&str>, ceiling: Option<u64>) -> ToolRunDemandWire {
         usage: None,
         worker_grants: Vec::new(),
         diagnostics: Vec::new(),
+        admission: None,
     }
 }
 
@@ -524,6 +528,7 @@ fn demand_aggregates() {
         }),
         worker_grants: vec![grant("g1", "lease", 12, 1000, true)],
         diagnostics: Vec::new(),
+        admission: None,
     });
     let mut second = row("run-2");
     second.duration_ms = Some(6000);
@@ -543,6 +548,7 @@ fn demand_aggregates() {
             grant("g3", "bypass", 8, 0, false),
         ],
         diagnostics: Vec::new(),
+        admission: None,
     });
     let group = group(report(&[first, second]));
     let demand = &group.demand;
@@ -569,6 +575,70 @@ fn demand_aggregates() {
     assert_eq!(demand.token_wait_ms_max, Some(2000));
     assert_eq!(demand.token_wait_timeouts, 1);
     assert_eq!(demand.escalated_grant_runs, 1);
+    assert_eq!(group.admission, ToolRunStatsAdmissionWire::default());
+}
+
+fn admission_record(
+    state: ToolRunAdmissionStateWire,
+    admitted_by: Option<ToolRunAdmittedByWire>,
+    wait_ms: Option<u64>,
+) -> ToolRunDemandWire {
+    let mut record = demand(None, None);
+    record.context = None;
+    record.admission = Some(ToolRunAdmissionWire {
+        schema_version: 1,
+        key: "check".into(),
+        limit: 3,
+        state,
+        admitted_by,
+        seq: 1,
+        requested_ts_ms: 1_000_000_000,
+        admitted_ts_ms: None,
+        wait_ms,
+        ahead_at_request: 0,
+    });
+    record
+}
+
+#[test]
+fn admission_waits_summarize_apart_from_token_waits() {
+    use ToolRunAdmissionStateWire::{Abandoned, Admitted, Waiting};
+    use ToolRunAdmittedByWire::{MaxWait, Slot};
+    let cases = [
+        (Admitted, Some(Slot), Some(0)),
+        (Admitted, Some(Slot), Some(1_000)),
+        (Admitted, Some(Slot), Some(4_000)),
+        (Admitted, Some(MaxWait), Some(9_000)),
+        (Abandoned, None, Some(2_000)),
+        // A record still waiting carries no wait yet.
+        (Waiting, None, None),
+    ];
+    let mut rows = Vec::new();
+    for (index, (state, by, wait)) in cases.into_iter().enumerate() {
+        let mut run = row(&format!("run-{index}"));
+        run.demand = Some(admission_record(state, by, wait));
+        rows.push(run);
+    }
+    rows.push(row("plain"));
+    let group = group(report(&rows));
+    assert_eq!(
+        group.admission,
+        ToolRunStatsAdmissionWire {
+            runs: 6,
+            waits: 4,
+            wait_ms_total: 16_000,
+            wait_ms_p50: Some(2_000),
+            wait_ms_p95: Some(9_000),
+            wait_ms_max: Some(9_000),
+            forced: 1,
+            abandoned: 1,
+        }
+    );
+    // Admission waits never fold into the pytest token-wait fields.
+    assert_eq!(group.demand.token_wait_runs, 0);
+    assert_eq!(group.demand.token_wait_ms_total, 0);
+    let json = serde_json::to_value(&group).unwrap();
+    assert_eq!(json["admission"]["wait_ms_p95"], 9_000);
 }
 
 #[test]

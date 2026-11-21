@@ -7,6 +7,7 @@
 //! owns run queries and loaders; and [`retention`](retention) owns retention
 //! preview, apply, and log reclamation.
 
+mod admission;
 pub(crate) mod connection;
 mod demand;
 #[cfg(test)]
@@ -27,6 +28,8 @@ mod tests;
 mod triage;
 mod triage_stage;
 
+pub use admission::{admission_enter, admission_force, admission_poll};
+pub(crate) use admission::{admission_views, AdmissionViews};
 pub use demand::record_demand;
 pub use failures::tool_run_failures;
 pub use handoff::{

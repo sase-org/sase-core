@@ -6,6 +6,8 @@ use crate::json_bridge::{json_value_to_py, py_to_json_value};
 
 use pyo3::wrap_pyfunction;
 
+mod admission;
+
 /// Persist one telemetry accumulator flush in a single SQLite transaction.
 #[pyfunction]
 #[pyo3(
@@ -1236,6 +1238,7 @@ pub(crate) fn register_telemetry(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_tool_run_observe, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_record_demand, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_reconcile, m)?)?;
+    admission::register_tool_run_admission(m)?;
     m.add_function(wrap_pyfunction!(py_tool_run_claim, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_join, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_release_join, m)?)?;
@@ -1270,6 +1273,8 @@ pub(crate) fn register_telemetry(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod admission_tests;
 #[cfg(test)]
 mod demand_tests;
 #[cfg(test)]

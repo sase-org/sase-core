@@ -1,5 +1,5 @@
-//! Per-run demand wires: provider/ceiling context, resource usage, and
-//! pytest worker grants.
+//! Per-run demand wires: provider/ceiling context, resource usage, pytest
+//! worker grants, and the host-wide admission record.
 //!
 //! The nested wires are lenient (no `deny_unknown_fields`) because they are
 //! also the stored shape older readers must keep parsing. Only the top-level
@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::admission_wire::ToolRunAdmissionWire;
 use super::wire::TOOL_RUN_WIRE_SCHEMA_VERSION;
 
 fn demand_schema_version() -> u32 {
@@ -79,9 +80,14 @@ pub struct ToolRunDemandWire {
     pub worker_grants: Vec<ToolRunWorkerGrantWire>,
     #[serde(default)]
     pub diagnostics: Vec<String>,
+    /// Written only by the admission operations and preserved by every
+    /// demand merge. Absent leaves the stored JSON byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<ToolRunAdmissionWire>,
 }
 
-/// Merge-on-write demand request. Allowed in any run state.
+/// Merge-on-write demand request. Allowed in any run state. It carries no
+/// `admission` field: only the admission operations write that record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolRunRecordDemandRequestWire {

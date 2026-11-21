@@ -286,6 +286,13 @@ pub(crate) fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+pub(crate) fn unix_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 pub(super) fn touch_write_meta(
     tx: &Transaction<'_>,
     now: i64,

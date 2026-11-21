@@ -21,6 +21,7 @@ use super::super::wire::{
     TOOL_RUN_WIRE_SCHEMA_VERSION,
 };
 use super::super::ToolRunError;
+use super::admission::abandon_waiting_admission;
 use super::connection::{
     runs_column_set, touch_write_meta, unix_now, validate_schema,
     with_write_store,
@@ -866,6 +867,12 @@ fn apply_event_projection(
                 event.attempt as i64
             ],
         )?;
+        if target.is_terminal() {
+            // Settling releases the run's admission slot by leaving the
+            // unsettled set; a still-waiting record is finalized here so
+            // every settle path (finish, reconcile, stop) records the wait.
+            abandon_waiting_admission(tx, &event.run_id, event.created_ts)?;
+        }
         return Ok(());
     }
     match event.kind {

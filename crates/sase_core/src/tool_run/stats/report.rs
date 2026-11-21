@@ -7,6 +7,9 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::super::admission_wire::{
+    ToolRunAdmissionStateWire, ToolRunAdmittedByWire,
+};
 use super::super::catalog::extra_args_digest;
 use super::super::demand_wire::ToolRunDemandWire;
 use super::super::duration::{sync_wait_budget, SyncWaitBudgetRequestWire};
@@ -365,6 +368,7 @@ fn tool_entry(
         trend_section(rows, &bare, since_ts, now_ts, utc_offset_seconds);
     let repeats = repeats_section(rows, now_ts);
     let demand = demand_section(rows);
+    let admission = admission_section(rows);
     let stage_entries = stage_section(stages);
     let backtest = backtest_section(
         &bare_points(prior_rows, empty_extra_args_digest),
@@ -388,6 +392,7 @@ fn tool_entry(
         trend,
         repeats,
         demand,
+        admission,
         stages: stage_entries,
         backtest,
         stage_backtests,
@@ -744,6 +749,42 @@ fn repeat_key(row: &StatsRunRow) -> Option<String> {
         row.extra_args_digest,
         canonical.digest,
     ))
+}
+
+fn admission_section(
+    rows: &[(&StatsRunRow, Option<i64>)],
+) -> ToolRunStatsAdmissionWire {
+    let mut summary = ToolRunStatsAdmissionWire::default();
+    let mut waits: Vec<u64> = Vec::new();
+    for (row, _) in rows {
+        let Some(record) = row
+            .demand
+            .as_ref()
+            .and_then(|demand| demand.admission.as_ref())
+        else {
+            continue;
+        };
+        summary.runs += 1;
+        if record.admitted_by == Some(ToolRunAdmittedByWire::MaxWait) {
+            summary.forced += 1;
+        }
+        if record.state == ToolRunAdmissionStateWire::Abandoned {
+            summary.abandoned += 1;
+        }
+        let Some(wait_ms) = record.wait_ms else {
+            continue;
+        };
+        waits.push(wait_ms);
+        summary.wait_ms_total = summary.wait_ms_total.saturating_add(wait_ms);
+        if wait_ms > 0 {
+            summary.waits += 1;
+        }
+    }
+    waits.sort_unstable();
+    summary.wait_ms_p50 = percentile_u64(&waits, 0.50);
+    summary.wait_ms_p95 = percentile_u64(&waits, 0.95);
+    summary.wait_ms_max = waits.last().copied();
+    summary
 }
 
 fn demand_section(

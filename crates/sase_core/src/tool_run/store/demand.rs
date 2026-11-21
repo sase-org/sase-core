@@ -106,6 +106,7 @@ pub fn record_demand(
             usage: None,
             worker_grants: Vec::new(),
             diagnostics: Vec::new(),
+            admission: None,
         });
         let before = demand.clone();
         let mut call_diagnostics = Vec::new();
@@ -177,6 +178,7 @@ pub fn record_demand(
             usage: None,
             worker_grants: Vec::new(),
             diagnostics: Vec::new(),
+            admission: None,
         });
         tx.commit()?;
         Ok(ToolRunRecordDemandResultWire {

@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::super::admission_wire::ToolRunAdmissionViewWire;
 use super::super::wire::{ToolRunStateWire, TOOL_RUN_WIRE_SCHEMA_VERSION};
 
 fn schema_version() -> u32 {
@@ -156,6 +157,10 @@ pub struct ToolRunGlanceWire {
     pub typical_samples: u32,
     #[serde(default)]
     pub stop_requested: bool,
+    /// Host-wide admission state and live queue position; absent for runs
+    /// with no admission record and for settled runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<ToolRunAdmissionViewWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,6 +264,10 @@ pub struct ToolRunBriefWire {
     pub detail_pruned: bool,
     #[serde(default)]
     pub stop_requested: bool,
+    /// Host-wide admission state and live queue position for an unsettled
+    /// run; absent otherwise. `tool_run_detail` carries it on `brief`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<ToolRunAdmissionViewWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

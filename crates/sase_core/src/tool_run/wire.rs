@@ -1021,6 +1021,10 @@ pub struct ToolRunShowResultWire {
     pub samples: Vec<ToolLoadSampleWire>,
     #[serde(default = "empty_diagnostics")]
     pub diagnostics: Vec<String>,
+    /// Live queue position for an unsettled run with an admission record;
+    /// the stored record itself stays at `run.demand.admission`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<super::admission_wire::ToolRunAdmissionViewWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
