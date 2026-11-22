@@ -1508,6 +1508,44 @@ fn strict_axe_validation_rejects_invalid_wait_runners() {
 }
 
 #[test]
+fn strict_axe_validation_accepts_positive_or_missing_max_concurrent_jobs() {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "config": {"axe": {"routines": {
+                "serial": {"max_concurrent_jobs": 1},
+                "wide": {"max_concurrent_jobs": 16},
+                "default": {}
+            }}}
+        }))
+        .unwrap();
+
+    assert_eq!(validate_axe_config(&request).unwrap(), vec![]);
+}
+
+#[test]
+fn strict_axe_validation_rejects_invalid_max_concurrent_jobs() {
+    for value in [json!(0), json!(-1), json!("4"), json!(1.5)] {
+        let request: AxeConfigValidationRequestWire =
+            serde_json::from_value(json!({
+                "schema_version": 1,
+                "config": {"axe": {"lumberjacks": {"housekeeping": {
+                    "max_concurrent_jobs": value
+                }}}}
+            }))
+            .unwrap();
+
+        let diagnostics = validate_axe_config(&request).unwrap();
+        assert_eq!(diagnostics.len(), 1, "{value}: {diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "non_positive_integer");
+        assert_eq!(
+            diagnostics[0].path.as_deref(),
+            Some("axe.lumberjacks.housekeeping.max_concurrent_jobs")
+        );
+    }
+}
+
+#[test]
 fn strict_axe_validation_rejects_blank_descriptions() {
     let request: AxeConfigValidationRequestWire =
         serde_json::from_value(json!({

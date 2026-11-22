@@ -33,6 +33,7 @@ const LUMBERJACK_KEYS: &[&str] = &[
     "chop_timeout",
     "job_timeout",
     "wait_runners",
+    "max_concurrent_jobs",
     "chops",
     "jobs",
     "env",
@@ -359,6 +360,14 @@ fn validate_lumberjacks(
                 request,
                 wait_runners,
                 &child_path(&lumberjack_path, "wait_runners"),
+                diagnostics,
+            );
+        }
+        if let Some(max_concurrent) = config.get("max_concurrent_jobs") {
+            validate_positive_integer(
+                request,
+                max_concurrent,
+                &child_path(&lumberjack_path, "max_concurrent_jobs"),
                 diagnostics,
             );
         }
