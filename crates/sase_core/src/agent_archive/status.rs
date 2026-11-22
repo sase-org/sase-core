@@ -4,7 +4,8 @@
 //! status-bucket match from `sase.agent.status_buckets` into the core so the
 //! archive corpus and every frontend derive the same bucket. Callers pass the
 //! canonical status text (Python strips presentation glyphs first); the match
-//! itself is case-sensitive and adds no statuses beyond the live table.
+//! itself is case-sensitive. The live table now delegates here for the
+//! `NOT ADOPTED` word.
 
 /// Map a canonical agent status to its live status bucket.
 ///
@@ -22,6 +23,7 @@ pub fn status_bucket_for_status(canonical_status: &str) -> &'static str {
         | "ANSWERED" | "ESCALATED" | "CONTINUED" => "Running",
         "QUEUED" => "Queued",
         "WAITING" => "Waiting",
+        "NOT ADOPTED" => "Failed",
         _ if canonical_status == "PLAN FAILED"
             || canonical_status == "EPIC FAILED"
             || canonical_status.starts_with("FAILED") =>
@@ -109,6 +111,12 @@ mod tests {
         for status in ["FAILED", "FAILED RETRY", "PLAN FAILED", "EPIC FAILED"] {
             assert_eq!(status_bucket_for_status(status), "Failed", "{status}");
         }
+    }
+
+    #[test]
+    fn not_adopted_buckets_as_failed() {
+        assert_eq!(status_bucket_for_status("NOT ADOPTED"), "Failed");
+        assert_eq!(archive_outcome_for_status("NOT ADOPTED"), "failed");
     }
 
     #[test]

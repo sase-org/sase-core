@@ -919,3 +919,90 @@ fn schema_v37_revalidates_process_identity_projections() {
         Some("boot:100")
     );
 }
+
+#[test]
+fn schema_v39_reprojects_held_monitor_turns() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let dir = artifact(&projects, "20260827090200");
+    write_json(
+        &dir.join("agent_meta.json"),
+        json!({
+            "name": "held-monitor",
+            "monitor_id": "mon-held",
+            "monitor_state": "staged",
+            "monitor_stage_held": true
+        }),
+    );
+    let plain_staged = artifact(&projects, "20260827090201");
+    write_json(
+        &plain_staged.join("agent_meta.json"),
+        json!({
+            "name": "staged-monitor",
+            "monitor_id": "mon-staged",
+            "monitor_state": "staged"
+        }),
+    );
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    // Model a v38 row cached before the held projection existed: the
+    // durable files are unchanged but the cached turn still reads staged.
+    let conn = Connection::open(&index).unwrap();
+    let record_json: String = conn
+        .query_row(
+            "SELECT record_json FROM agent_artifacts WHERE artifact_dir = ?1",
+            [dir.to_string_lossy().as_ref()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut record: serde_json::Value =
+        serde_json::from_str(&record_json).unwrap();
+    record["agent_meta"]["agent_session_turn"]["state"] =
+        serde_json::json!("staged");
+    conn.execute(
+        "UPDATE agent_artifacts SET record_json = ?1 WHERE artifact_dir = ?2",
+        params![record.to_string(), dir.to_string_lossy().as_ref()],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE meta SET value = '38' WHERE key = 'schema_version'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    drop(open_index(&index).unwrap());
+    let refreshed = query_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactIndexQueryWire::default(),
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    // The v39 migration rewrites the cached projection in place, so no
+    // rescan is needed and every signature still matches.
+    assert_eq!(refreshed.stats.rows_repaired, 0);
+    assert_eq!(refreshed.records.len(), 2);
+    let turn = refreshed.records[0]
+        .agent_meta
+        .as_ref()
+        .unwrap()
+        .agent_session_turn
+        .as_ref()
+        .unwrap();
+    assert_eq!(turn.state.as_deref(), Some("held"));
+    let plain_turn = refreshed.records[1]
+        .agent_meta
+        .as_ref()
+        .unwrap()
+        .agent_session_turn
+        .as_ref()
+        .unwrap();
+    assert_eq!(plain_turn.state.as_deref(), Some("staged"));
+}

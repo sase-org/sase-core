@@ -322,6 +322,9 @@ pub(super) fn open_index_with_busy_timeout(
         )?;
         migrate_lookup_session_projection_v38(&mut conn)?;
     }
+    if prior_version.is_none_or(|v| v < 39) {
+        migrate_held_monitor_projection_v39(&mut conn)?;
+    }
     conn.execute_batch(&format!(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_session \
          ON agent_artifacts(agent_session, timestamp); \
@@ -949,6 +952,119 @@ pub(super) fn migrate_process_identity_projection_v37(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// v39 re-projects cached `staged` monitor turns as `held` where the
+/// source `agent_meta.json` still says `staged` with a truthy
+/// `monitor_stage_held` flag.
+///
+/// Unlike the signature-invalidating migrations, this rewrites
+/// `record_json` in place and leaves every file signature and indexed
+/// column untouched (no indexed column derives from the turn state), so
+/// the fast lookup path keeps serving rows without waiting for a
+/// revalidating scan.
+pub(super) fn migrate_held_monitor_projection_v39(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    let rows: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT artifact_dir, record_json FROM agent_artifacts")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let mut collected = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            collected.push((
+                row.get::<_, String>(0).map_err(|e| e.to_string())?,
+                row.get::<_, String>(1).map_err(|e| e.to_string())?,
+            ));
+        }
+        collected
+    };
+    let updates: Vec<(String, String)> = rows
+        .into_iter()
+        .filter_map(|(artifact_dir, record_json)| {
+            let mut record: serde_json::Value =
+                serde_json::from_str(&record_json).ok()?;
+            let turn = record.get("agent_meta")?.get("agent_session_turn")?;
+            if turn.get("kind")?.as_str()? != "monitor"
+                || turn.get("state")?.as_str()? != "staged"
+            {
+                return None;
+            }
+            if !held_flag_in_meta_file(&artifact_dir) {
+                return None;
+            }
+            record
+                .get_mut("agent_meta")?
+                .get_mut("agent_session_turn")?
+                .as_object_mut()?
+                .insert(
+                    "state".to_string(),
+                    serde_json::Value::String("held".to_string()),
+                );
+            Some((artifact_dir, record.to_string()))
+        })
+        .collect();
+    for (artifact_dir, record_json) in &updates {
+        conn.execute(
+            "UPDATE agent_artifacts SET record_json = ?1 \
+             WHERE artifact_dir = ?2",
+            params![record_json, artifact_dir],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Whether `<artifact_dir>/agent_meta.json` still describes a staged
+/// monitor member with a truthy `monitor_stage_held` flag, mirroring the
+/// scanner's nested and flat turn shapes.
+fn held_flag_in_meta_file(artifact_dir: &str) -> bool {
+    let Ok(text) =
+        fs::read_to_string(PathBuf::from(artifact_dir).join("agent_meta.json"))
+    else {
+        return false;
+    };
+    let Ok(serde_json::Value::Object(data)) =
+        serde_json::from_str::<serde_json::Value>(&text)
+    else {
+        return false;
+    };
+    let nested_state = data
+        .get("agent_session_turn")
+        .or_else(|| data.get("agent_session_shell"))
+        .or_else(|| data.get("family_shell"))
+        .and_then(|value| value.as_object())
+        .filter(|nested| {
+            nested.get("kind").and_then(|kind| kind.as_str()) == Some("monitor")
+        })
+        .and_then(|nested| nested.get("state"))
+        .and_then(|state| state.as_str());
+    let raw_state = match nested_state {
+        Some(state) => Some(state),
+        None => data.get("monitor_state").and_then(|value| value.as_str()),
+    };
+    if raw_state != Some("staged") {
+        return false;
+    }
+    json_truthy(data.get("monitor_stage_held"))
+}
+
+/// Python `bool(x)` semantics for a durable flag value, mirroring the
+/// scanner's truthiness coercion.
+fn json_truthy(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(flag)) => *flag,
+        Some(serde_json::Value::Number(number)) => {
+            number.as_i64().is_some_and(|value| value != 0)
+                || number.as_u64().is_some_and(|value| value != 0)
+                || number.as_f64().is_some_and(|value| value != 0.0)
+        }
+        Some(serde_json::Value::String(text)) => !text.is_empty(),
+        Some(serde_json::Value::Array(items)) => !items.is_empty(),
+        Some(serde_json::Value::Object(fields)) => !fields.is_empty(),
+    }
 }
 
 /// v38 backfills the dedicated `lookup_session` projection used by

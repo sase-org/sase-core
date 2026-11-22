@@ -56,6 +56,7 @@ use crate::project_spec::{
 use crate::queue_directive::{
     authored_queue_weight_is_valid, queue_weight_is_valid,
 };
+use crate::staged_handoff::project_monitor_turn_state;
 use crate::AgentRecoveryWire;
 
 const USED_MACROS_FILE: &str = "macros.json";
@@ -2493,9 +2494,17 @@ fn agent_session_turn_from_object(
     data: &Map<String, Value>,
 ) -> Option<AgentSessionTurnWire> {
     if let Some(nested) = nested_turn_object(data) {
-        if let Ok(turn) = serde_json::from_value::<AgentSessionTurnWire>(
+        if let Ok(mut turn) = serde_json::from_value::<AgentSessionTurnWire>(
             Value::Object(nested.clone()),
         ) {
+            if turn.kind == "monitor" {
+                let stage_held =
+                    coerce_bool_truthy(data.get("monitor_stage_held"));
+                turn.state = project_monitor_turn_state(
+                    turn.state.as_deref(),
+                    stage_held,
+                );
+            }
             return Some(turn);
         }
     }
@@ -2512,7 +2521,10 @@ fn agent_session_turn_from_object(
         return Some(AgentSessionTurnWire {
             kind: "monitor".to_string(),
             id: coerce_str(data.get("monitor_id")),
-            state: coerce_str(data.get("monitor_state")),
+            state: project_monitor_turn_state(
+                coerce_str(data.get("monitor_state")).as_deref(),
+                coerce_bool_truthy(data.get("monitor_stage_held")),
+            ),
             label: coerce_str(data.get("monitor_label")),
             reason: coerce_str(data.get("monitor_reason")),
             start_status: coerce_str(data.get("monitor_start_status")),
@@ -3184,6 +3196,123 @@ mod tests {
         let turn = meta.agent_session_turn.as_ref().unwrap();
         assert_eq!(turn.id.as_deref(), Some("oldmon"));
         assert_eq!(turn.next_model, None);
+    }
+
+    #[test]
+    fn scanner_projects_held_for_staged_with_flag() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let held = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260822120201");
+        let staged = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260822120202");
+        let readopted = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260822120203");
+        write_json(
+            &held.join("agent_meta.json"),
+            json!({
+                "name": "held-monitor",
+                "monitor_id": "mon-held",
+                "monitor_state": "staged",
+                "monitor_stage_held": true
+            }),
+        );
+        write_json(
+            &staged.join("agent_meta.json"),
+            json!({
+                "name": "staged-monitor",
+                "monitor_id": "mon-staged",
+                "monitor_state": "staged"
+            }),
+        );
+        write_json(
+            &readopted.join("agent_meta.json"),
+            json!({
+                "name": "readopted-monitor",
+                "monitor_id": "mon-running",
+                "monitor_state": "running",
+                "monitor_stage_held": true
+            }),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        assert_eq!(snapshot.records.len(), 3);
+        let held_turn = snapshot.records[0]
+            .agent_meta
+            .as_ref()
+            .unwrap()
+            .agent_session_turn
+            .as_ref()
+            .unwrap();
+        assert_eq!(held_turn.kind, "monitor");
+        assert_eq!(held_turn.state.as_deref(), Some("held"));
+        let staged_turn = snapshot.records[1]
+            .agent_meta
+            .as_ref()
+            .unwrap()
+            .agent_session_turn
+            .as_ref()
+            .unwrap();
+        assert_eq!(staged_turn.state.as_deref(), Some("staged"));
+        let running_turn = snapshot.records[2]
+            .agent_meta
+            .as_ref()
+            .unwrap()
+            .agent_session_turn
+            .as_ref()
+            .unwrap();
+        assert_eq!(running_turn.state.as_deref(), Some("running"));
+    }
+
+    #[test]
+    fn scanner_projects_held_for_nested_turn_shape() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260822120204");
+        write_json(
+            &artifact.join("agent_meta.json"),
+            json!({
+                "name": "nested-held",
+                "monitor_stage_held": true,
+                "agent_session_turn": {
+                    "kind": "monitor",
+                    "id": "mon-nested",
+                    "state": "staged"
+                }
+            }),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        assert_eq!(snapshot.records.len(), 1);
+        let turn = snapshot.records[0]
+            .agent_meta
+            .as_ref()
+            .unwrap()
+            .agent_session_turn
+            .as_ref()
+            .unwrap();
+        assert_eq!(turn.kind, "monitor");
+        assert_eq!(turn.id.as_deref(), Some("mon-nested"));
+        assert_eq!(turn.state.as_deref(), Some("held"));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use super::{
     evaluate_recovery_decision, evaluate_stage_admission,
     evaluate_staged_monitor_membership, evaluate_staged_owner_liveness,
     evaluate_staged_self_wait, gate_staged_payload_schema_version,
-    receipt_authorizes, receipt_transition_allowed,
+    project_monitor_turn_state, receipt_authorizes, receipt_transition_allowed,
     recovery_adoption_lock_filename, recovery_context_wire_schema_version,
     staged_handoff_wire_schema_version,
     staged_monitor_launch_payload_schema_version, validate_gate_staged_payload,
@@ -820,6 +820,59 @@ fn running_membership_preserves_current_behavior() {
     assert!(facts.blocks_lane_start);
     assert!(facts.has_supervisor);
     assert!(facts.occupies_runner_capacity);
+}
+
+#[test]
+fn held_membership_matches_staged() {
+    let facts = evaluate_staged_monitor_membership(membership("held", false))
+        .expect("held membership");
+    assert!(facts.nonterminal);
+    assert!(facts.blocks_lane_start);
+    assert!(!facts.has_supervisor);
+    assert!(!facts.occupies_runner_capacity);
+}
+
+#[test]
+fn held_membership_refuses_a_supervisor() {
+    assert!(
+        evaluate_staged_monitor_membership(membership("held", true)).is_err(),
+        "held monitors never spawn a supervisor"
+    );
+}
+
+#[test]
+fn project_monitor_turn_state_holds_staged_with_flag() {
+    assert_eq!(
+        project_monitor_turn_state(Some("staged"), true).as_deref(),
+        Some("held"),
+        "staged plus the held flag projects as held"
+    );
+    assert_eq!(
+        project_monitor_turn_state(Some("staged"), false).as_deref(),
+        Some("staged"),
+        "staged without the flag stays staged"
+    );
+    assert_eq!(
+        project_monitor_turn_state(Some("running"), true).as_deref(),
+        Some("running"),
+        "a stale held flag on running is ignored"
+    );
+    for state in [
+        "completed",
+        "failed",
+        "timeout",
+        "stopped",
+        "lost",
+        "pending",
+    ] {
+        assert_eq!(
+            project_monitor_turn_state(Some(state), true).as_deref(),
+            Some(state),
+            "terminal and other states are unchanged ({state})"
+        );
+    }
+    assert_eq!(project_monitor_turn_state(None, true), None);
+    assert_eq!(project_monitor_turn_state(None, false), None);
 }
 
 #[test]

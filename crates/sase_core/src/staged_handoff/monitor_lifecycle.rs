@@ -3,9 +3,11 @@
 //!
 //! A `staged` monitor member is durable intent, not a running process: it
 //! is nonterminal, blocks another lane start, has no supervisor, and
-//! occupies no runner capacity. These predicates preserve current
-//! running/terminal behavior and only add the staged facts; they are not a
-//! general monitor-domain migration.
+//! occupies no runner capacity. A `held` member is the same durable
+//! intent after the host refused to adopt it: `staged` plus the
+//! `monitor_stage_held` flag, with exactly the `staged` membership facts.
+//! These predicates preserve current running/terminal behavior and only
+//! add the staged facts; they are not a general monitor-domain migration.
 //!
 //! Owner liveness and self-wait answers fail closed. Unknown or corrupt
 //! facts are never proof that a command ran or that a reservation may be
@@ -19,9 +21,29 @@ use super::wire::STAGED_HANDOFF_WIRE_SCHEMA_VERSION;
 
 /// Monitor states the membership decision accepts.
 const STATE_STAGED: &str = "staged";
+/// Projected state for a staged member the host refused to adopt.
+const STATE_HELD: &str = "held";
 const STATE_RUNNING: &str = "running";
 const TERMINAL_STATES: &[&str] =
     &["completed", "failed", "timeout", "stopped", "lost"];
+
+/// Project a monitor turn state from durable monitor facts.
+///
+/// A `staged` member whose `monitor_stage_held` flag is truthy was refused
+/// adoption by the host and projects as `held`. A stale held flag on any
+/// other state (for example `running` after a readopt) is ignored.
+pub fn project_monitor_turn_state(
+    monitor_state: Option<&str>,
+    stage_held: bool,
+) -> Option<String> {
+    match monitor_state {
+        Some(state) if state == STATE_STAGED && stage_held => {
+            Some(STATE_HELD.to_string())
+        }
+        Some(state) => Some(state.to_string()),
+        None => None,
+    }
+}
 
 /// Host observations for one staged-monitor membership decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,7 +75,7 @@ pub fn evaluate_staged_monitor_membership(
         ));
     }
     let state = request.monitor_state.as_str();
-    if state == STATE_STAGED {
+    if state == STATE_STAGED || state == STATE_HELD {
         if request.supervisor_present {
             return Err(StagedHandoffError::Invalid(
                 "staged monitors have no supervisor".to_string(),

@@ -14,6 +14,7 @@ use sase_core::staged_handoff::{
     evaluate_staged_owner_liveness as core_evaluate_liveness,
     evaluate_staged_self_wait as core_evaluate_self_wait,
     gate_staged_payload_schema_version as core_gate_payload_version,
+    project_monitor_turn_state as core_project_monitor_state,
     receipt_authorizes as core_receipt_authorizes,
     receipt_transition_allowed as core_receipt_transition,
     recovery_adoption_lock_filename as core_adoption_lock_filename,
@@ -207,6 +208,21 @@ fn py_evaluate_staged_self_wait<'py>(
     serialize_to_py(py, &decision)
 }
 
+/// Project a monitor turn state from durable monitor facts.
+///
+/// A `staged` state with a truthy held flag projects as `held`; every
+/// other state passes through unchanged. Filesystem fallback loaders call
+/// this so both load paths agree.
+#[pyfunction]
+#[pyo3(name = "project_monitor_turn_state")]
+#[pyo3(signature = (monitor_state = None, stage_held = false))]
+fn py_project_monitor_turn_state(
+    monitor_state: Option<String>,
+    stage_held: bool,
+) -> Option<String> {
+    core_project_monitor_state(monitor_state.as_deref(), stage_held)
+}
+
 /// Return the recovery-context wire schema version.
 #[pyfunction]
 #[pyo3(name = "recovery_context_wire_schema_version")]
@@ -295,6 +311,7 @@ pub(crate) fn register_staged_handoff(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_staged_owner_liveness, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_staged_self_wait, m)?)?;
+    m.add_function(wrap_pyfunction!(py_project_monitor_turn_state, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_recovery_context_wire_schema_version,
         m

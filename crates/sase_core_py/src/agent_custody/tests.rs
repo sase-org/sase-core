@@ -216,6 +216,7 @@ fn status_bucket_binding_round_trips_canonical_text() {
             ("EPIC CREATED", "Done"),
             ("FAILED", "Failed"),
             ("PLAN FAILED", "Failed"),
+            ("NOT ADOPTED", "Failed"),
             ("RUNNING", "Running"),
             ("WAITING", "Waiting"),
             ("QUESTION", "Stopped"),

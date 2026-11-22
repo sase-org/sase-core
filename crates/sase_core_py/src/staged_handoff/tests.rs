@@ -39,6 +39,7 @@ fn staged_handoff_bindings_are_registered() {
             "evaluate_staged_monitor_membership",
             "evaluate_staged_owner_liveness",
             "evaluate_staged_self_wait",
+            "project_monitor_turn_state",
             "recovery_context_wire_schema_version",
             "recovery_adoption_lock_filename",
             "validate_recovery_context",
@@ -361,6 +362,27 @@ fn membership_liveness_self_wait_bindings_decide() {
         assert_eq!(value["is_self_wait"], serde_json::json!(true));
     });
 }
+#[test]
+fn project_monitor_turn_state_binding_projects_held() {
+    pyo3::prepare_freethreaded_python();
+    assert_eq!(
+        py_project_monitor_turn_state(Some("staged".to_string()), true)
+            .as_deref(),
+        Some("held")
+    );
+    assert_eq!(
+        py_project_monitor_turn_state(Some("staged".to_string()), false)
+            .as_deref(),
+        Some("staged")
+    );
+    assert_eq!(
+        py_project_monitor_turn_state(Some("running".to_string()), true)
+            .as_deref(),
+        Some("running")
+    );
+    assert_eq!(py_project_monitor_turn_state(None, true), None);
+}
+
 #[test]
 fn reconciliation_binding_is_registered_and_cursor_round_trips() {
     pyo3::prepare_freethreaded_python();
