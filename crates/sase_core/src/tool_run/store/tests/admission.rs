@@ -141,16 +141,52 @@ fn poll(path: &Path, run_id: &str, now_ms: i64) -> ToolRunAdmissionResultWire {
     poll_at(path, run_id, Some(now_ms), BUSY).unwrap()
 }
 
-fn force(path: &Path, run_id: &str, now_ms: i64) -> ToolRunAdmissionResultWire {
+fn force_request(
+    path: &Path,
+    run_id: &str,
+    reason: ToolRunAdmissionForceReasonWire,
+    now_ms: i64,
+    key: Option<&str>,
+    limit: Option<u32>,
+) -> Result<ToolRunAdmissionResultWire, ToolRunError> {
     admission_force(
         path,
         ToolRunAdmissionForceRequestWire {
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: run_id.into(),
-            reason: ToolRunAdmissionForceReasonWire::MaxWait,
+            reason,
             now_ms: Some(now_ms),
+            key: key.map(str::to_string),
+            limit,
         },
         BUSY,
+    )
+}
+
+fn force(path: &Path, run_id: &str, now_ms: i64) -> ToolRunAdmissionResultWire {
+    force_request(
+        path,
+        run_id,
+        ToolRunAdmissionForceReasonWire::MaxWait,
+        now_ms,
+        None,
+        None,
+    )
+    .unwrap()
+}
+
+fn force_unavailable(
+    path: &Path,
+    run_id: &str,
+    now_ms: i64,
+) -> ToolRunAdmissionResultWire {
+    force_request(
+        path,
+        run_id,
+        ToolRunAdmissionForceReasonWire::Unavailable,
+        now_ms,
+        None,
+        None,
     )
     .unwrap()
 }
@@ -641,6 +677,229 @@ fn force_admits_over_the_limit_and_counts_as_a_holder() {
     succeed(&path, &forced);
     assert_eq!(
         poll(&path, &later, T0_MS + 3_604_000).outcome,
+        ToolRunAdmissionOutcomeWire::Admitted
+    );
+}
+
+#[test]
+fn unavailable_recovery_counts_as_a_holder_and_is_not_abandoned() {
+    let (_temp, path) = store();
+    let holder = begin_run(&path, "sase");
+    let bypass = begin_run(&path, "sase");
+    let later = begin_run(&path, "sase");
+    enter(&path, &holder, 1, T0_MS);
+    enter(&path, &bypass, 1, T0_MS + 1_000);
+
+    // Fail-open at T0+5s; a later recovery write must keep that stamp.
+    let bypass_at = T0_MS + 5_000;
+    let result = force_unavailable(&path, &bypass, bypass_at);
+    assert_eq!(result.outcome, ToolRunAdmissionOutcomeWire::Admitted);
+    assert!(result.changed);
+    assert_eq!(result.holders.len(), 2);
+    let record = result.admission.clone().unwrap();
+    assert_eq!(record.state, ToolRunAdmissionStateWire::Admitted);
+    assert_eq!(record.admitted_by, Some(ToolRunAdmittedByWire::Unavailable));
+    assert_eq!(record.admitted_ts_ms, Some(bypass_at));
+    assert_eq!(record.wait_ms, Some(4_000));
+    assert_eq!(record.requested_ts_ms, T0_MS + 1_000);
+    let view = show(&path, &bypass).admission.unwrap();
+    assert_eq!(view.state, ToolRunAdmissionStateWire::Admitted);
+    assert_eq!(view.admitted_by, Some(ToolRunAdmittedByWire::Unavailable));
+    assert_eq!(view.holders, 2);
+    assert_eq!(view.ahead, 0);
+
+    // Duplicate recovery at a later clock does not move the stamp or
+    // overwrite the reason.
+    let again = force_unavailable(&path, &bypass, T0_MS + 60_000);
+    assert!(!again.changed);
+    let again_record = again.admission.unwrap();
+    assert_eq!(
+        again_record.admitted_by,
+        Some(ToolRunAdmittedByWire::Unavailable)
+    );
+    assert_eq!(again_record.admitted_ts_ms, Some(bypass_at));
+    assert_eq!(again_record.wait_ms, Some(4_000));
+
+    // A later waiter respects the bypass holder.
+    let queued = enter(&path, &later, 1, T0_MS + 6_000);
+    assert_eq!(queued.outcome, ToolRunAdmissionOutcomeWire::Waiting);
+    assert_eq!(queued.ahead, 1);
+    succeed(&path, &holder);
+    let still = poll(&path, &later, T0_MS + 7_000);
+    assert_eq!(still.outcome, ToolRunAdmissionOutcomeWire::Waiting);
+    assert_eq!(still.ahead, 0);
+
+    // Demand merges keep the bypass evidence.
+    let merged = record_demand(&path, demand_request(&bypass), BUSY).unwrap();
+    assert_eq!(
+        merged.demand.admission.as_ref().unwrap().admitted_by,
+        Some(ToolRunAdmittedByWire::Unavailable)
+    );
+
+    // Finish preserves the bypass; the executed child is not abandoned.
+    succeed(&path, &bypass);
+    let finished = stored_record(&path, &bypass).unwrap();
+    assert_eq!(finished.state, ToolRunAdmissionStateWire::Admitted);
+    assert_eq!(
+        finished.admitted_by,
+        Some(ToolRunAdmittedByWire::Unavailable)
+    );
+    assert_eq!(finished.admitted_ts_ms, Some(bypass_at));
+    assert_eq!(finished.wait_ms, Some(4_000));
+    let shown = show(&path, &bypass);
+    assert!(shown.admission.is_none());
+    assert_eq!(
+        poll(&path, &later, T0_MS + 8_000).outcome,
+        ToolRunAdmissionOutcomeWire::Admitted
+    );
+}
+
+#[test]
+fn unavailable_recovery_does_not_overwrite_a_slot_or_max_wait_grant() {
+    let (_temp, path) = store();
+    let slot = begin_run(&path, "sase");
+    let forced = begin_run(&path, "sase");
+    enter(&path, &slot, 1, T0_MS);
+    enter(&path, &forced, 1, T0_MS + 1_000);
+    force(&path, &forced, T0_MS + 3_000);
+
+    let slot_again = force_unavailable(&path, &slot, T0_MS + 9_000);
+    assert!(!slot_again.changed);
+    assert_eq!(
+        slot_again.admission.unwrap().admitted_by,
+        Some(ToolRunAdmittedByWire::Slot)
+    );
+    assert_eq!(
+        stored_record(&path, &slot).unwrap().admitted_ts_ms,
+        Some(T0_MS)
+    );
+
+    let forced_again = force_unavailable(&path, &forced, T0_MS + 9_000);
+    assert!(!forced_again.changed);
+    let record = stored_record(&path, &forced).unwrap();
+    assert_eq!(record.admitted_by, Some(ToolRunAdmittedByWire::MaxWait));
+    assert_eq!(record.admitted_ts_ms, Some(T0_MS + 3_000));
+    assert_eq!(record.wait_ms, Some(2_000));
+}
+
+#[test]
+fn unavailable_seeds_a_holder_when_the_run_never_entered() {
+    let (_temp, path) = store();
+    let bypass = begin_run(&path, "sase");
+    let waiter = begin_run(&path, "sase");
+    let bypass_at = T0_MS + 30_000;
+    let seeded = force_request(
+        &path,
+        &bypass,
+        ToolRunAdmissionForceReasonWire::Unavailable,
+        bypass_at,
+        Some("check"),
+        Some(1),
+    )
+    .unwrap();
+    assert_eq!(seeded.outcome, ToolRunAdmissionOutcomeWire::Admitted);
+    assert!(seeded.changed);
+    let record = seeded.admission.unwrap();
+    assert_eq!(record.admitted_by, Some(ToolRunAdmittedByWire::Unavailable));
+    assert_eq!(record.requested_ts_ms, bypass_at);
+    assert_eq!(record.admitted_ts_ms, Some(bypass_at));
+    assert_eq!(record.wait_ms, Some(0));
+    assert_eq!(record.key, "check");
+    assert_eq!(record.limit, 1);
+
+    // Key falls back to the run's tool_name when omitted.
+    let other = begin_run(&path, "tailnet");
+    let inferred = force_request(
+        &path,
+        &other,
+        ToolRunAdmissionForceReasonWire::Unavailable,
+        bypass_at,
+        None,
+        Some(1),
+    )
+    .unwrap();
+    assert_eq!(inferred.admission.unwrap().key, "check");
+
+    let queued = enter(&path, &waiter, 1, T0_MS + 31_000);
+    assert_eq!(queued.outcome, ToolRunAdmissionOutcomeWire::Waiting);
+    assert_eq!(queued.holders.len(), 2);
+
+    // Seeding without a limit is refused; max_wait still needs a record.
+    let fresh = begin_run(&path, "sase");
+    let missing_limit = force_request(
+        &path,
+        &fresh,
+        ToolRunAdmissionForceReasonWire::Unavailable,
+        bypass_at,
+        Some("check"),
+        None,
+    )
+    .unwrap_err();
+    assert!(missing_limit.to_string().contains("needs a limit"));
+    let missing_record = force_request(
+        &path,
+        &fresh,
+        ToolRunAdmissionForceReasonWire::MaxWait,
+        bypass_at,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(missing_record.to_string().contains("no admission record"));
+}
+
+#[test]
+fn force_settled_or_missing_does_not_grant() {
+    let (_temp, path) = store();
+    let waiting = begin_run(&path, "sase");
+    let holder = begin_run(&path, "sase");
+    enter(&path, &holder, 1, T0_MS);
+    enter(&path, &waiting, 1, T0_MS + 1_000);
+    finish_as(&path, &waiting, ToolRunStateWire::Signaled, Some(T0_S + 10));
+    let abandoned = stored_record(&path, &waiting).unwrap();
+    assert_eq!(abandoned.state, ToolRunAdmissionStateWire::Abandoned);
+    assert_eq!(abandoned.admitted_by, None);
+
+    for reason in [
+        ToolRunAdmissionForceReasonWire::MaxWait,
+        ToolRunAdmissionForceReasonWire::Unavailable,
+    ] {
+        let settled = force_request(
+            &path,
+            &waiting,
+            reason,
+            T0_MS + 20_000,
+            Some("check"),
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(settled.outcome, ToolRunAdmissionOutcomeWire::Settled);
+        assert!(!settled.changed);
+        let record = stored_record(&path, &waiting).unwrap();
+        assert_eq!(record.state, ToolRunAdmissionStateWire::Abandoned);
+        assert_eq!(record.admitted_by, None);
+        assert_eq!(record.wait_ms, Some(9_000));
+
+        let missing = force_request(
+            &path,
+            "no-such-run",
+            reason,
+            T0_MS,
+            Some("check"),
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(missing.outcome, ToolRunAdmissionOutcomeWire::NotFound);
+        assert!(!missing.changed);
+    }
+
+    // A live waiter is still waiting; the abandoned run did not take a slot.
+    let live = poll(&path, &waiting, T0_MS + 21_000);
+    assert_eq!(live.outcome, ToolRunAdmissionOutcomeWire::Settled);
+    succeed(&path, &holder);
+    let next = begin_run(&path, "sase");
+    assert_eq!(
+        enter(&path, &next, 1, T0_MS + 22_000).outcome,
         ToolRunAdmissionOutcomeWire::Admitted
     );
 }

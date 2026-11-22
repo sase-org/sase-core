@@ -71,7 +71,8 @@ pub(super) fn py_tool_run_admission_poll<'py>(
     telemetry_result_to_py(py, &result)
 }
 
-/// Admit a waiting run over the limit after the caller's max wait.
+/// Admit a waiting run over the limit (`max_wait`) or record an
+/// unavailable fail-open bypass.
 #[pyfunction]
 #[pyo3(
     name = "tool_run_admission_force",

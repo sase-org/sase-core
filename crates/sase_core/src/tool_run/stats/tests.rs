@@ -603,12 +603,13 @@ fn admission_record(
 #[test]
 fn admission_waits_summarize_apart_from_token_waits() {
     use ToolRunAdmissionStateWire::{Abandoned, Admitted, Waiting};
-    use ToolRunAdmittedByWire::{MaxWait, Slot};
+    use ToolRunAdmittedByWire::{MaxWait, Slot, Unavailable};
     let cases = [
         (Admitted, Some(Slot), Some(0)),
         (Admitted, Some(Slot), Some(1_000)),
         (Admitted, Some(Slot), Some(4_000)),
         (Admitted, Some(MaxWait), Some(9_000)),
+        (Admitted, Some(Unavailable), Some(3_000)),
         (Abandoned, None, Some(2_000)),
         // A record still waiting carries no wait yet.
         (Waiting, None, None),
@@ -624,13 +625,14 @@ fn admission_waits_summarize_apart_from_token_waits() {
     assert_eq!(
         group.admission,
         ToolRunStatsAdmissionWire {
-            runs: 6,
-            waits: 4,
-            wait_ms_total: 16_000,
+            runs: 7,
+            waits: 5,
+            wait_ms_total: 19_000,
             wait_ms_p50: Some(2_000),
             wait_ms_p95: Some(9_000),
             wait_ms_max: Some(9_000),
             forced: 1,
+            unavailable: 1,
             abandoned: 1,
         }
     );

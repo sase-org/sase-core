@@ -128,6 +128,76 @@ fn tool_run_admission_bindings_round_trip() {
         assert_eq!(forced["admission"]["admitted_by"], json!("max_wait"));
         assert_eq!(forced["admission"]["wait_ms"], json!(7_000));
 
+        let bypass = begin_check(py, path);
+        let queued_bypass = call(
+            py,
+            py_tool_run_admission_enter,
+            path,
+            json!({
+                "schema_version": 1,
+                "run_id": bypass,
+                "key": "check",
+                "limit": 1,
+                "now_ms": 10_000
+            }),
+        )
+        .unwrap();
+        assert_eq!(queued_bypass["outcome"], json!("waiting"));
+        let unavailable = call(
+            py,
+            py_tool_run_admission_force,
+            path,
+            json!({
+                "schema_version": 1,
+                "run_id": bypass,
+                "reason": "unavailable",
+                "now_ms": 12_000
+            }),
+        )
+        .unwrap();
+        assert_eq!(unavailable["outcome"], json!("admitted"));
+        assert_eq!(
+            unavailable["admission"]["admitted_by"],
+            json!("unavailable")
+        );
+        assert_eq!(unavailable["admission"]["wait_ms"], json!(2_000));
+        let again = call(
+            py,
+            py_tool_run_admission_force,
+            path,
+            json!({
+                "schema_version": 1,
+                "run_id": bypass,
+                "reason": "unavailable",
+                "now_ms": 90_000
+            }),
+        )
+        .unwrap();
+        assert_eq!(again["changed"], json!(false));
+        assert_eq!(again["admission"]["admitted_ts_ms"], json!(12_000));
+
+        let seeded = begin_check(py, path);
+        let seeded_result = call(
+            py,
+            py_tool_run_admission_force,
+            path,
+            json!({
+                "schema_version": 1,
+                "run_id": seeded,
+                "reason": "unavailable",
+                "key": "check",
+                "limit": 1,
+                "now_ms": 13_000
+            }),
+        )
+        .unwrap();
+        assert_eq!(seeded_result["outcome"], json!("admitted"));
+        assert_eq!(
+            seeded_result["admission"]["admitted_by"],
+            json!("unavailable")
+        );
+        assert_eq!(seeded_result["admission"]["wait_ms"], json!(0));
+
         // show carries the stored record plus the live view.
         let shown = call(
             py,
@@ -140,7 +210,22 @@ fn tool_run_admission_bindings_round_trip() {
             shown["run"]["demand"]["admission"]["state"],
             json!("admitted")
         );
-        assert_eq!(shown["admission"]["holders"], json!(2));
+        assert_eq!(
+            shown["run"]["demand"]["admission"]["admitted_by"],
+            json!("max_wait")
+        );
+        assert_eq!(shown["admission"]["holders"], json!(4));
+        let shown_bypass = call(
+            py,
+            py_tool_run_show,
+            path,
+            json!({"schema_version": 1, "run_id": bypass}),
+        )
+        .unwrap();
+        assert_eq!(
+            shown_bypass["admission"]["admitted_by"],
+            json!("unavailable")
+        );
 
         // Unknown request fields are refused.
         let error = call(

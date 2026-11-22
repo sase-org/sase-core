@@ -37,7 +37,8 @@ fn empty_diagnostics() -> Vec<String> {
 pub enum ToolRunAdmissionStateWire {
     /// Recorded and queued; the child has not started.
     Waiting,
-    /// Granted a slot (or forced over the limit); the child may start.
+    /// Granted a slot, forced over the limit, or recorded as an
+    /// unavailable bypass; the child may start.
     Admitted,
     /// Settled while still waiting; the child never started.
     Abandoned,
@@ -61,6 +62,10 @@ pub enum ToolRunAdmittedByWire {
     Slot,
     /// `tool_run_admission_force` after the caller's max wait elapsed.
     MaxWait,
+    /// Fail-open execution after admission became unavailable. Distinct
+    /// from a slot grant and from `max_wait`; still a holder until the
+    /// run settles.
+    Unavailable,
 }
 
 impl ToolRunAdmittedByWire {
@@ -68,6 +73,7 @@ impl ToolRunAdmittedByWire {
         match self {
             Self::Slot => "slot",
             Self::MaxWait => "max_wait",
+            Self::Unavailable => "unavailable",
         }
     }
 }
@@ -129,14 +135,20 @@ pub struct ToolRunAdmissionPollRequestWire {
     pub now_ms: Option<i64>,
 }
 
-/// Why a waiting run is admitted regardless of the limit.
+/// Why a run is admitted regardless of the limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolRunAdmissionForceReasonWire {
     MaxWait,
+    /// The Python wrapper executed after admission became unavailable.
+    /// Pass the pre-spawn bypass time as `now_ms` so a later recovery
+    /// write does not charge child runtime to `wait_ms`.
+    Unavailable,
 }
 
-/// `tool_run_admission_force`: admit a waiting run over the limit.
+/// `tool_run_admission_force`: admit a waiting run over the limit, or
+/// record an unavailable bypass. `key` and `limit` seed a holder when
+/// `reason` is `unavailable` and the run has no admission record yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolRunAdmissionForceRequestWire {
@@ -144,9 +156,18 @@ pub struct ToolRunAdmissionForceRequestWire {
     pub schema_version: u32,
     pub run_id: String,
     pub reason: ToolRunAdmissionForceReasonWire,
-    /// Test clock override, epoch milliseconds.
+    /// Test clock override, epoch milliseconds. For `unavailable`, the
+    /// pre-spawn bypass timestamp so recovery preserves elapsed wait.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub now_ms: Option<i64>,
+    /// Admission key used only to seed an `unavailable` holder when the
+    /// run has no record. Falls back to the run's `tool_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Limit used only to seed an `unavailable` holder when the run has
+    /// no record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

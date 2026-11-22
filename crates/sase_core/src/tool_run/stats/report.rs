@@ -765,8 +765,12 @@ fn admission_section(
             continue;
         };
         summary.runs += 1;
-        if record.admitted_by == Some(ToolRunAdmittedByWire::MaxWait) {
-            summary.forced += 1;
+        match record.admitted_by {
+            Some(ToolRunAdmittedByWire::MaxWait) => summary.forced += 1,
+            Some(ToolRunAdmittedByWire::Unavailable) => {
+                summary.unavailable += 1
+            }
+            Some(ToolRunAdmittedByWire::Slot) | None => {}
         }
         if record.state == ToolRunAdmissionStateWire::Abandoned {
             summary.abandoned += 1;

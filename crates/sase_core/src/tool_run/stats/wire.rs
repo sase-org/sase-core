@@ -372,6 +372,9 @@ pub struct ToolRunStatsAdmissionWire {
     /// Runs admitted over the limit after max wait.
     #[serde(default)]
     pub forced: usize,
+    /// Runs admitted by an unavailable (fail-open) bypass.
+    #[serde(default)]
+    pub unavailable: usize,
     /// Runs that settled while still waiting.
     #[serde(default)]
     pub abandoned: usize,

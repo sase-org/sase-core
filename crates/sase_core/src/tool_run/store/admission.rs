@@ -206,6 +206,7 @@ fn validate_key(key: &str) -> Result<(), ToolRunError> {
 struct TargetRun {
     state: ToolRunStateWire,
     record: Option<ToolRunAdmissionWire>,
+    tool_name: Option<String>,
 }
 
 fn load_target(
@@ -218,20 +219,23 @@ fn load_target(
     } else {
         "NULL"
     };
-    let row: Option<(String, Option<String>)> = conn
+    let row: Option<(String, Option<String>, Option<String>)> = conn
         .query_row(
-            &format!("SELECT state, {demand} FROM runs WHERE run_id = ?1"),
+            &format!(
+                "SELECT state, {demand}, tool_name FROM runs WHERE run_id = ?1"
+            ),
             [run_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some((state, raw)) = row else {
+    let Some((state, raw, tool_name)) = row else {
         return Ok(None);
     };
     Ok(Some(TargetRun {
         state: ToolRunStateWire::from_db(&state)
             .map_err(ToolRunError::store)?,
         record: parse_admission(raw.as_deref()),
+        tool_name,
     }))
 }
 
@@ -612,8 +616,84 @@ pub fn admission_poll(
     })
 }
 
-/// Admit a waiting run regardless of the limit. The forced run counts as a
-/// holder like any other until it settles. Idempotent for admitted runs.
+fn admitted_by_for(
+    reason: ToolRunAdmissionForceReasonWire,
+) -> ToolRunAdmittedByWire {
+    match reason {
+        ToolRunAdmissionForceReasonWire::MaxWait => {
+            ToolRunAdmittedByWire::MaxWait
+        }
+        ToolRunAdmissionForceReasonWire::Unavailable => {
+            ToolRunAdmittedByWire::Unavailable
+        }
+    }
+}
+
+/// Seed an `unavailable` holder for a running run that never entered the
+/// queue, so store recovery still counts this executing command.
+fn seed_unavailable(
+    conn: &Connection,
+    run_id: &str,
+    key: String,
+    limit: u32,
+    now_ms: i64,
+) -> Result<(ToolRunAdmissionWire, Vec<String>), ToolRunError> {
+    validate_key(&key)?;
+    if limit == 0 {
+        return Err(ToolRunError::invalid(
+            "admission limit must be at least 1",
+        ));
+    }
+    let seq = next_seq(conn)?;
+    let record = admitted(
+        ToolRunAdmissionWire {
+            schema_version: TOOL_RUN_ADMISSION_RECORD_SCHEMA_VERSION,
+            key,
+            limit,
+            state: ToolRunAdmissionStateWire::Waiting,
+            admitted_by: None,
+            seq,
+            requested_ts_ms: now_ms,
+            admitted_ts_ms: None,
+            wait_ms: None,
+            ahead_at_request: 0,
+        },
+        ToolRunAdmittedByWire::Unavailable,
+        now_ms,
+    );
+    let diagnostics = write_record(conn, run_id, &record)?;
+    Ok((record, diagnostics))
+}
+
+fn resolve_unavailable_key(
+    request: &ToolRunAdmissionForceRequestWire,
+    tool_name: Option<&str>,
+) -> Result<String, ToolRunError> {
+    if let Some(key) = request
+        .key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        return Ok(key.to_string());
+    }
+    if let Some(key) = tool_name.map(str::trim).filter(|key| !key.is_empty()) {
+        return Ok(key.to_string());
+    }
+    Err(ToolRunError::invalid(
+        "unavailable recovery needs an admission key when the run has no \
+         record; pass key or record the run with a tool_name",
+    ))
+}
+
+/// Admit a run regardless of the limit. `max_wait` requires a waiting
+/// record. `unavailable` records a fail-open bypass: a waiting record is
+/// admitted with the caller's `now_ms` as the pre-spawn time, and a
+/// running run with no record is seeded as an admitted holder so later
+/// waiters see it. The bypass counts as a holder until settlement. It is
+/// never a slot grant and never abandoned. Idempotent: an already-admitted
+/// record keeps its original reason and timestamps; a terminal run is
+/// left settled.
 pub fn admission_force(
     store_path: &Path,
     request: ToolRunAdmissionForceRequestWire,
@@ -621,11 +701,7 @@ pub fn admission_force(
 ) -> Result<ToolRunAdmissionResultWire, ToolRunError> {
     validate_schema(request.schema_version)?;
     validate_run_id(&request.run_id)?;
-    let by = match request.reason {
-        ToolRunAdmissionForceReasonWire::MaxWait => {
-            ToolRunAdmittedByWire::MaxWait
-        }
-    };
+    let by = admitted_by_for(request.reason);
     let now_ms = request.now_ms.unwrap_or_else(unix_now_ms);
     let run_id = request.run_id.as_str();
     if !store_path.exists() {
@@ -653,7 +729,31 @@ pub fn admission_force(
             ));
         }
         let Some(record) = target.record else {
-            return Err(missing_record(run_id));
+            if request.reason != ToolRunAdmissionForceReasonWire::Unavailable {
+                return Err(missing_record(run_id));
+            }
+            if target.state != ToolRunStateWire::Running {
+                return Err(ToolRunError::invalid(format!(
+                    "tool run {run_id} is {}; admission requires a running run",
+                    target.state.as_str()
+                )));
+            }
+            let key =
+                resolve_unavailable_key(&request, target.tool_name.as_deref())?;
+            let limit = request.limit.ok_or_else(|| {
+                ToolRunError::invalid(
+                    "unavailable recovery needs a limit when the run has no \
+                     admission record",
+                )
+            })?;
+            let (seeded, diagnostics) =
+                seed_unavailable(&tx, run_id, key, limit, now_ms)?;
+            let mut result = queue_result(&tx, run_id, &seeded)?;
+            result.changed = true;
+            result.diagnostics = diagnostics;
+            touch_write_meta(&tx, now_ms.div_euclid(1000))?;
+            tx.commit()?;
+            return Ok(result);
         };
         if record.state != ToolRunAdmissionStateWire::Waiting {
             return queue_result(&tx, run_id, &record);
