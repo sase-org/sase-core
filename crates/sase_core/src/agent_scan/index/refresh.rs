@@ -9,7 +9,7 @@ use super::selection::{
     PendingRefreshRow,
 };
 use crate::agent_scan::scanner::{
-    list_agent_artifact_dirs, scan_agent_artifact_dir,
+    list_agent_artifact_dirs, project_filter_for_scan, scan_agent_artifact_dir,
 };
 use crate::agent_scan::wire::{
     is_supported_workflow_dir, AgentArtifactRecordWire,
@@ -30,7 +30,6 @@ pub(super) fn discovery_scan_options(
     options: &AgentArtifactScanOptionsWire,
 ) -> AgentArtifactScanOptionsWire {
     let mut discovery = options.clone();
-    discovery.only_projects.clear();
     discovery.max_records = None;
     discovery.not_before_timestamp = None;
     discovery.newest_first = false;
@@ -136,15 +135,32 @@ pub(super) fn artifact_dir_is_dirty(
 pub(super) fn indexed_artifact_rows(
     conn: &Connection,
     projects_root: &Path,
+    project_filter: Option<&BTreeSet<String>>,
+    workflow_scope: &[String],
 ) -> Result<Vec<(String, String, String)>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT artifact_dir, indexed_at, workflow_dir_name \
-             FROM agent_artifacts WHERE projects_root = ?1",
-        )
-        .map_err(|e| e.to_string())?;
+    if project_filter.is_some_and(BTreeSet::is_empty) {
+        return Ok(Vec::new());
+    }
+    let mut clauses = vec!["projects_root = ?".to_string()];
+    let mut values = vec![projects_root_key(projects_root)];
+    if let Some(projects) = project_filter {
+        let project_placeholders = placeholders(projects.len());
+        clauses.push(format!("project_name IN ({project_placeholders})"));
+        values.extend(projects.iter().cloned());
+    }
+    if !workflow_scope.is_empty() {
+        let workflow_placeholders = placeholders(workflow_scope.len());
+        clauses.push(format!("workflow_dir_name IN ({workflow_placeholders})"));
+        values.extend(workflow_scope.iter().cloned());
+    }
+    let sql = format!(
+        "SELECT artifact_dir, indexed_at, workflow_dir_name \
+         FROM agent_artifacts WHERE {}",
+        clauses.join(" AND ")
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let mut rows = stmt
-        .query([projects_root_key(projects_root)])
+        .query(params_from_iter(values.iter()))
         .map_err(|e| e.to_string())?;
     let mut result = Vec::new();
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
@@ -160,12 +176,10 @@ pub(super) fn indexed_artifact_rows(
 /// Whether an indexed row's workflow directory was covered by a
 /// discovery walk built from `discovery_options`.
 ///
-/// `discovery_scan_options` keeps `only_workflow_dirs` while clearing
-/// every other scope knob. A scoped walk (the stranded query's
-/// `("ace-run",)`, for example) visits only that workflow scope, so rows
-/// outside it must stay out of the missing diff: without this guard every
-/// stranded report deleted every non-`ace-run` row and the TUI reconcile
-/// rediscovered it on the next pass.
+/// `discovery_scan_options` keeps project and workflow scope. A scoped walk
+/// (the stranded query's one project and `("ace-run",)`, for example)
+/// visits only that scope, so rows outside it must stay out of the missing
+/// diff and dirty-row pass.
 fn workflow_in_reconcile_scope(
     workflow_dir_name: &str,
     discovery_options: &AgentArtifactScanOptionsWire,
@@ -187,12 +201,19 @@ pub(super) fn reconcile_source_directories(
     stats: &mut AgentArtifactScanStatsWire,
 ) -> Result<(), String> {
     let discovery_options = discovery_scan_options(options);
+    let project_filter =
+        project_filter_for_scan(projects_root, &discovery_options);
     let source_dirs: BTreeSet<String> =
         list_agent_artifact_dirs(projects_root, &discovery_options)
             .into_iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect();
-    let indexed_rows = indexed_artifact_rows(conn, projects_root)?;
+    let indexed_rows = indexed_artifact_rows(
+        conn,
+        projects_root,
+        project_filter.as_ref(),
+        &discovery_options.only_workflow_dirs,
+    )?;
     let indexed_dirs: BTreeSet<String> =
         indexed_rows.iter().map(|(dir, _, _)| dir.clone()).collect();
 
@@ -219,7 +240,10 @@ pub(super) fn reconcile_source_directories(
     // and discoveries inside one transaction per pass.
     let mut repairs: Vec<(PathBuf, AgentArtifactRecordWire)> = Vec::new();
     let mut dirty_dirs = Vec::new();
-    for (artifact_dir, indexed_at, _) in &indexed_rows {
+    for (artifact_dir, indexed_at, workflow_dir_name) in &indexed_rows {
+        if !workflow_in_reconcile_scope(workflow_dir_name, &discovery_options) {
+            continue;
+        }
         if missing.contains(artifact_dir) {
             continue;
         }

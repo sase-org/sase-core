@@ -1,6 +1,6 @@
 use super::super::*;
 use super::support::{
-    artifact, default_query, full_history_cached_query,
+    artifact, artifact_for_project, default_query, full_history_cached_query,
     full_history_revalidate_query, write_completed_artifact, write_json,
 };
 use crate::agent_scan::wire::{
@@ -984,4 +984,76 @@ fn scoped_reconcile_keeps_rows_outside_the_walked_workflow_scope() {
     )
     .unwrap();
     assert!(!cached.index_completeness.unwrap().complete_history);
+}
+
+#[test]
+fn scoped_reconcile_only_discovers_and_deletes_requested_projects() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let requested = artifact_for_project(&projects, "alpha", "20260912091000");
+    let removed_other =
+        artifact_for_project(&projects, "beta", "20260912091100");
+    write_completed_artifact(&requested, "requested");
+    write_completed_artifact(&removed_other, "other-removed");
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    fs::remove_dir_all(&removed_other).unwrap();
+    let added_other = artifact_for_project(&projects, "beta", "20260912091200");
+    write_completed_artifact(&added_other, "other-added");
+
+    let scoped_options = AgentArtifactScanOptionsWire {
+        only_projects: vec!["alpha".to_string()],
+        only_workflow_dirs: vec!["ace-run".to_string()],
+        ..AgentArtifactScanOptionsWire::default()
+    };
+    let scoped = query_agent_artifact_index(
+        &index,
+        &projects,
+        full_history_revalidate_query(),
+        scoped_options,
+    )
+    .unwrap();
+
+    assert_eq!(scoped.records.len(), 1);
+    assert_eq!(scoped.records[0].artifact_dir, requested.to_string_lossy());
+    assert_eq!(scoped.stats.rows_discovered, 0);
+    assert_eq!(scoped.stats.rows_removed, 0);
+    let completeness = scoped.index_completeness.unwrap();
+    assert!(!completeness.source_reconciled);
+    assert!(!completeness.complete_history);
+
+    let conn = Connection::open(&index).unwrap();
+    let indexed_beta_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_artifacts WHERE project_name = 'beta'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexed_beta_rows, 1);
+    let beta_record: String = conn
+        .query_row(
+            "SELECT record_json FROM agent_artifacts \
+             WHERE artifact_dir = ?1",
+            [removed_other.to_string_lossy().as_ref()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(beta_record.contains("other-removed"));
+    let watermark_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM meta \
+             WHERE key IN ('source_reconcile_ok', \
+                           'source_reconcile_projects_root')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(watermark_count, 0);
 }

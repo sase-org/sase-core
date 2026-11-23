@@ -1,5 +1,5 @@
 use super::super::*;
-use super::support::{artifact, write_json};
+use super::support::{artifact, full_history_revalidate_query, write_json};
 use crate::agent_scan::index::storage::open_index;
 use crate::agent_scan::wire::{
     AgentArtifactIndexReusableSnapshotWire, AgentArtifactRecordShapeWire,
@@ -546,4 +546,74 @@ fn reusable_membership_and_missing_index_are_revalidated() {
             .unwrap()
             .complete_history
     );
+}
+
+#[test]
+fn session_pushdown_queries_bypass_history_cache_and_track_membership() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let index = tmp.path().join("index.sqlite");
+    let options = AgentArtifactScanOptionsWire {
+        only_projects: vec!["proj".to_string()],
+        only_workflow_dirs: vec!["ace-run".to_string()],
+        ..AgentArtifactScanOptionsWire::default()
+    };
+    rebuild_agent_artifact_index(&index, &projects, options.clone()).unwrap();
+
+    let mut query = full_history_revalidate_query();
+    query.candidate_filter = Some(AgentArtifactCandidateFilterWire::Equals {
+        field: AgentArtifactCandidateFieldWire::AgentSession,
+        value: "session-new".to_string(),
+    });
+    let before_member = query_agent_artifact_index_reusable(
+        &index,
+        &projects,
+        query.clone(),
+        options.clone(),
+        None,
+    )
+    .unwrap();
+    assert!(before_member.snapshot.records.is_empty());
+    assert!(!before_member.records_reused);
+    assert_eq!(before_member.payload_generation, None);
+
+    let member = artifact(&projects, "20260514120100");
+    write_json(
+        &member.join("agent_meta.json"),
+        json!({"name": "member", "agent_session": "session-new"}),
+    );
+    write_json(
+        &member.join("done.json"),
+        json!({"outcome": "completed", "name": "member"}),
+    );
+    let added = query_agent_artifact_index_reusable(
+        &index,
+        &projects,
+        query.clone(),
+        options.clone(),
+        before_member.payload_generation,
+    )
+    .unwrap();
+    assert!(!added.records_reused);
+    assert_eq!(added.payload_generation, None);
+    assert_eq!(added.snapshot.records.len(), 1);
+    assert_eq!(added.snapshot.stats.rows_discovered, 1);
+    assert_eq!(
+        added.snapshot.records[0].artifact_dir,
+        member.to_string_lossy()
+    );
+
+    std::fs::remove_dir_all(&member).unwrap();
+    let removed = query_agent_artifact_index_reusable(
+        &index,
+        &projects,
+        query,
+        options,
+        added.payload_generation,
+    )
+    .unwrap();
+    assert!(!removed.records_reused);
+    assert_eq!(removed.payload_generation, None);
+    assert!(removed.snapshot.records.is_empty());
+    assert_eq!(removed.snapshot.stats.rows_removed, 1);
 }

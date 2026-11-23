@@ -1,5 +1,6 @@
 use super::candidates::{
-    select_windowed_records, should_use_windowed_candidate_query,
+    select_windowed_records, session_name_pushdown_predicate,
+    should_use_windowed_candidate_query,
 };
 use super::index_wire::{
     AgentArtifactIndexFreshnessWire, AgentArtifactIndexQueryWire,
@@ -323,7 +324,13 @@ pub(crate) fn query_agent_artifact_index_reusable_for_shape(
             // (the stranded query's `only_workflow_dirs`, for example)
             // reconciles only its workflow scope and must report its
             // history as incomplete.
-            if options.only_workflow_dirs.is_empty() {
+            let covers_all_projects = options.only_projects.is_empty()
+                && (options.include_project_states.is_empty()
+                    || options
+                        .include_project_states
+                        .iter()
+                        .any(|state| state == "all"));
+            if covers_all_projects && options.only_workflow_dirs.is_empty() {
                 stamp_source_reconcile_watermark(&conn, projects_root)?;
                 source_reconciled = true;
             }
@@ -341,7 +348,13 @@ pub(crate) fn query_agent_artifact_index_reusable_for_shape(
     }
 
     let mut projection_clan_keys = BTreeSet::new();
-    let cacheable = !should_use_windowed_candidate_query(&query);
+    // Session/name pushdowns already make candidate selection O(matches).
+    // Reuse validation would need to hash every matching payload plus prove
+    // membership against that same pushdown set, so keep these reads on the
+    // uncached candidate path instead of walking the whole project history.
+    let cacheable = !should_use_windowed_candidate_query(&query)
+        && session_name_pushdown_predicate(query.candidate_filter.as_ref())
+            .is_none();
     let cache_identity = query_cache::QueryIdentity {
         index_path,
         projects_root,
