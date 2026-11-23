@@ -20,6 +20,7 @@ mod maintenance;
 mod named_selection;
 mod output_variables;
 mod query;
+mod query_cache;
 mod readers;
 mod record_summary;
 mod refresh;

@@ -8,6 +8,7 @@ mod lineage;
 mod lineage_batch;
 mod lookup;
 mod machine_projection;
+mod query_cache;
 mod readers;
 mod self_heal;
 mod storage;

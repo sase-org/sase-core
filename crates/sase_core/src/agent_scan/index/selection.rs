@@ -819,6 +819,73 @@ pub(super) fn add_project_filter_to_where(
     }
 }
 
+/// Selected-row marker signatures without loading `record_json`.
+///
+/// The dir set is a conservative superset of the decoded result: extra
+/// SQL rows (later dropped by `record_matches_selection`) still have to
+/// stay signature-fresh for a cached payload reuse.
+pub(super) fn collect_query_signature_map(
+    conn: &Connection,
+    query: &AgentArtifactIndexQueryWire,
+    project_filter: Option<&BTreeSet<String>>,
+) -> Result<BTreeMap<String, MarkerSignatures>, String> {
+    let mut signature_map = BTreeMap::new();
+    if query.include_active {
+        collect_signature_rows(
+            conn,
+            &active_where(query.include_hidden, project_filter),
+            query.active_limit,
+            &mut signature_map,
+        )?;
+    }
+    if query.include_recent_completed {
+        collect_signature_rows(
+            conn,
+            &completed_where(query.include_hidden, project_filter),
+            query.recent_completed_limit,
+            &mut signature_map,
+        )?;
+    }
+    if query.include_full_history {
+        collect_signature_rows(
+            conn,
+            &visible_where(query.include_hidden, project_filter),
+            None,
+            &mut signature_map,
+        )?;
+    }
+    Ok(signature_map)
+}
+
+fn collect_signature_rows(
+    conn: &Connection,
+    where_sql: &str,
+    limit: Option<u32>,
+    signature_map: &mut BTreeMap<String, MarkerSignatures>,
+) -> Result<(), String> {
+    let mut sql = format!(
+        "SELECT artifact_dir, projects_root, \
+         agent_meta_sig, done_sig, running_sig, waiting_sig, \
+         pending_question_sig, workflow_state_sig, plan_path_sig, \
+         prompt_steps_sig, macros_sig \
+         FROM agent_artifacts {where_sql}"
+    );
+    if limit.is_some() {
+        sql.push_str(" LIMIT ?1");
+    }
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut rows = if let Some(limit) = limit {
+        stmt.query([limit]).map_err(|e| e.to_string())?
+    } else {
+        stmt.query([]).map_err(|e| e.to_string())?
+    };
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let pending = pending_refresh_row_from_sql(row)?;
+        signature_map.insert(pending.artifact_dir, pending.stored);
+    }
+    Ok(())
+}
+
 pub(super) const DISMISSED_NORMAL_VISIBILITY_FILTER: &str = r#"NOT EXISTS (
              SELECT 1 FROM dismissed_agents dismissed
              WHERE dismissed.raw_suffix = agent_artifacts.timestamp

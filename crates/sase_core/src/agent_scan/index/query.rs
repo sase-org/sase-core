@@ -10,6 +10,7 @@ use super::maintenance::plan_hidden_terminal_retention;
 use super::output_variables::{
     select_clan_context, select_clan_context_for_keys,
 };
+use super::query_cache;
 use super::refresh::{
     reconcile_source_directories, repair_stale_rows_for_query,
     source_reconcile_watermark_valid, stamp_source_reconcile_watermark,
@@ -300,7 +301,27 @@ pub fn query_agent_artifact_index(
     }
 
     let mut projection_clan_keys = BTreeSet::new();
-    let index_window = if should_use_windowed_candidate_query(&query) {
+    let cacheable = !should_use_windowed_candidate_query(&query);
+    let cached_records = if cacheable {
+        query_cache::try_reuse(
+            index_path,
+            projects_root,
+            &query,
+            &options,
+            &conn,
+            project_filter.as_ref(),
+            &mut stats,
+        )?
+    } else {
+        None
+    };
+    let cache_hit = cached_records.is_some();
+    let index_window = if let Some(records) = cached_records {
+        for record in records {
+            by_dir.insert(record.artifact_dir.clone(), record);
+        }
+        None
+    } else if should_use_windowed_candidate_query(&query) {
         Some(select_windowed_records(
             &conn,
             &query,
@@ -403,6 +424,17 @@ pub fn query_agent_artifact_index(
         for record in &mut records {
             project_record_for_list(record);
         }
+    }
+    if cacheable && !cache_hit {
+        query_cache::remember(
+            index_path,
+            projects_root,
+            &query,
+            &options,
+            &conn,
+            project_filter.as_ref(),
+            &records,
+        );
     }
     let mut clan_context = if query.agents_list_projection {
         projection_clan_keys.extend(represented_clan_keys(&records));

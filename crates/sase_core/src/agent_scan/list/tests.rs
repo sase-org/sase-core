@@ -6,7 +6,8 @@ use crate::agent_scan::index::{
 };
 use crate::agent_scan::scanner::scan_agent_artifacts;
 use crate::agent_scan::wire::{
-    AgentArtifactRecordShapeWire, AgentArtifactScanOptionsWire,
+    AgentArtifactIndexCompletenessWire, AgentArtifactRecordShapeWire,
+    AgentArtifactScanOptionsWire,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -53,6 +54,15 @@ fn full_history_query() -> AgentArtifactIndexQueryWire {
         candidate_filter: None,
         agents_list_projection: false,
     }
+}
+
+fn completeness_ignoring_decode_stats(
+    value: Option<AgentArtifactIndexCompletenessWire>,
+) -> Option<AgentArtifactIndexCompletenessWire> {
+    value.map(|mut completeness| {
+        completeness.record_json_decoded = 0;
+        completeness
+    })
 }
 
 fn json_contains_key(value: &Value, key: &str) -> bool {
@@ -181,7 +191,11 @@ fn compact_index_query_matches_full_projection_and_order() {
     );
     assert_eq!(compact.records.len(), full.records.len());
     assert_eq!(compact.clan_context, full.clan_context);
-    assert_eq!(compact.index_completeness, full.index_completeness);
+    assert_eq!(
+        completeness_ignoring_decode_stats(compact.index_completeness.clone()),
+        completeness_ignoring_decode_stats(full.index_completeness.clone())
+    );
+    assert_eq!(compact.stats.record_json_decoded, 0);
     assert_eq!(
         compact.stats.artifact_dirs_visited,
         full.stats.artifact_dirs_visited
@@ -463,7 +477,11 @@ fn compact_query_preserves_clan_context_and_completeness() {
     assert_eq!(compact.clan_context, full.clan_context);
     assert!(!compact.clan_context.is_empty());
     assert_eq!(compact.clan_context[0].clan_tribe.as_deref(), Some("chop"));
-    assert_eq!(compact.index_completeness, full.index_completeness);
+    assert_eq!(
+        completeness_ignoring_decode_stats(compact.index_completeness.clone()),
+        completeness_ignoring_decode_stats(full.index_completeness.clone())
+    );
+    assert_eq!(compact.stats.record_json_decoded, 0);
 }
 
 #[test]
