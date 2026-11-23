@@ -207,3 +207,5 @@ fn placeholders(len: usize) -> String {
 
 pub(super) const AGENT_SESSION_INDEX_COLUMN: &str = "agent_session";
 pub(super) const LOOKUP_SESSION_INDEX_COLUMN: &str = "lookup_session";
+
+pub(crate) use query::query_agent_artifact_index_reusable_for_shape;

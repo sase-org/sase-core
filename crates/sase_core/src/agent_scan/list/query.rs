@@ -8,7 +8,7 @@ use super::wire::{
     AgentArtifactListSnapshotWire,
 };
 use crate::agent_scan::index::{
-    query_agent_artifact_index, query_agent_artifact_index_reusable,
+    query_agent_artifact_index, query_agent_artifact_index_reusable_for_shape,
     AgentArtifactIndexQueryWire,
 };
 use crate::agent_scan::scanner::{
@@ -46,12 +46,13 @@ pub fn query_agent_artifact_index_list_reusable(
     known_generation: Option<u64>,
 ) -> Result<AgentArtifactListReusableSnapshotWire, String> {
     query.record_shape = AgentArtifactRecordShapeWire::Full;
-    let reusable = query_agent_artifact_index_reusable(
+    let reusable = query_agent_artifact_index_reusable_for_shape(
         index_path,
         projects_root,
         query,
         options,
         known_generation,
+        true,
     )?;
     Ok(AgentArtifactListReusableSnapshotWire {
         snapshot: project_scan_for_list(reusable.snapshot),

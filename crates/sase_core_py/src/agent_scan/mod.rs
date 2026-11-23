@@ -761,6 +761,52 @@ fn py_query_agent_artifact_index_list<'py>(
     serialize_to_py(py, &snapshot)
 }
 
+/// Query full records, omitting unchanged records for an owning consumer.
+#[pyfunction]
+#[pyo3(
+    name = "query_agent_artifact_index_reusable",
+    signature = (index_path, projects_root, query = None, options = None, known_generation = None)
+)]
+fn py_query_agent_artifact_index_reusable<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    projects_root: &str,
+    query: Option<&Bound<'py, PyDict>>,
+    options: Option<&Bound<'py, PyDict>>,
+    known_generation: Option<u64>,
+) -> PyResult<PyObject> {
+    let query_wire = match query {
+        Some(dict) => {
+            let json = py_to_json_value(dict)?;
+            serde_json::from_value::<AgentArtifactIndexQueryWire>(json)
+                .map_err(|e| {
+                    PyValueError::new_err(format!(
+                        "query is not a valid AgentArtifactIndexQueryWire dict: {e}"
+                    ))
+                })?
+        }
+        None => AgentArtifactIndexQueryWire::default(),
+    };
+    let opts = match options {
+        Some(dict) => agent_scan_options_from_pydict(dict)?,
+        None => AgentArtifactScanOptionsWire::default(),
+    };
+    let index = PathBuf::from(index_path);
+    let root = PathBuf::from(projects_root);
+    let snapshot = py
+        .allow_threads(|| {
+            sase_core::agent_scan::query_agent_artifact_index_reusable(
+                &index,
+                &root,
+                query_wire,
+                opts,
+                known_generation,
+            )
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    serialize_to_py(py, &snapshot)
+}
+
 /// Query compact list rows, omitting unchanged records for an owning consumer.
 #[pyfunction]
 #[pyo3(
@@ -1442,6 +1488,10 @@ pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index_list, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_query_agent_artifact_index_reusable,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         py_query_agent_artifact_index_list_reusable,
         m

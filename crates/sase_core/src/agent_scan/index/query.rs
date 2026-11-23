@@ -278,6 +278,25 @@ pub fn query_agent_artifact_index_reusable(
     options: AgentArtifactScanOptionsWire,
     known_generation: Option<u64>,
 ) -> Result<AgentArtifactIndexReusableSnapshotWire, String> {
+    query_agent_artifact_index_reusable_for_shape(
+        index_path,
+        projects_root,
+        query,
+        options,
+        known_generation,
+        false,
+    )
+}
+
+/// Keep full and compact consumer tokens in distinct cache identities.
+pub(crate) fn query_agent_artifact_index_reusable_for_shape(
+    index_path: &Path,
+    projects_root: &Path,
+    query: AgentArtifactIndexQueryWire,
+    options: AgentArtifactScanOptionsWire,
+    known_generation: Option<u64>,
+    compact: bool,
+) -> Result<AgentArtifactIndexReusableSnapshotWire, String> {
     // Revalidate may write repaired or newly discovered rows; Cached never
     // writes, so it can use the cheaper read-only open.
     let conn = if query.freshness == AgentArtifactIndexFreshnessWire::Revalidate
@@ -286,6 +305,7 @@ pub fn query_agent_artifact_index_reusable(
     } else {
         open_index_read_only(index_path)?
     };
+    let data_version = query_cache::current_data_version(&conn)?;
     let mut stats = AgentArtifactScanStatsWire::default();
     let mut by_dir: BTreeMap<String, AgentArtifactRecordWire> = BTreeMap::new();
     let project_filter = project_filter_for_scan(projects_root, &options);
@@ -322,12 +342,16 @@ pub fn query_agent_artifact_index_reusable(
 
     let mut projection_clan_keys = BTreeSet::new();
     let cacheable = !should_use_windowed_candidate_query(&query);
+    let cache_identity = query_cache::QueryIdentity {
+        index_path,
+        projects_root,
+        query: &query,
+        options: &options,
+        compact,
+    };
     let cached_records = if cacheable {
         query_cache::try_reuse(
-            index_path,
-            projects_root,
-            &query,
-            &options,
+            &cache_identity,
             &conn,
             project_filter.as_ref(),
             &mut stats,
@@ -336,7 +360,7 @@ pub fn query_agent_artifact_index_reusable(
         None
     };
     let cache_hit = cached_records.is_some();
-    let records_reused = cached_records
+    let mut records_reused = cached_records
         .as_ref()
         .is_some_and(|cached| Some(cached.generation) == known_generation);
     let index_window = if cache_hit {
@@ -444,20 +468,24 @@ pub fn query_agent_artifact_index_reusable(
             project_record_for_list(record);
         }
     }
-    let (payload_records, payload_generation) =
+    let (payload_records, mut payload_generation) =
         if let Some(cached) = cached_records {
             (cached.records, Some(cached.generation))
         } else {
             let records = std::sync::Arc::new(fresh_records);
-            let generation = if cacheable {
+            let generation = if cacheable
+                && stats.json_decode_errors == 0
+                && stats.os_errors == 0
+                && stats.rows_repaired == 0
+                && stats.rows_removed == 0
+                && stats.rows_discovered == 0
+            {
                 query_cache::remember(
-                    index_path,
-                    projects_root,
-                    &query,
-                    &options,
+                    &cache_identity,
                     &conn,
                     project_filter.as_ref(),
                     std::sync::Arc::clone(&records),
+                    data_version,
                 )
             } else {
                 None
@@ -465,11 +493,6 @@ pub fn query_agent_artifact_index_reusable(
             (records, generation)
         };
     stats.artifact_dirs_visited = payload_records.len() as u64;
-    let records = if records_reused {
-        Vec::new()
-    } else {
-        payload_records.as_ref().clone()
-    };
     let mut clan_context = if query.agents_list_projection {
         projection_clan_keys.extend(represented_clan_keys(&payload_records));
         select_clan_context_for_keys(&conn, projection_clan_keys)?
@@ -487,6 +510,21 @@ pub fn query_agent_artifact_index_reusable(
             &mut clan_context,
         );
     }
+    // Never certify reuse after an uncertain/failed read or a concurrent
+    // commit. A full payload remains usable under the ordinary query contract;
+    // the next call must obtain a newly validated generation.
+    if query_cache::current_data_version(&conn)? != data_version
+        || stats.json_decode_errors != 0
+        || stats.os_errors != 0
+    {
+        payload_generation = None;
+        records_reused = false;
+    }
+    let records = if records_reused {
+        Vec::new()
+    } else {
+        payload_records.as_ref().clone()
+    };
     let index_completeness = Some(AgentArtifactIndexCompletenessWire {
         complete_history: query.include_full_history && source_reconciled,
         source_reconciled,

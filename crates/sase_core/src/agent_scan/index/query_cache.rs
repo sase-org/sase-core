@@ -34,6 +34,7 @@ struct QueryCacheKey {
     projects_root: PathBuf,
     query_json: String,
     options_json: String,
+    compact: bool,
 }
 
 struct CachedQuery {
@@ -85,6 +86,7 @@ fn make_key(
     projects_root: &Path,
     query: &AgentArtifactIndexQueryWire,
     options: &AgentArtifactScanOptionsWire,
+    compact: bool,
 ) -> Option<QueryCacheKey> {
     let query_json = query_key_json(query).ok()?;
     let options_json = serde_json::to_string(options).ok()?;
@@ -93,6 +95,7 @@ fn make_key(
         projects_root: canonical_path(projects_root),
         query_json,
         options_json,
+        compact,
     })
 }
 
@@ -176,8 +179,7 @@ fn query_signature_map(
     keys.sort();
     let mut hashes = BTreeMap::new();
     for chunk in keys.chunks(500) {
-        let placeholders = std::iter::repeat("?")
-            .take(chunk.len())
+        let placeholders = std::iter::repeat_n("?", chunk.len())
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
@@ -231,24 +233,43 @@ fn query_signature_map(
     Ok(signature_map)
 }
 
+/// Full request identity, including the output representation.
+pub(super) struct QueryIdentity<'a> {
+    pub(super) index_path: &'a Path,
+    pub(super) projects_root: &'a Path,
+    pub(super) query: &'a AgentArtifactIndexQueryWire,
+    pub(super) options: &'a AgentArtifactScanOptionsWire,
+    pub(super) compact: bool,
+}
+
+impl QueryIdentity<'_> {
+    fn key(&self) -> Option<QueryCacheKey> {
+        make_key(
+            self.index_path,
+            self.projects_root,
+            self.query,
+            self.options,
+            self.compact,
+        )
+    }
+}
+
 /// Return cached records when this exact query is still signature-fresh.
 pub(super) fn try_reuse(
-    index_path: &Path,
-    projects_root: &Path,
-    query: &AgentArtifactIndexQueryWire,
-    options: &AgentArtifactScanOptionsWire,
+    identity: &QueryIdentity<'_>,
     conn: &Connection,
     project_filter: Option<&BTreeSet<String>>,
     stats: &mut AgentArtifactScanStatsWire,
 ) -> Result<Option<CachedRecords>, String> {
-    let Some(key) = make_key(index_path, projects_root, query, options) else {
+    let Some(key) = identity.key() else {
         return Ok(None);
     };
     if !contains_key(&key) {
         return Ok(None);
     }
-    let signature_map = query_signature_map(conn, query, project_filter)?;
-    if query.freshness == AgentArtifactIndexFreshnessWire::Revalidate
+    let signature_map =
+        query_signature_map(conn, identity.query, project_filter)?;
+    if identity.query.freshness == AgentArtifactIndexFreshnessWire::Revalidate
         && !signatures_match_filesystem(&signature_map, stats)
     {
         return Ok(None);
@@ -258,20 +279,29 @@ pub(super) fn try_reuse(
 
 /// Remember the decoded payload of a cacheable index query.
 pub(super) fn remember(
-    index_path: &Path,
-    projects_root: &Path,
-    query: &AgentArtifactIndexQueryWire,
-    options: &AgentArtifactScanOptionsWire,
+    identity: &QueryIdentity<'_>,
     conn: &Connection,
     project_filter: Option<&BTreeSet<String>>,
     records: Arc<Vec<AgentArtifactRecordWire>>,
+    data_version: i64,
 ) -> Option<u64> {
-    let Some(key) = make_key(index_path, projects_root, query, options) else {
-        return None;
-    };
-    let Ok(signature_map) = query_signature_map(conn, query, project_filter)
+    let key = identity.key()?;
+    let Ok(signature_map) =
+        query_signature_map(conn, identity.query, project_filter)
     else {
         return None;
     };
+    // A concurrent commit between record selection and signature collection
+    // must never tag old records with the new database identity.
+    if current_data_version(conn).ok()? != data_version {
+        return None;
+    }
     Some(store(key, signature_map, records))
+}
+
+/// Connection-local counter of commits made by *other* connections. Unlike
+/// WAL file metadata this also catches commits while our connection stays open.
+pub(super) fn current_data_version(conn: &Connection) -> Result<i64, String> {
+    conn.query_row("PRAGMA data_version", [], |row| row.get(0))
+        .map_err(|error| error.to_string())
 }

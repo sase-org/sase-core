@@ -362,3 +362,188 @@ fn index_file_mutation_invalidates_reuse_even_when_marker_signatures_match() {
             == Some("index-only-change")
     }));
 }
+
+#[test]
+fn reusable_shapes_and_options_have_separate_identities() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    write_active_artifacts(&projects, 2);
+    let index = tmp.path().join("index.sqlite");
+    let options = AgentArtifactScanOptionsWire::default();
+    rebuild_agent_artifact_index(&index, &projects, options.clone()).unwrap();
+    let first = query_reusable_snapshot(
+        &index,
+        &projects,
+        revalidate_active_query(),
+        None,
+    );
+    let compact = crate::agent_scan::query_agent_artifact_index_list_reusable(
+        &index,
+        &projects,
+        revalidate_active_query(),
+        options.clone(),
+        first.payload_generation,
+    )
+    .unwrap();
+    assert!(!compact.records_reused);
+    assert_eq!(compact.snapshot.records.len(), 2);
+    assert_ne!(compact.payload_generation, first.payload_generation);
+    let full = query_reusable_snapshot(
+        &index,
+        &projects,
+        revalidate_active_query(),
+        compact.payload_generation,
+    );
+    assert!(!full.records_reused);
+    let mut changed_options = options;
+    changed_options.include_prompt_step_markers = false;
+    let changed = query_agent_artifact_index_reusable(
+        &index,
+        &projects,
+        revalidate_active_query(),
+        changed_options,
+        first.payload_generation,
+    )
+    .unwrap();
+    assert!(!changed.records_reused);
+    assert_ne!(changed.payload_generation, first.payload_generation);
+}
+
+#[test]
+fn malformed_index_rows_never_receive_a_reusable_generation() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    write_active_artifacts(&projects, 2);
+    let index = tmp.path().join("index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    let before = query_reusable_snapshot(
+        &index,
+        &projects,
+        revalidate_active_query(),
+        None,
+    );
+    let conn = open_index(&index).unwrap();
+    conn.execute("UPDATE agent_artifacts SET record_json = 'not json'", [])
+        .unwrap();
+    for _ in 0..2 {
+        let result = query_reusable_snapshot(
+            &index,
+            &projects,
+            revalidate_active_query(),
+            before.payload_generation,
+        );
+        assert!(!result.records_reused);
+        assert_eq!(result.payload_generation, None);
+        assert_eq!(result.snapshot.stats.json_decode_errors, 2);
+    }
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    let repaired = query_reusable_snapshot(
+        &index,
+        &projects,
+        revalidate_active_query(),
+        before.payload_generation,
+    );
+    assert_eq!(repaired.snapshot.stats.json_decode_errors, 0);
+    // Rebuilding identical data can reuse the original valid generation.
+    assert!(repaired.records_reused || repaired.snapshot.records.len() == 2);
+}
+
+#[test]
+fn concurrent_commit_cannot_certify_precommit_records() {
+    use super::super::query_cache::{
+        current_data_version, remember, QueryIdentity,
+    };
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    write_active_artifacts(&projects, 2);
+    let index = tmp.path().join("index.sqlite");
+    let options = AgentArtifactScanOptionsWire::default();
+    rebuild_agent_artifact_index(&index, &projects, options.clone()).unwrap();
+    let query = revalidate_active_query();
+    let conn = open_index(&index).unwrap();
+    let version = current_data_version(&conn).unwrap();
+    let snapshot = query_snapshot(&index, &projects, query.clone());
+    // Deterministically interleave a separate connection's commit after the
+    // records were read, but before their reuse signature is collected.
+    let writer = open_index(&index).unwrap();
+    writer
+        .execute("UPDATE agent_artifacts SET record_json = '{}'", [])
+        .unwrap();
+    let identity = QueryIdentity {
+        index_path: &index,
+        projects_root: &projects,
+        query: &query,
+        options: &options,
+        compact: false,
+    };
+    assert_eq!(
+        remember(
+            &identity,
+            &conn,
+            None,
+            std::sync::Arc::new(snapshot.records),
+            version
+        ),
+        None
+    );
+}
+
+#[test]
+fn reusable_membership_and_missing_index_are_revalidated() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    write_active_artifacts(&projects, 2);
+    let index = tmp.path().join("index.sqlite");
+    let options = AgentArtifactScanOptionsWire::default();
+    rebuild_agent_artifact_index(&index, &projects, options.clone()).unwrap();
+    let before = query_reusable_snapshot(
+        &index,
+        &projects,
+        revalidate_active_query(),
+        None,
+    );
+    let dir = artifact(&projects, "20260514120000");
+    std::fs::remove_dir_all(&dir).unwrap();
+    let removed = query_reusable_snapshot(
+        &index,
+        &projects,
+        revalidate_active_query(),
+        before.payload_generation,
+    );
+    assert!(!removed.records_reused);
+    assert_eq!(removed.snapshot.records.len(), 1);
+    assert_eq!(removed.snapshot.stats.rows_removed, 1);
+    std::fs::remove_file(&index).unwrap();
+    let mut query = revalidate_active_query();
+    query.freshness = AgentArtifactIndexFreshnessWire::Cached;
+    // The established cached-query contract creates a missing index. It
+    // must return a new, incomplete empty snapshot, never the old payload.
+    let missing = query_agent_artifact_index_reusable(
+        &index,
+        &projects,
+        query,
+        options,
+        before.payload_generation,
+    )
+    .unwrap();
+    assert!(!missing.records_reused);
+    assert!(missing.snapshot.records.is_empty());
+    assert_ne!(missing.payload_generation, before.payload_generation);
+    assert!(
+        !missing
+            .snapshot
+            .index_completeness
+            .unwrap()
+            .complete_history
+    );
+}

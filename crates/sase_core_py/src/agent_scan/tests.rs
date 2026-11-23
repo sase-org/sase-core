@@ -1438,3 +1438,86 @@ fn gate_failure_bindings_round_trip() {
         assert!(!py_gate_failure_projects_attention(true, true));
     });
 }
+
+#[test]
+fn full_reusable_binding_keeps_independent_payloads_detached() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("projects");
+        let dir = root.join("proj/artifacts/ace-run/20261117121000");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("agent_meta.json"),
+            r#"{"name":"original","wait_for":["parent"]}"#,
+        )
+        .unwrap();
+        let index = tmp.path().join("index.sqlite");
+        sase_core::agent_scan::rebuild_agent_artifact_index(
+            &index,
+            &root,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let module = PyModule::new_bound(py, "test_agent_scan_reuse").unwrap();
+        register_agent_scan(&module).unwrap();
+        let binding = module
+            .getattr("query_agent_artifact_index_reusable")
+            .unwrap();
+        let query = PyDict::new_bound(py);
+        query.set_item("include_active", true).unwrap();
+        query.set_item("include_recent_completed", false).unwrap();
+        query.set_item("freshness", "revalidate").unwrap();
+        let index = index.to_string_lossy();
+        let root = root.to_string_lossy();
+        let first = binding
+            .call1((index.as_ref(), root.as_ref(), &query))
+            .unwrap();
+        assert_eq!(
+            first
+                .get_item("snapshot")
+                .unwrap()
+                .get_item("records")
+                .unwrap()
+                .len()
+                .unwrap(),
+            1
+        );
+        let generation = first.get_item("payload_generation").unwrap();
+        let unchanged = binding
+            .call1((
+                index.as_ref(),
+                root.as_ref(),
+                &query,
+                py.None(),
+                &generation,
+            ))
+            .unwrap();
+        let unchanged_json = py_to_json_value(&unchanged).unwrap();
+        assert_eq!(unchanged_json["records_reused"], json!(true));
+        assert_eq!(unchanged_json["snapshot"]["records"], json!([]));
+        assert_eq!(
+            unchanged_json["snapshot"]["stats"]["record_json_decoded"],
+            json!(0)
+        );
+        first
+            .get_item("snapshot")
+            .unwrap()
+            .get_item("records")
+            .unwrap()
+            .get_item(0)
+            .unwrap()
+            .get_item("agent_meta")
+            .unwrap()
+            .set_item("name", "mutated")
+            .unwrap();
+        let independent = binding
+            .call1((index.as_ref(), root.as_ref(), &query))
+            .unwrap();
+        let value = py_to_json_value(&independent).unwrap();
+        assert_eq!(
+            value["snapshot"]["records"][0]["agent_meta"]["name"],
+            json!("original")
+        );
+    });
+}
