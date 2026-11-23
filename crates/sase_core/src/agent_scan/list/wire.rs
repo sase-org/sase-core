@@ -564,3 +564,13 @@ pub struct AgentArtifactListSnapshotWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_completeness: Option<AgentArtifactIndexCompletenessWire>,
 }
+
+/// Compact list response with an optional consumer-owned record reuse token.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentArtifactListReusableSnapshotWire {
+    pub snapshot: AgentArtifactListSnapshotWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_generation: Option<u64>,
+    #[serde(default)]
+    pub records_reused: bool,
+}

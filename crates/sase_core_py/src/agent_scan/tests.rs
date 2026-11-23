@@ -1256,6 +1256,128 @@ fn compact_list_binding_keeps_monitor_identity_and_only_typed_output_facts() {
 }
 
 #[test]
+fn reusable_list_binding_returns_generation_without_shared_python_records() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        let artifacts = root.join("proj").join("artifacts").join("ace-run");
+        for index in 0..4 {
+            let dir = artifacts.join(format!("202611231200{index:02}"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("agent_meta.json"),
+                format!(r#"{{"name":"agent-{index}"}}"#),
+            )
+            .unwrap();
+        }
+        let index = temp.path().join("agent_artifact_index.sqlite");
+        sase_core::rebuild_agent_artifact_index(
+            &index,
+            &root,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let module = PyModule::new_bound(py, "agent_scan_reuse_test").unwrap();
+        register_agent_scan(&module).unwrap();
+        let reusable = module
+            .getattr("query_agent_artifact_index_list_reusable")
+            .unwrap();
+        let query = json_value_to_py(
+            py,
+            &json!({
+                "include_active": true,
+                "include_recent_completed": false,
+                "include_full_history": false,
+                "freshness": "revalidate",
+                "record_shape": "list"
+            }),
+        )
+        .unwrap();
+        let query = query.bind(py).downcast::<PyDict>().unwrap();
+        let index_path = index.to_string_lossy();
+        let projects_root = root.to_string_lossy();
+
+        let first = reusable
+            .call1((
+                index_path.as_ref(),
+                projects_root.as_ref(),
+                query,
+                py.None(),
+                py.None(),
+            ))
+            .unwrap();
+        let first_value = py_to_json_value(&first).unwrap();
+        assert_eq!(first_value["records_reused"], json!(false));
+        assert_eq!(
+            first_value["snapshot"]["records"].as_array().unwrap().len(),
+            4
+        );
+        let generation = first_value["payload_generation"].as_u64().unwrap();
+
+        let unchanged = reusable
+            .call1((
+                index_path.as_ref(),
+                projects_root.as_ref(),
+                query,
+                py.None(),
+                generation,
+            ))
+            .unwrap();
+        let unchanged_value = py_to_json_value(&unchanged).unwrap();
+        assert_eq!(unchanged_value["records_reused"], json!(true));
+        assert_eq!(unchanged_value["payload_generation"], json!(generation));
+        assert!(unchanged_value["snapshot"]["records"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(
+            unchanged_value["snapshot"]["stats"]["marker_signatures_checked"]
+                .as_u64()
+                .unwrap()
+                >= 4
+        );
+
+        // The established query still creates detached Python values for
+        // callers that need fresh mutable records.
+        let query_full =
+            module.getattr("query_agent_artifact_index_list").unwrap();
+        let full_one = query_full
+            .call1((
+                index_path.as_ref(),
+                projects_root.as_ref(),
+                query,
+                py.None(),
+            ))
+            .unwrap();
+        let full_two = query_full
+            .call1((
+                index_path.as_ref(),
+                projects_root.as_ref(),
+                query,
+                py.None(),
+            ))
+            .unwrap();
+        let full_one_dict = full_one.downcast::<PyDict>().unwrap();
+        let records_obj = full_one_dict.get_item("records").unwrap().unwrap();
+        let one_records = records_obj.downcast::<PyList>().unwrap();
+        let row_obj = one_records.get_item(0).unwrap();
+        let one_row = row_obj.downcast::<PyDict>().unwrap();
+        let meta_obj = one_row.get_item("meta").unwrap().unwrap();
+        let one_meta = meta_obj.downcast::<PyDict>().unwrap();
+        one_meta
+            .set_item("name", "mutated-only-in-first-result")
+            .unwrap();
+        let second_value = py_to_json_value(&full_two).unwrap();
+        assert_ne!(
+            second_value["records"][0]["meta"]["name"],
+            json!("mutated-only-in-first-result")
+        );
+    });
+}
+
+#[test]
 fn gate_failure_bindings_round_trip() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

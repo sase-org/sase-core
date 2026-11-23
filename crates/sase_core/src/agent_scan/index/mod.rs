@@ -96,8 +96,8 @@ pub use storage::AGENT_ARTIFACT_INDEX_WAL_SIZE_LIMIT_BYTES;
 pub use query::{
     agent_artifact_index_status, find_gate_turn_by_gate_id,
     load_agent_artifact_records, query_agent_artifact_index,
-    read_agent_artifact_index_meta, vacuum_agent_artifact_index,
-    write_agent_artifact_index_meta,
+    query_agent_artifact_index_reusable, read_agent_artifact_index_meta,
+    vacuum_agent_artifact_index, write_agent_artifact_index_meta,
 };
 
 pub use readers::{

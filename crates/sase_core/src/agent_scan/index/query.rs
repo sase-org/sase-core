@@ -29,9 +29,10 @@ use crate::agent_scan::context::represented_clan_keys;
 use crate::agent_scan::scanner::project_filter_for_scan;
 use crate::agent_scan::wire::{
     decode_agent_artifact_record_json, AgentArtifactIndexCompletenessWire,
-    AgentArtifactRecordShapeWire, AgentArtifactRecordWire,
-    AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
-    AgentArtifactScanWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
+    AgentArtifactIndexReusableSnapshotWire, AgentArtifactRecordShapeWire,
+    AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
+    AgentArtifactScanStatsWire, AgentArtifactScanWire,
+    AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
@@ -258,6 +259,25 @@ pub fn query_agent_artifact_index(
     query: AgentArtifactIndexQueryWire,
     options: AgentArtifactScanOptionsWire,
 ) -> Result<AgentArtifactScanWire, String> {
+    query_agent_artifact_index_reusable(
+        index_path,
+        projects_root,
+        query,
+        options,
+        None,
+    )
+    .map(|result| result.snapshot)
+}
+
+/// Query the artifact index while allowing a consumer to retain its own
+/// previous records when the exact validated payload generation is unchanged.
+pub fn query_agent_artifact_index_reusable(
+    index_path: &Path,
+    projects_root: &Path,
+    query: AgentArtifactIndexQueryWire,
+    options: AgentArtifactScanOptionsWire,
+    known_generation: Option<u64>,
+) -> Result<AgentArtifactIndexReusableSnapshotWire, String> {
     // Revalidate may write repaired or newly discovered rows; Cached never
     // writes, so it can use the cheaper read-only open.
     let conn = if query.freshness == AgentArtifactIndexFreshnessWire::Revalidate
@@ -316,10 +336,10 @@ pub fn query_agent_artifact_index(
         None
     };
     let cache_hit = cached_records.is_some();
-    let index_window = if let Some(records) = cached_records {
-        for record in records {
-            by_dir.insert(record.artifact_dir.clone(), record);
-        }
+    let records_reused = cached_records
+        .as_ref()
+        .is_some_and(|cached| Some(cached.generation) == known_generation);
+    let index_window = if cache_hit {
         None
     } else if should_use_windowed_candidate_query(&query) {
         Some(select_windowed_records(
@@ -405,9 +425,9 @@ pub fn query_agent_artifact_index(
         None
     };
 
-    let mut records: Vec<AgentArtifactRecordWire> =
+    let mut fresh_records: Vec<AgentArtifactRecordWire> =
         by_dir.into_values().collect();
-    records.sort_by(|a, b| {
+    fresh_records.sort_by(|a, b| {
         (
             a.project_name.as_str(),
             a.workflow_dir_name.as_str(),
@@ -419,28 +439,42 @@ pub fn query_agent_artifact_index(
                 b.timestamp.as_str(),
             ))
     });
-    stats.artifact_dirs_visited = records.len() as u64;
     if query.record_shape == AgentArtifactRecordShapeWire::List {
-        for record in &mut records {
+        for record in &mut fresh_records {
             project_record_for_list(record);
         }
     }
-    if cacheable && !cache_hit {
-        query_cache::remember(
-            index_path,
-            projects_root,
-            &query,
-            &options,
-            &conn,
-            project_filter.as_ref(),
-            &records,
-        );
-    }
+    let (payload_records, payload_generation) =
+        if let Some(cached) = cached_records {
+            (cached.records, Some(cached.generation))
+        } else {
+            let records = std::sync::Arc::new(fresh_records);
+            let generation = if cacheable {
+                query_cache::remember(
+                    index_path,
+                    projects_root,
+                    &query,
+                    &options,
+                    &conn,
+                    project_filter.as_ref(),
+                    std::sync::Arc::clone(&records),
+                )
+            } else {
+                None
+            };
+            (records, generation)
+        };
+    stats.artifact_dirs_visited = payload_records.len() as u64;
+    let records = if records_reused {
+        Vec::new()
+    } else {
+        payload_records.as_ref().clone()
+    };
     let mut clan_context = if query.agents_list_projection {
-        projection_clan_keys.extend(represented_clan_keys(&records));
+        projection_clan_keys.extend(represented_clan_keys(&payload_records));
         select_clan_context_for_keys(&conn, projection_clan_keys)?
     } else {
-        select_clan_context(&conn, &records)?
+        select_clan_context(&conn, &payload_records)?
     };
     if let Some(records_dir) = options
         .clan_records_dir
@@ -463,15 +497,19 @@ pub fn query_agent_artifact_index(
         record_json_decoded: stats.record_json_decoded,
     });
 
-    Ok(AgentArtifactScanWire {
-        schema_version: AGENT_SCAN_WIRE_SCHEMA_VERSION,
-        projects_root: projects_root.to_string_lossy().into_owned(),
-        options,
-        stats,
-        index_window,
-        records,
-        clan_context,
-        index_completeness,
+    Ok(AgentArtifactIndexReusableSnapshotWire {
+        snapshot: AgentArtifactScanWire {
+            schema_version: AGENT_SCAN_WIRE_SCHEMA_VERSION,
+            projects_root: projects_root.to_string_lossy().into_owned(),
+            options,
+            stats,
+            index_window,
+            records,
+            clan_context,
+            index_completeness,
+        },
+        payload_generation,
+        records_reused,
     })
 }
 

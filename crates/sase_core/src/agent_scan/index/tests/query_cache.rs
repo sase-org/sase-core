@@ -1,8 +1,11 @@
 use super::super::*;
 use super::support::{artifact, write_json};
+use crate::agent_scan::index::storage::open_index;
 use crate::agent_scan::wire::{
-    AgentArtifactRecordShapeWire, AgentArtifactScanOptionsWire,
+    AgentArtifactIndexReusableSnapshotWire, AgentArtifactRecordShapeWire,
+    AgentArtifactScanOptionsWire,
 };
+use rusqlite::params;
 use serde_json::json;
 use std::time::Instant;
 use tempfile::tempdir;
@@ -45,6 +48,22 @@ fn query_snapshot(
         projects,
         query,
         AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap()
+}
+
+fn query_reusable_snapshot(
+    index: &std::path::Path,
+    projects: &std::path::Path,
+    query: AgentArtifactIndexQueryWire,
+    known_generation: Option<u64>,
+) -> AgentArtifactIndexReusableSnapshotWire {
+    query_agent_artifact_index_reusable(
+        index,
+        projects,
+        query,
+        AgentArtifactScanOptionsWire::default(),
+        known_generation,
     )
     .unwrap()
 }
@@ -220,4 +239,126 @@ fn identical_revalidate_is_cheaper_than_cold_decode() {
         warm < cold,
         "warm revalidate {warm:?} should beat cold decode {cold:?}"
     );
+}
+
+#[test]
+fn reusable_snapshot_omits_records_only_for_the_exact_generation() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    write_active_artifacts(&projects, 5);
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    let first = query_reusable_snapshot(
+        &index,
+        &projects,
+        revalidate_active_query(),
+        None,
+    );
+    assert!(!first.records_reused);
+    assert_eq!(first.snapshot.records.len(), 5);
+    let generation = first.payload_generation.unwrap();
+
+    let unchanged = query_reusable_snapshot(
+        &index,
+        &projects,
+        revalidate_active_query(),
+        Some(generation),
+    );
+    assert!(unchanged.records_reused);
+    assert_eq!(unchanged.payload_generation, Some(generation));
+    assert!(unchanged.snapshot.records.is_empty());
+    assert_eq!(unchanged.snapshot.stats.record_json_decoded, 0);
+    assert!(unchanged.snapshot.stats.marker_signatures_checked >= 5);
+    assert_eq!(
+        unchanged
+            .snapshot
+            .index_completeness
+            .as_ref()
+            .map(|facts| facts.record_json_decoded),
+        Some(0)
+    );
+
+    let mismatched = query_reusable_snapshot(
+        &index,
+        &projects,
+        revalidate_active_query(),
+        Some(generation.wrapping_add(1)),
+    );
+    assert!(!mismatched.records_reused);
+    assert_eq!(mismatched.payload_generation, Some(generation));
+    assert_eq!(mismatched.snapshot.records.len(), 5);
+
+    let mut different_identity = revalidate_active_query();
+    different_identity.include_hidden = true;
+    let different = query_reusable_snapshot(
+        &index,
+        &projects,
+        different_identity,
+        Some(generation),
+    );
+    assert!(!different.records_reused);
+    assert_eq!(different.snapshot.records.len(), 5);
+    assert_ne!(different.payload_generation, Some(generation));
+}
+
+#[test]
+fn index_file_mutation_invalidates_reuse_even_when_marker_signatures_match() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    write_active_artifacts(&projects, 2);
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    let first = query_reusable_snapshot(
+        &index,
+        &projects,
+        revalidate_active_query(),
+        None,
+    );
+    let generation = first.payload_generation.unwrap();
+    let artifact_dir = artifact(&projects, "20260514120000");
+    let conn = open_index(&index).unwrap();
+    let record_json: String = conn
+        .query_row(
+            "SELECT record_json FROM agent_artifacts WHERE artifact_dir = ?1",
+            [artifact_dir.to_string_lossy().as_ref()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_str(&record_json).unwrap();
+    value["agent_meta"]["name"] = serde_json::json!("index-only-change");
+    conn.execute(
+        "UPDATE agent_artifacts SET record_json = ?1 WHERE artifact_dir = ?2",
+        params![value.to_string(), artifact_dir.to_string_lossy().as_ref()],
+    )
+    .unwrap();
+    drop(conn);
+
+    let changed = query_reusable_snapshot(
+        &index,
+        &projects,
+        revalidate_active_query(),
+        Some(generation),
+    );
+    assert!(!changed.records_reused);
+    assert_ne!(changed.payload_generation, Some(generation));
+    assert!(changed.snapshot.records.iter().any(|record| {
+        record
+            .agent_meta
+            .as_ref()
+            .and_then(|meta| meta.name.as_deref())
+            == Some("index-only-change")
+    }));
 }

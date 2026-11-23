@@ -3,9 +3,13 @@
 use std::path::{Path, PathBuf};
 
 use super::project::{project_record_for_list_compact, project_scan_for_list};
-use super::wire::{AgentArtifactListRecordWire, AgentArtifactListSnapshotWire};
+use super::wire::{
+    AgentArtifactListRecordWire, AgentArtifactListReusableSnapshotWire,
+    AgentArtifactListSnapshotWire,
+};
 use crate::agent_scan::index::{
-    query_agent_artifact_index, AgentArtifactIndexQueryWire,
+    query_agent_artifact_index, query_agent_artifact_index_reusable,
+    AgentArtifactIndexQueryWire,
 };
 use crate::agent_scan::scanner::{
     scan_agent_artifact_dir, scan_agent_artifact_dirs, scan_agent_artifacts,
@@ -30,6 +34,30 @@ pub fn query_agent_artifact_index_list(
     let snapshot =
         query_agent_artifact_index(index_path, projects_root, query, options)?;
     Ok(project_scan_for_list(snapshot))
+}
+
+/// Query compact list rows while allowing an owner to retain an unchanged
+/// record payload from a prior response.
+pub fn query_agent_artifact_index_list_reusable(
+    index_path: &Path,
+    projects_root: &Path,
+    mut query: AgentArtifactIndexQueryWire,
+    options: AgentArtifactScanOptionsWire,
+    known_generation: Option<u64>,
+) -> Result<AgentArtifactListReusableSnapshotWire, String> {
+    query.record_shape = AgentArtifactRecordShapeWire::Full;
+    let reusable = query_agent_artifact_index_reusable(
+        index_path,
+        projects_root,
+        query,
+        options,
+        known_generation,
+    )?;
+    Ok(AgentArtifactListReusableSnapshotWire {
+        snapshot: project_scan_for_list(reusable.snapshot),
+        payload_generation: reusable.payload_generation,
+        records_reused: reusable.records_reused,
+    })
 }
 
 /// Walk `projects_root` and return compact list rows.

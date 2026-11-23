@@ -1510,6 +1510,24 @@ pub struct AgentArtifactScanWire {
     pub index_completeness: Option<AgentArtifactIndexCompletenessWire>,
 }
 
+/// A query snapshot that may omit records already owned by the consumer.
+///
+/// The generation is opaque and only certifies the exact index path, root,
+/// query, options, and validated cached payload that produced it. When
+/// `records_reused` is true, `snapshot` still contains current query, repair,
+/// status, and clan facts, while `snapshot.records` is empty. Consumers may
+/// reuse their own previously decoded records only when the returned
+/// generation matches the one they supplied. This type deliberately carries
+/// no Python object or shared mutable record handle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentArtifactIndexReusableSnapshotWire {
+    pub snapshot: AgentArtifactScanWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_generation: Option<u64>,
+    #[serde(default)]
+    pub records_reused: bool,
+}
+
 /// Request for the shared gate-failure resurface eligibility decision.
 ///
 /// Python gathers the facts (dismissal age from `dismissed_at` or legacy
