@@ -1145,3 +1145,32 @@ fn store_queries_return_none_for_missing_index() {
     assert!(query_summary_identities(root).unwrap().is_none());
     assert!(!index_path_for_root(root).exists());
 }
+
+#[test]
+fn named_bundle_lookup_reports_paths_under_the_callers_symlinked_root() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let real = tmp.path().join("real");
+    fs::create_dir_all(&real).unwrap();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let path = write_bundle(
+        &link,
+        "2026111601.json",
+        &named_bundle("2026111601", "agent-a", None),
+    );
+    let expected_bundle = format!("{}/2026111601.json", link.to_string_lossy());
+    let expected_dir = link.to_string_lossy().into_owned();
+
+    let recovered = lookup_named_dismissed_bundle(&link, "agent-a", 200);
+    assert_eq!(recovered.source, "fallback");
+    let winner = recovered.winner.unwrap();
+    assert_eq!(winner.bundle_path, expected_bundle);
+    assert_eq!(winner.artifacts_dir, expected_dir);
+
+    upsert_bundle_summary(&link, &path, &read_bundle(&path).unwrap()).unwrap();
+    let indexed = lookup_named_dismissed_bundle(&link, "agent-a", 200);
+    assert_eq!(indexed.source, "index");
+    let winner = indexed.winner.unwrap();
+    assert_eq!(winner.bundle_path, expected_bundle);
+    assert_eq!(winner.artifacts_dir, expected_dir);
+}

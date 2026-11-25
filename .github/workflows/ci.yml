@@ -70,7 +70,9 @@ jobs:
         run: ./scripts/check.sh clippy
 
       - name: cargo test --workspace
-        run: ./scripts/check.sh test
+        # The macOS leg once hid a sase_core_py failure behind the first
+        # failing test binary; --no-fail-fast lists every binary's failures.
+        run: ./scripts/check.sh test --no-fail-fast
 
   # Offline unit checks for the release helper scripts. The retention tests use
   # packaging, and the delete-driver tests use requests, so provide both explicitly.

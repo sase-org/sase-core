@@ -74,7 +74,9 @@ tests run outside this environment.
     reject, because released sase accepts every core in its `sase-core-rs` minor window.
 - Canonicalize both sides of a path comparison, or neither side. On macOS, `/tmp` and
   `/var` are symlinks into `/private`, so a symlinked ancestor is not evidence of an
-  attack. CI also runs on macOS.
+  attack. CI also runs on macOS. Reproduce these failures on Linux by running
+  tests with `TMPDIR` pointing through a symlink, e.g. `mkdir -p real &&
+  ln -s "$PWD/real" link && TMPDIR=$PWD/link just test --no-fail-fast`.
 
 ## Recipes
 

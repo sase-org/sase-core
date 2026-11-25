@@ -1464,13 +1464,12 @@ fn validate_named_bundle(
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .or_else(|| {
-            canonical_path
-                .parent()
+            path.parent()
                 .map(|value| value.to_string_lossy().into_owned())
         })
         .unwrap_or_default();
     Ok(Some(NamedDismissedBundleHitWire {
-        bundle_path: canonical_path.to_string_lossy().into_owned(),
+        bundle_path: path.to_string_lossy().into_owned(),
         artifacts_dir,
         raw_suffix: payload_suffix.to_string(),
         filename: filename.to_string(),
@@ -1486,19 +1485,16 @@ fn bounded_named_bundle_fallback(
 ) -> NamedDismissedBundleLookupWire {
     let mut result =
         named_bundle_lookup_result(availability, "fallback", diagnostic);
-    let canonical_root = match root.canonicalize() {
-        Ok(root) => root,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    if let Err(error) = root.canonicalize() {
+        if error.kind() == std::io::ErrorKind::NotFound {
             result.complete = true;
             result.source = "none".to_string();
             return result;
         }
-        Err(error) => {
-            result.diagnostic = Some(error.to_string());
-            return result;
-        }
-    };
-    let mut pending = vec![canonical_root];
+        result.diagnostic = Some(error.to_string());
+        return result;
+    }
+    let mut pending = vec![root.to_path_buf()];
     let mut best_key: Option<(String, String)> = None;
     let mut best_hit: Option<NamedDismissedBundleHitWire> = None;
     let mut uncertain = false;

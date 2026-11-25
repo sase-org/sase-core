@@ -281,19 +281,23 @@ fn clan_lookup_includes_legacy_parallel_session() {
 #[test]
 fn pointer_lookup_resolves_aliases_and_symlinks() {
     let tmp = tempdir().unwrap();
-    let projects = tmp.path().join("projects");
+    // The index stores artifact dirs in the projects root's lexical form, and
+    // macOS's `/var` -> `/private/var` link would otherwise make `canonical`
+    // differ from the indexed path.
+    let root = tmp.path().canonicalize().unwrap();
+    let projects = root.join("projects");
     let dir = artifact(&projects, "20261116120000");
     write_named(&dir, json!({"name": "pointer-target"}));
-    let index = rebuild_index(tmp.path(), &projects);
+    let index = rebuild_index(&root, &projects);
     let canonical = dir.canonicalize().unwrap();
-    let alias = tmp.path().join("alias-pointer");
+    let alias = root.join("alias-pointer");
     upsert_agent_artifact_alias(
         &index,
         &alias.to_string_lossy(),
         &canonical.to_string_lossy(),
     )
     .unwrap();
-    let link = tmp.path().join("symlink-pointer");
+    let link = root.join("symlink-pointer");
     std::os::unix::fs::symlink(&canonical, &link).unwrap();
 
     for path in [

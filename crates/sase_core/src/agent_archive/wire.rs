@@ -257,6 +257,7 @@ pub enum NamedDismissedBundleAvailabilityWire {
 /// One validated bundle candidate returned by a named lookup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedDismissedBundleHitWire {
+    /// Reported under the caller's `root`, matching the stored `bundle_path` key.
     pub bundle_path: String,
     pub artifacts_dir: String,
     pub raw_suffix: String,
