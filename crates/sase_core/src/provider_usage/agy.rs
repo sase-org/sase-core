@@ -22,6 +22,8 @@
 //!   anything else marks the observation `Partial`.
 //! - Logged-out envelope: an `ERROR` status whose error text mentions
 //!   authentication is `unauthenticated` / `logged_out`.
+//! - Unstarted sentinel: an at-or-before-epoch `reset_time` means the
+//!   vendor has no reset clock for that bucket.
 
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
@@ -43,6 +45,7 @@ const LOGGED_OUT_DIAGNOSTIC: &str = "agy_usage_logged_out";
 const PROBE_FAILED_PREFIX: &str = "agy_usage_probe_failed";
 const DISABLED_BUCKET_DIAGNOSTIC: &str = "agy_usage_bucket_disabled";
 const TSV_UNMATCHED_DIAGNOSTIC: &str = "agy_usage_tsv_unmatched";
+const MALFORMED_BUCKET_DIAGNOSTIC: &str = "agy_usage_bucket_malformed";
 
 const WEEK_SECONDS: f64 = 7.0 * 24.0 * 60.0 * 60.0;
 const FIVE_HOUR_SECONDS: f64 = 5.0 * 60.0 * 60.0;
@@ -223,6 +226,11 @@ struct BucketOutcome {
     note: Option<(BucketNote, String)>,
 }
 
+enum BucketError {
+    Unattributable,
+    Malformed(String),
+}
+
 fn buckets_observation(
     request: &ProviderUsageNormalizeAgyUsageRequestWire,
     payload: &Map<String, Value>,
@@ -232,6 +240,7 @@ fn buckets_observation(
     let mut windows = Vec::new();
     let mut disabled: Vec<String> = Vec::new();
     let mut unmatched: Vec<String> = Vec::new();
+    let mut malformed: Vec<String> = Vec::new();
     let mut saw_bucket = false;
     for group in groups {
         let Some(group_map) = group.as_object() else {
@@ -262,7 +271,10 @@ fn buckets_observation(
                         None => {}
                     }
                 }
-                Err(()) => {
+                Err(BucketError::Malformed(id)) => {
+                    malformed.push(id);
+                }
+                Err(BucketError::Unattributable) => {
                     return error_observation(request, MALFORMED_DIAGNOSTIC);
                 }
             }
@@ -271,8 +283,9 @@ fn buckets_observation(
     if windows.is_empty() {
         // Buckets that cannot be read are never silent zeros. Unmatched
         // rows have no honest inventory to report, so they stay an error;
-        // uniformly disabled buckets are an empty inventory.
-        if !unmatched.is_empty() || !saw_bucket {
+        // an unreadable inventory must never look empty; uniformly
+        // disabled buckets are an empty inventory.
+        if !unmatched.is_empty() || !saw_bucket || !malformed.is_empty() {
             return error_observation(request, MALFORMED_DIAGNOSTIC);
         }
         let diagnostic = if disabled.is_empty() {
@@ -295,6 +308,12 @@ fn buckets_observation(
             unmatched.join(",")
         ));
     }
+    if !malformed.is_empty() {
+        notes.push(format!(
+            "{MALFORMED_BUCKET_DIAGNOSTIC}:{}",
+            malformed.join(",")
+        ));
+    }
     ProviderUsageObservationWire {
         schema_version: PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
         provider: request.provider.clone(),
@@ -311,7 +330,7 @@ fn buckets_observation(
         } else {
             Some(notes.join("; "))
         },
-        completeness: if unmatched.is_empty() {
+        completeness: if unmatched.is_empty() && malformed.is_empty() {
             UsageCompleteness::Complete
         } else {
             UsageCompleteness::Partial
@@ -330,20 +349,33 @@ fn bucket_window(
     group_name: &str,
     bucket: &Value,
     tsv: &[(String, String, String)],
-) -> std::result::Result<BucketOutcome, ()> {
-    let bucket_map = bucket.as_object().ok_or(())?;
-    let bucket_id = bucket_map.get("id").and_then(Value::as_str).ok_or(())?;
-    let bucket_name =
-        bucket_map.get("name").and_then(Value::as_str).ok_or(())?;
-    if bucket_id.is_empty() || bucket_name.is_empty() {
-        return Err(());
-    }
+) -> std::result::Result<BucketOutcome, BucketError> {
+    let bucket_map = bucket.as_object().ok_or(BucketError::Unattributable)?;
+    let bucket_id = match bucket_map.get("id").and_then(Value::as_str) {
+        Some(id) if !id.is_empty() => id,
+        _ => return Err(BucketError::Unattributable),
+    };
+    let malformed = || BucketError::Malformed(bucket_id.to_string());
+    let bucket_name = match bucket_map.get("name").and_then(Value::as_str) {
+        Some(name) if !name.is_empty() => name,
+        _ => return Err(malformed()),
+    };
     let duration_seconds =
         duration_from_window(bucket_map.get("window").and_then(Value::as_str));
     let resets_at = match bucket_map.get("reset_time") {
         None | Some(Value::Null) => None,
-        Some(Value::String(raw)) => Some(parse_reset_time(raw).ok_or(())?),
-        Some(_) => return Err(()),
+        Some(Value::String(raw)) => {
+            let parsed = parse_reset_time(raw).ok_or_else(malformed)?;
+            // Epoch-zero and Go's zero time mean the vendor has not started
+            // a reset clock. A strictly positive stamp whose derived period
+            // starts before the epoch is still bad vendor data.
+            if parsed <= 0.0 {
+                None
+            } else {
+                Some(parsed)
+            }
+        }
+        Some(_) => return Err(malformed()),
     };
     let used_percent = match bucket_map.get("remaining_fraction") {
         None | Some(Value::Null) => {
@@ -372,38 +404,38 @@ fn bucket_window(
             }
         }
         Some(Value::Number(number)) => {
-            let remaining = number.as_f64().ok_or(())?;
+            let remaining = number.as_f64().ok_or_else(malformed)?;
             if !remaining.is_finite() || !(0.0..=1.0).contains(&remaining) {
-                return Err(());
+                return Err(malformed());
             }
             ((1.0 - remaining) * 100.0).clamp(0.0, 100.0)
         }
-        Some(_) => return Err(()),
+        Some(_) => return Err(malformed()),
     };
-    Ok(BucketOutcome {
-        window: Some(UsageWindowObservationWire {
-            key: bucket_id.to_string(),
-            label: format!("{group_name} {bucket_name}"),
-            used_percent,
-            resets_at,
-            duration_seconds,
-            period_start: match (resets_at, duration_seconds) {
-                (Some(resets), Some(duration)) => Some(resets - duration),
-                _ => None,
-            },
-            applicability: applicability(
-                bucket_id,
-                group_name,
-                &request.model_ids,
-            ),
-            // The envelope carries no vendor timestamp, so the collection
-            // time is the observation time.
-            observed_at: request.now,
-            source: UsageSource::Probe,
-            vendor_state: UsageVendorState::Allowed,
+    let window = UsageWindowObservationWire {
+        key: bucket_id.to_string(),
+        label: format!("{group_name} {bucket_name}"),
+        used_percent,
+        resets_at,
+        duration_seconds,
+        period_start: match (resets_at, duration_seconds) {
+            (Some(resets), Some(duration)) => Some(resets - duration),
+            _ => None,
+        },
+        applicability: applicability(bucket_id, group_name, &request.model_ids),
+        // The envelope carries no vendor timestamp, so the collection
+        // time is the observation time.
+        observed_at: request.now,
+        source: UsageSource::Probe,
+        vendor_state: UsageVendorState::Allowed,
+    };
+    match super::validate_window(&request.provider, window, request.now) {
+        Ok(validated) => Ok(BucketOutcome {
+            window: Some(validated),
+            note: None,
         }),
-        note: None,
-    })
+        Err(_) => Err(malformed()),
+    }
 }
 
 fn applicability(
@@ -721,6 +753,75 @@ mod tests {
         })
     }
 
+    /// agy 1.5.x shape: unstarted 3p buckets carry remaining_fraction 1,
+    /// no description, and the Unix-epoch reset sentinel.
+    fn live_payload_1_5_17() -> Value {
+        json!({
+            "conversation_id": "",
+            "status": "SUCCESS",
+            "response": "Gemini Models\tWeekly Limit Remaining\t96%\t2026-09-27T20:14:34Z\nGemini Models\tFive Hour Limit Remaining\t87%\t2026-09-21T23:31:12Z\nClaude and GPT models\tWeekly Limit Remaining\t100%\t1970-01-01T00:00:00Z\nClaude and GPT models\tFive Hour Limit Remaining\t100%\t1970-01-01T00:00:00Z\n",
+            "duration_seconds": 0,
+            "num_turns": 0,
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "thinking_tokens": 0,
+                "cache_read_tokens": 0,
+                "total_tokens": 0,
+            },
+            "command": {
+                "name": "usage",
+                "data": {
+                    "description": "Within each group, models share a weekly limit and a 5-hour limit. Gemini Models includes Gemini Flash and Gemini Pro. Claude and GPT models includes Claude Opus, Claude Sonnet, and GPT-OSS.",
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "description": "Models within this group: Gemini Flash, Gemini Pro",
+                            "buckets": [
+                                {
+                                    "id": "gemini-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "description": "You have used some of your weekly limit, it will fully refresh in 6 days.",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.9612414240837097,
+                                    "reset_time": "2026-09-27T20:14:34Z",
+                                },
+                                {
+                                    "id": "gemini-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "description": "You have used some of your 5-hour limit, it will fully refresh in 4 hours, 14 minutes.",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.8664969801902771,
+                                    "reset_time": "2026-09-21T23:31:12Z",
+                                },
+                            ],
+                        },
+                        {
+                            "name": "Claude and GPT models",
+                            "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+                            "buckets": [
+                                {
+                                    "id": "3p-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 1,
+                                    "reset_time": "1970-01-01T00:00:00Z",
+                                },
+                                {
+                                    "id": "3p-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "window": "5h",
+                                    "remaining_fraction": 1,
+                                    "reset_time": "1970-01-01T00:00:00Z",
+                                },
+                            ],
+                        },
+                    ],
+                },
+            },
+        })
+    }
+
     fn bucket_mut(
         payload: &mut Value,
         group: usize,
@@ -738,6 +839,24 @@ mod tests {
             .iter()
             .find(|window| window.key == key)
             .unwrap_or_else(|| panic!("missing window {key}"))
+    }
+
+    fn assert_isolated_malformed(
+        payload: Value,
+        dropped_key: &str,
+        remaining: usize,
+    ) {
+        let observation = normalize_agy_usage(request(payload)).unwrap();
+        assert_eq!(observation.outcome, UsageCollectionOutcome::Ok);
+        assert_eq!(observation.completeness, UsageCompleteness::Partial);
+        assert_eq!(observation.windows.len(), remaining);
+        assert!(observation
+            .windows
+            .iter()
+            .all(|window| window.key != dropped_key));
+        let diagnostic = observation.diagnostic.as_deref().unwrap();
+        assert!(diagnostic.contains(MALFORMED_BUCKET_DIAGNOSTIC));
+        assert!(diagnostic.contains(dropped_key));
     }
 
     fn assert_malformed(payload: Value) {
@@ -849,6 +968,54 @@ mod tests {
             third_five_hour.period_start,
             Some(1_790_036_186.0 - 18_000.0)
         );
+    }
+
+    #[test]
+    fn live_payload_1_5_17_treats_epoch_reset_as_absent() {
+        let observation =
+            normalize_agy_usage(request(live_payload_1_5_17())).unwrap();
+        assert_eq!(observation.outcome, UsageCollectionOutcome::Ok);
+        assert_eq!(observation.completeness, UsageCompleteness::Complete);
+        assert_eq!(observation.diagnostic, None);
+        assert_eq!(observation.windows.len(), 4);
+
+        let weekly = window_by_key(&observation, "gemini-weekly");
+        assert!((weekly.used_percent - 3.875_857_591_629_03).abs() < 1e-9);
+        assert_eq!(weekly.resets_at, Some(1_790_540_074.0));
+        assert_eq!(weekly.duration_seconds, Some(604_800.0));
+        assert_eq!(weekly.period_start, Some(1_790_540_074.0 - 604_800.0));
+
+        let five_hour = window_by_key(&observation, "gemini-5h");
+        assert!((five_hour.used_percent - 13.350_301_980_972_29).abs() < 1e-9);
+        assert_eq!(five_hour.resets_at, Some(1_790_033_472.0));
+        assert_eq!(five_hour.duration_seconds, Some(18_000.0));
+        assert_eq!(five_hour.period_start, Some(1_790_033_472.0 - 18_000.0));
+
+        let third_weekly = window_by_key(&observation, "3p-weekly");
+        assert_eq!(third_weekly.used_percent, 0.0);
+        assert_eq!(third_weekly.resets_at, None);
+        assert_eq!(third_weekly.period_start, None);
+        assert_eq!(third_weekly.duration_seconds, Some(604_800.0));
+
+        let third_five_hour = window_by_key(&observation, "3p-5h");
+        assert_eq!(third_five_hour.used_percent, 0.0);
+        assert_eq!(third_five_hour.resets_at, None);
+        assert_eq!(third_five_hour.period_start, None);
+        assert_eq!(third_five_hour.duration_seconds, Some(18_000.0));
+    }
+
+    #[test]
+    fn go_zero_time_reset_is_absent() {
+        let mut payload = live_payload_1_5_17();
+        bucket_mut(&mut payload, 1, 0)["reset_time"] =
+            json!("0001-01-01T00:00:00Z");
+        let observation = normalize_agy_usage(request(payload)).unwrap();
+        assert_eq!(observation.outcome, UsageCollectionOutcome::Ok);
+        let window = window_by_key(&observation, "3p-weekly");
+        assert_eq!(window.resets_at, None);
+        assert_eq!(window.period_start, None);
+        assert_eq!(window.used_percent, 0.0);
+        assert_eq!(window.duration_seconds, Some(604_800.0));
     }
 
     #[test]
@@ -1134,7 +1301,7 @@ mod tests {
         for bad in [json!(1.5), json!(-0.1), json!("0.5"), json!(true)] {
             let mut payload = live_payload();
             bucket_mut(&mut payload, 0, 0)["remaining_fraction"] = bad;
-            assert_malformed(payload);
+            assert_isolated_malformed(payload, "gemini-weekly", 3);
         }
     }
 
@@ -1142,11 +1309,11 @@ mod tests {
     fn bad_bucket_members_are_malformed() {
         let mut payload = live_payload();
         bucket_mut(&mut payload, 0, 0)["reset_time"] = json!("tomorrow");
-        assert_malformed(payload);
+        assert_isolated_malformed(payload, "gemini-weekly", 3);
 
         let mut payload = live_payload();
         bucket_mut(&mut payload, 0, 0)["reset_time"] = json!(7);
-        assert_malformed(payload);
+        assert_isolated_malformed(payload, "gemini-weekly", 3);
 
         let mut payload = live_payload();
         bucket_mut(&mut payload, 0, 0)
@@ -1166,11 +1333,59 @@ mod tests {
         assert!(observation.authoritative_empty);
 
         // A vendor reset so early that the derived period would start
-        // before the epoch fails validation, not the binding.
+        // before the epoch drops only that bucket.
         let mut payload = live_payload();
         bucket_mut(&mut payload, 0, 0)["reset_time"] =
             json!("1970-01-01T00:01:40Z");
+        assert_isolated_malformed(payload, "gemini-weekly", 3);
+    }
+
+    #[test]
+    fn lone_malformed_bucket_is_whole_observation_error() {
+        let mut payload = live_payload();
+        payload["command"]["data"]["groups"] = json!([{
+            "name": "Gemini Models",
+            "buckets": [{
+                "id": "gemini-weekly",
+                "name": "Weekly Limit Remaining",
+                "window": "weekly",
+                "remaining_fraction": 1.5,
+                "reset_time": "2026-09-27T20:14:34Z",
+            }],
+        }]);
         assert_malformed(payload);
+
+        let mut payload = live_payload();
+        payload["command"]["data"]["groups"] = json!([{
+            "name": "Gemini Models",
+            "buckets": [{
+                "id": "gemini-weekly",
+                "name": "Weekly Limit Remaining",
+                "window": "weekly",
+                "remaining_fraction": 1,
+                "reset_time": "tomorrow",
+            }],
+        }]);
+        assert_malformed(payload);
+    }
+
+    #[test]
+    fn unstarted_sentinel_survives_a_sibling_malformed_bucket() {
+        let mut payload = live_payload_1_5_17();
+        bucket_mut(&mut payload, 0, 0)["remaining_fraction"] = json!(1.5);
+        let observation = normalize_agy_usage(request(payload)).unwrap();
+        assert_eq!(observation.outcome, UsageCollectionOutcome::Ok);
+        assert_eq!(observation.completeness, UsageCompleteness::Partial);
+        assert_eq!(observation.windows.len(), 3);
+        assert!(observation
+            .windows
+            .iter()
+            .all(|window| window.key != "gemini-weekly"));
+        assert_eq!(window_by_key(&observation, "3p-weekly").resets_at, None);
+        assert_eq!(window_by_key(&observation, "3p-5h").resets_at, None);
+        let diagnostic = observation.diagnostic.as_deref().unwrap();
+        assert!(diagnostic.contains(MALFORMED_BUCKET_DIAGNOSTIC));
+        assert!(diagnostic.contains("gemini-weekly"));
     }
 
     #[test]
