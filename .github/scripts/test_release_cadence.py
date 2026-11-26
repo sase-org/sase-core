@@ -11,12 +11,18 @@ the merge safety guards. Run with ``python3 -m unittest discover -s .github/scri
 from __future__ import annotations
 
 import re
+import sys
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import release_plz_merge as merge  # noqa: E402
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-plz.yml"
+WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 MERGE_SCRIPT = REPO_ROOT / ".github" / "scripts" / "release_plz_merge.py"
 
 HEAL_CRON = "23 */6 * * *"
@@ -179,6 +185,54 @@ class DecisionRecordTests(unittest.TestCase):
         self.assertIn("once a day", text)
         self.assertIn("Do not restore merge-on-push", text)
         self.assertIn("dry_run=false", text)
+
+
+def pr_workflow_texts() -> dict[str, str]:
+    """Every workflow file whose `on:` block contains `pull_request:`."""
+    found: dict[str, str] = {}
+    for path in sorted(WORKFLOWS_DIR.glob("*.yml")):
+        text = path.read_text()
+        on_block = text.split("\njobs:\n", 1)[0]
+        if re.search(r"(?m)^  pull_request:", on_block):
+            found[path.name] = text
+    return found
+
+
+def pr_job_timeouts() -> dict[str, int]:
+    """`filename:job -> timeout-minutes` for every pull-request check job."""
+    timeouts: dict[str, int] = {}
+    for filename, text in pr_workflow_texts().items():
+        jobs_section = text.split("\njobs:\n", 1)[1]
+        for match in re.finditer(r"(?m)^  ([A-Za-z0-9_-]+):\n", jobs_section):
+            job = match.group(1)
+            block = job_block(text, job)
+            timeout = re.search(r"(?m)^    timeout-minutes: (\d+)\s*$", block)
+            assert timeout is not None, f"{filename}:{job} has no timeout-minutes"
+            timeouts[f"{filename}:{job}"] = int(timeout.group(1))
+    return timeouts
+
+
+class MergeBudgetTests(unittest.TestCase):
+    def test_every_pull_request_check_job_declares_a_timeout(self) -> None:
+        workflows = pr_workflow_texts()
+        self.assertTrue({"ci.yml", "pr-title.yml"} <= set(workflows), set(workflows))
+        timeouts = pr_job_timeouts()
+        self.assertTrue(timeouts)
+        for key, minutes in timeouts.items():
+            self.assertGreater(minutes, 0, key)
+
+    def test_one_pass_outlasts_the_slowest_pull_request_check(self) -> None:
+        slowest = max(pr_job_timeouts().values())
+        self.assertGreaterEqual(merge.CHECK_TIMEOUT_SECONDS, (slowest + 10) * 60)
+
+    def test_merge_job_outlasts_a_pass_and_one_rerun_pass(self) -> None:
+        block = job_block(workflow_text(), "release-plz-merge")
+        match = re.search(r"(?m)^    timeout-minutes: (\d+)\s*$", block)
+        assert match is not None, "release-plz-merge has no timeout-minutes"
+        merge_minutes = int(match.group(1))
+        self.assertGreaterEqual(
+            merge_minutes * 60, 2 * merge.CHECK_TIMEOUT_SECONDS + 300
+        )
 
 
 if __name__ == "__main__":

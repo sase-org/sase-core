@@ -199,6 +199,65 @@ class ReleasePlzMergeTests(unittest.TestCase):
         self.assertEqual(github.reruns, [])
         self.assertEqual(github.merges, [])
 
+    def test_check_timeout_is_typed_core_cut_red_without_rerun(self) -> None:
+        github = FakeGitHub([[check("pending", name="cargo fmt + clippy + test (macos-latest)")]])
+        result = self.run_merge(github)
+        self.assertEqual(result.outcome, "CORE_CUT_RED")
+        self.assertEqual(result.detail, "check timeout")
+        self.assertEqual(github.reruns, [])
+        self.assertEqual(github.merges, [])
+
+    def test_rerun_gets_a_fresh_budget_after_a_slow_first_pass(self) -> None:
+        failed_url = "https://github.com/sase-org/sase-core/actions/runs/123"
+        failing = {
+            "attempt": 1,
+            "conclusion": "failure",
+            "status": "completed",
+            "url": failed_url,
+        }
+        succeeding = {
+            "attempt": 2,
+            "conclusion": "success",
+            "status": "completed",
+            "url": failed_url,
+        }
+        # FakeGitHub indexes check_rounds by call, so expand the slow first
+        # pass into one pending round per poll before the failure surfaces.
+        github = FakeGitHub(
+            [[check("pending")] for _ in range(9)]
+            + [[check("fail")], [check("pass")]],
+            run_infos={"123": [failing] * 6 + [succeeding]},
+        )
+        clock = FakeClock()
+        result = merge.merge_release_pr(
+            github,
+            register_timeout=10,
+            check_timeout=10,
+            poll_interval=1,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+        self.assertEqual(result.outcome, "MERGED")
+        self.assertEqual(github.reruns, ["123"])
+        self.assertEqual(github.merges, [42])
+
+    def test_rerun_that_outlasts_its_own_budget_is_typed_core_cut_red(self) -> None:
+        github = FakeGitHub(
+            [[check("fail")], [check("fail")]],
+            run_infos={
+                "123": {
+                    "attempt": 1,
+                    "conclusion": "failure",
+                    "status": "completed",
+                    "url": "https://github.com/sase-org/sase-core/actions/runs/123",
+                }
+            },
+        )
+        result = self.run_merge(github)
+        self.assertEqual(result.outcome, "CORE_CUT_RED")
+        self.assertEqual(result.detail, "rerun attempt did not complete before the deadline")
+        self.assertEqual(github.merges, [])
+
 
 class ReleasePrFilterTests(unittest.TestCase):
     def test_filter_selects_only_release_plz_pr_with_semver_title(self) -> None:

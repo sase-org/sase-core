@@ -214,7 +214,11 @@ the merge entirely:
 gh workflow run release-plz.yml --repo sase-org/sase-core -f dry_run=false
 ```
 
-That updates the release PR, waits for its checks, and squash-merges it. The merge is a push to `master`, and that run
+That updates the release PR, waits for its checks, and squash-merges it. The cut's own release-PR push restarts CI,
+so the merge job waits one full pass from zero: 130 minutes, the slowest PR check's 120-minute cap plus slack. It then
+reruns failed jobs once and waits one more pass; the job's 270-minute timeout covers both. `test_release_cadence.py`
+ties these numbers to the workflow timeouts, so raise them together. A check that is slow but green now merges instead
+of reporting `CORE_CUT_RED`. The merge is a push to `master`, and that run
 tags the version, then builds and publishes it. If the push starts no run, the next six-hourly heal tags and publishes
 it. Keep manual cuts rare: each one is about 75 MB of quota, and every publish reports the headroom left in its job
 summary.

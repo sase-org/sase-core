@@ -12,6 +12,7 @@ jobs:
   conventional-title:
     name: Conventional PR title
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Validate squash-merge title
         env:
@@ -33,6 +34,7 @@ jobs:
   cargo-version-guard:
     name: Cargo version guard
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: ${{ !startsWith(github.head_ref, 'release-plz-') && !contains(github.event.pull_request.labels.*.name, 'manual-version') }}
     steps:
       - uses: actions/checkout@v4

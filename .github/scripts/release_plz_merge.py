@@ -21,8 +21,10 @@ PR_FILTER = (
 )
 CHECK_FIELDS = "bucket,state,link,name"
 REGISTER_TIMEOUT_SECONDS = 300
-CHECK_TIMEOUT_SECONDS = 2400
-POLL_INTERVAL_SECONDS = 10
+# One full pass of the slowest PR check (120 min) plus 10 minutes for
+# queueing and check registration.
+CHECK_TIMEOUT_SECONDS = 130 * 60
+POLL_INTERVAL_SECONDS = 30
 
 
 class MergeError(Exception):
@@ -372,10 +374,13 @@ def merge_release_pr(
         name, url, attempt, detail = refusal
         return MergeResult("CORE_CUT_RED", name, url, attempt, number, detail)
 
+    # A slow first pass must not starve the rerun: each rerun phase gets a
+    # fresh budget instead of reusing the first pass's deadline.
+    rerun_deadline = monotonic() + check_timeout
     pending_rerun = wait_for_reruns(
         github,
         requested_reruns,
-        deadline=check_deadline,
+        deadline=rerun_deadline,
         poll_interval=poll_interval,
         monotonic=monotonic,
         sleep=sleep,
@@ -393,7 +398,7 @@ def merge_release_pr(
         check_timeout=check_timeout,
         poll_interval=poll_interval,
         already_registered=True,
-        deadline=check_deadline,
+        deadline=rerun_deadline,
         monotonic=monotonic,
         sleep=sleep,
     )

@@ -611,7 +611,7 @@ jobs:
     name: Merge release PR
     needs: release-plz-pr
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 270
     # Runs only on a release cut: the daily schedule or a dispatch that is not a
     # dry run. Pushes and the six-hourly heal skip it (see the header comment).
     if: ${{ github.repository_owner == 'sase-org' && ((github.event_name == 'workflow_dispatch' && !inputs.dry_run) || github.event.schedule == '41 7 * * *') }}
@@ -627,8 +627,10 @@ jobs:
     # predecessor, including a hosted-runner queue entry that can otherwise own
     # the branch-scoped group indefinitely. Only release cuts share a group: a
     # push or heal run that skips this job gets a group of its own, so it cannot
-    # evict an in-flight cut (which waits on checks for up to 45 minutes) even if
+    # evict an in-flight cut (which waits on checks for up to 270 minutes) even if
     # GitHub resolves a skipped job's concurrency group before its `if`.
+    # Every run re-pushes the release PR, so a cut waits through a full CI pass
+    # from zero, plus at most one rerun pass.
     concurrency:
       group: release-plz-merge-${{ github.ref }}-${{ ((github.event_name == 'workflow_dispatch' && !inputs.dry_run) || github.event.schedule == '41 7 * * *') && 'cut' || github.run_id }}
       cancel-in-progress: true
