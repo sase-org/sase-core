@@ -11,7 +11,7 @@ use super::lookup_recovery::{
 use super::readers::AGENT_ARTIFACT_INDEX_PROJECTION_BUSY_TIMEOUT;
 use super::storage::{
     open_index_read_only_no_migrate, read_index_schema_version,
-    resolve_index_artifact_dir,
+    resolve_index_artifact_dir, sqlite_error_diagnostic,
 };
 use super::{placeholders, LOOKUP_SESSION_INDEX_COLUMN};
 use crate::agent_scan::layout::ACE_RUN_WORKFLOW_DIR;
@@ -405,12 +405,15 @@ fn query_hits(
     sql: &str,
     params: &[String],
 ) -> Result<Vec<AgentArtifactLookupHitWire>, String> {
-    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let mut stmt =
+        conn.prepare(sql).map_err(|e| sqlite_error_diagnostic(&e))?;
     let mut rows = stmt
         .query(params_from_iter(params.iter()))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| sqlite_error_diagnostic(&e))?;
     let mut hits = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+    while let Some(row) =
+        rows.next().map_err(|e| sqlite_error_diagnostic(&e))?
+    {
         hits.push(hit_from_row(row)?);
     }
     Ok(hits)

@@ -567,6 +567,40 @@ fn busy_index_falls_back_without_mutating() {
     assert!(!result.truncated);
     assert_eq!(result.source, "fallback");
     assert_eq!(result.hits.len(), 1);
+    let diagnostic = result
+        .diagnostic
+        .expect("busy lookup must carry a diagnostic");
+    assert!(
+        diagnostic.contains("extended_code="),
+        "busy diagnostic must name the SQLite extended code: {diagnostic}"
+    );
+    assert!(
+        diagnostic
+            .to_ascii_lowercase()
+            .contains("database is locked")
+            || diagnostic.to_ascii_lowercase().contains("busy"),
+        "decorated diagnostic must stay busy-classified: {diagnostic}"
+    );
+}
+
+#[test]
+fn forced_unavailability_keeps_no_diagnostic() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    write_named(
+        &artifact(&projects, "20261116120000"),
+        json!({"name": "forced-src"}),
+    );
+    let index = rebuild_index(tmp.path(), &projects);
+    let mut query = names_query(&["forced-src"]);
+    query.forced_unavailability =
+        Some(AgentArtifactLookupAvailabilityWire::Busy);
+    let result = lookup_agent_artifacts(&index, &projects, query);
+    assert_eq!(
+        result.availability,
+        AgentArtifactLookupAvailabilityWire::Busy
+    );
+    assert!(result.diagnostic.is_none());
 }
 
 #[test]

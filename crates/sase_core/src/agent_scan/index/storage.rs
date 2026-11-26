@@ -406,6 +406,26 @@ pub(super) fn open_index_read_only(
     Ok(conn)
 }
 
+/// Diagnostic text for a lookup-read SQLite failure.
+///
+/// Busy/locked failures carry the extended code (for example
+/// `SQLITE_BUSY_RECOVERY`, 261) so the next busy failure names its lock
+/// class. Other errors keep their current text. The decorated text still
+/// contains the original message, so `is_busy_error` classification is
+/// unchanged.
+pub(super) fn sqlite_error_diagnostic(error: &rusqlite::Error) -> String {
+    if let rusqlite::Error::SqliteFailure(info, _) = error {
+        if matches!(
+            info.code,
+            rusqlite::ErrorCode::DatabaseBusy
+                | rusqlite::ErrorCode::DatabaseLocked
+        ) {
+            return format!("{error} (extended_code={})", info.extended_code);
+        }
+    }
+    error.to_string()
+}
+
 /// Open the index read-only without creating, migrating, or falling
 /// back to a read-write connection.
 ///
@@ -420,8 +440,9 @@ pub(super) fn open_index_read_only_no_migrate(
         index_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
-    .map_err(|e| e.to_string())?;
-    conn.busy_timeout(busy_timeout).map_err(|e| e.to_string())?;
+    .map_err(|e| sqlite_error_diagnostic(&e))?;
+    conn.busy_timeout(busy_timeout)
+        .map_err(|e| sqlite_error_diagnostic(&e))?;
     Ok(conn)
 }
 
@@ -434,7 +455,7 @@ pub(super) fn read_index_schema_version(
             [],
             |row| row.get(0),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| sqlite_error_diagnostic(&e))?;
     raw.parse::<u32>().map_err(|e| e.to_string())
 }
 
@@ -448,7 +469,7 @@ pub(super) fn resolve_index_artifact_dir(
         |row| row.get::<_, String>(0),
     )
     .optional()
-    .map_err(|e| e.to_string())
+    .map_err(|e| sqlite_error_diagnostic(&e))
     .map(|value| value.unwrap_or_else(|| artifact_dir.to_string()))
 }
 

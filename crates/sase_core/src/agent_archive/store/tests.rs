@@ -310,6 +310,20 @@ fn named_bundle_lookup_busy_timeout_is_bounded_and_busy_index_recovers() {
     assert!(result.complete);
     assert_eq!(result.source, "fallback");
     assert_eq!(result.winner.unwrap().bundle_path, path.to_string_lossy());
+    let diagnostic = result
+        .diagnostic
+        .expect("busy bundle lookup must carry a diagnostic");
+    assert!(
+        diagnostic.contains("extended_code="),
+        "busy bundle diagnostic must name the SQLite extended code: {diagnostic}"
+    );
+    assert!(
+        diagnostic
+            .to_ascii_lowercase()
+            .contains("database is locked")
+            || diagnostic.to_ascii_lowercase().contains("busy"),
+        "decorated bundle diagnostic must stay busy-classified: {diagnostic}"
+    );
 }
 
 #[test]

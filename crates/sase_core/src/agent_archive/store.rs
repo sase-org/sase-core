@@ -188,8 +188,28 @@ pub enum ArchiveStoreError {
 
 impl From<rusqlite::Error> for ArchiveStoreError {
     fn from(error: rusqlite::Error) -> Self {
-        ArchiveStoreError::Sqlite(error.to_string())
+        ArchiveStoreError::Sqlite(sqlite_error_diagnostic(&error))
     }
+}
+
+/// Diagnostic text for a named-bundle lookup SQLite failure.
+///
+/// Busy/locked failures carry the extended code (for example
+/// `SQLITE_BUSY_RECOVERY`, 261) so the next busy failure names its lock
+/// class, matching the `tool_run` precedent. Other errors keep their
+/// current text. The decorated text still contains the original message,
+/// so `named_lookup_error_availability` classification is unchanged.
+fn sqlite_error_diagnostic(error: &rusqlite::Error) -> String {
+    if let rusqlite::Error::SqliteFailure(info, _) = error {
+        if matches!(
+            info.code,
+            rusqlite::ErrorCode::DatabaseBusy
+                | rusqlite::ErrorCode::DatabaseLocked
+        ) {
+            return format!("{error} (extended_code={})", info.extended_code);
+        }
+    }
+    error.to_string()
 }
 
 pub fn index_path_for_root(root: &Path) -> PathBuf {
@@ -1246,7 +1266,7 @@ fn open_named_lookup_store(
     let conn =
         Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|error| {
-                let diagnostic = error.to_string();
+                let diagnostic = sqlite_error_diagnostic(&error);
                 (
                     named_lookup_error_availability(&diagnostic),
                     Some(diagnostic),
@@ -1254,7 +1274,7 @@ fn open_named_lookup_store(
             })?;
     conn.busy_timeout(NAMED_BUNDLE_LOOKUP_BUSY_TIMEOUT)
         .map_err(|error| {
-            let diagnostic = error.to_string();
+            let diagnostic = sqlite_error_diagnostic(&error);
             (
                 named_lookup_error_availability(&diagnostic),
                 Some(diagnostic),
@@ -1269,7 +1289,7 @@ fn open_named_lookup_store(
     let version = match version_row {
         Ok(version) => schema_version_from_row(Some(version)),
         Err(error) => {
-            let diagnostic = error.to_string();
+            let diagnostic = sqlite_error_diagnostic(&error);
             let availability = if diagnostic.contains("no such table")
                 || diagnostic.contains("no such column")
             {
@@ -1346,12 +1366,17 @@ fn query_named_bundle_index(
                FROM dismissed_bundle_summaries \
                WHERE agent_name = ?1 OR workflow_name = ?1 \
                ORDER BY raw_suffix DESC, filename DESC LIMIT ?2";
-    let mut statement = conn.prepare(sql).map_err(|error| error.to_string())?;
+    let mut statement = conn
+        .prepare(sql)
+        .map_err(|error| sqlite_error_diagnostic(&error))?;
     let limit = budget.saturating_add(1).min(i64::MAX as u64) as i64;
     let mut rows = statement
         .query(rusqlite::params![name, limit])
-        .map_err(|error| error.to_string())?;
-    while let Some(row) = rows.next().map_err(|error| error.to_string())? {
+        .map_err(|error| sqlite_error_diagnostic(&error))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| sqlite_error_diagnostic(&error))?
+    {
         if result.file_probes >= budget {
             result.complete = false;
             result.truncated = true;
