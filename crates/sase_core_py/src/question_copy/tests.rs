@@ -27,6 +27,21 @@ fn question_copy_bindings_round_trip_and_report_stable_errors() {
         assert_eq!(display["items"], normalized);
         assert_eq!(display["unavailable"], json!(0));
 
+        let candidates = py_detect_question_copy_candidates(
+            py,
+            "Run `--help` and see plan:202611/example.md.",
+            Vec::new(),
+        )
+        .unwrap();
+        let candidates = py_to_json_value(candidates.bind(py)).unwrap();
+        assert_eq!(
+            candidates,
+            json!([
+                {"text": "--help", "kind": "code"},
+                {"text": "plan:202611/example.md", "kind": "ref"}
+            ])
+        );
+
         let invalid =
             json_value_to_py(py, &json!([{"text": "bad\u{001b}value"}]))
                 .unwrap();

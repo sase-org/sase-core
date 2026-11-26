@@ -24,6 +24,23 @@ pub struct QuestionCopyDisplayWire {
     pub unavailable: usize,
 }
 
+/// The conservative source category for an automatically detected copy value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionCopyCandidateKind {
+    Code,
+    Url,
+    Ref,
+}
+
+/// One safe, deduplicated copy candidate found in question prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionCopyCandidateWire {
+    pub text: String,
+    pub kind: QuestionCopyCandidateKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuestionCopyError {
     pub code: String,

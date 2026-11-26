@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
 
 use super::{
-    display_question_copy, normalize_question_copy, QuestionCopyItemWire,
+    detect_question_copy_candidates, display_question_copy,
+    normalize_question_copy, QuestionCopyCandidateKind, QuestionCopyItemWire,
     QUESTION_COPY_MAX_ENTRIES, QUESTION_COPY_MAX_LABEL_CHARS,
     QUESTION_COPY_MAX_TEXT_BYTES,
 };
@@ -245,4 +246,94 @@ fn tolerant_display_counts_each_invalid_array_entry_once() {
     let display = display_question_copy(Some(&value));
     assert_eq!(display.items.len(), 1);
     assert_eq!(display.unavailable, 3);
+}
+
+#[test]
+fn found_in_text_detects_anonymized_spotlight_question_candidates() {
+    let question = concat!(
+        "Mac busy-process fixes are measured and recorded. ",
+        "Chrome: open chrome://settings/performance. ",
+        "Run `launchctl kickstart -k gui/501/com.apple/Spotlight`, ",
+        "then read @plan:202611/mac_busy_process_fixes.md. ",
+        "The folder /Users/person/Library/Application Support/app is prose."
+    );
+    let candidates = detect_question_copy_candidates(
+        question,
+        &["chrome://settings/performance".to_string()],
+    );
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(
+        candidates[0].text,
+        "launchctl kickstart -k gui/501/com.apple/Spotlight"
+    );
+    assert_eq!(candidates[0].kind, QuestionCopyCandidateKind::Code);
+    assert_eq!(candidates[1].text, "plan:202611/mac_busy_process_fixes.md");
+    assert_eq!(candidates[1].kind, QuestionCopyCandidateKind::Ref);
+}
+
+#[test]
+fn found_in_text_extracts_fences_and_filters_inline_code_noise() {
+    let question = concat!(
+        "Short `x` is noise; `safe/path`, `v1.2`, and `--verbose` are useful.\n",
+        "```sh\nlaunchctl kickstart -k gui/501/example\n\n```\n",
+        "A sufficiently long identifier is also retained: `abcdefghijkL`."
+    );
+    let candidates = detect_question_copy_candidates(question, &[]);
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "safe/path",
+            "v1.2",
+            "--verbose",
+            "launchctl kickstart -k gui/501/example",
+            "abcdefghijkL"
+        ]
+    );
+    assert!(candidates
+        .iter()
+        .all(|item| item.kind == QuestionCopyCandidateKind::Code));
+}
+
+#[test]
+fn found_in_text_trims_url_punctuation_and_keeps_balanced_parentheses() {
+    let candidates = detect_question_copy_candidates(
+        "Open file://host/path_(guide). Then chrome://settings/performance,",
+        &[],
+    );
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].text, "file://host/path_(guide)");
+    assert_eq!(candidates[1].text, "chrome://settings/performance");
+    assert!(candidates
+        .iter()
+        .all(|item| item.kind == QuestionCopyCandidateKind::Url));
+}
+
+#[test]
+fn found_in_text_skips_unsafe_values_and_deduplicates_before_capping() {
+    let unsafe_value = format!("```\nunsafe\u{001b}value\n```\n");
+    let question = format!(
+        "{unsafe_value}`--one` `--one` `--two` `--three` `--four` `--five` `--six`"
+    );
+    let candidates = detect_question_copy_candidates(&question, &[]);
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>(),
+        ["--one", "--two", "--three", "--four", "--five"]
+    );
+}
+
+#[test]
+fn found_in_text_only_detects_valid_artifact_refs_and_does_not_guess_paths() {
+    let candidates = detect_question_copy_candidates(
+        "See plan:202611/example.md and plan: . /Users/person/.cache stays prose.",
+        &[],
+    );
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].text, "plan:202611/example.md");
+    assert_eq!(candidates[0].kind, QuestionCopyCandidateKind::Ref);
 }

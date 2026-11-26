@@ -4,6 +4,7 @@ use crate::json_bridge::{py_to_json_value, serialize_to_py};
 use crate::prelude::*;
 use pyo3::wrap_pyfunction;
 use sase_core::question_copy::{
+    detect_question_copy_candidates as core_detect_question_copy_candidates,
     display_question_copy as core_display_question_copy,
     normalize_question_copy as core_normalize_question_copy,
 };
@@ -31,9 +32,22 @@ fn py_display_question_copy<'py>(
     serialize_to_py(py, &display)
 }
 
+#[pyfunction]
+#[pyo3(name = "detect_question_copy_candidates")]
+fn py_detect_question_copy_candidates<'py>(
+    py: Python<'py>,
+    question_text: &str,
+    declared_texts: Vec<String>,
+) -> PyResult<PyObject> {
+    let candidates =
+        core_detect_question_copy_candidates(question_text, &declared_texts);
+    serialize_to_py(py, &candidates)
+}
+
 pub(crate) fn register_question_copy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_normalize_question_copy, m)?)?;
     m.add_function(wrap_pyfunction!(py_display_question_copy, m)?)?;
+    m.add_function(wrap_pyfunction!(py_detect_question_copy_candidates, m)?)?;
     Ok(())
 }
 
