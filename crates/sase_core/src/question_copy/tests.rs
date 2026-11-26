@@ -313,7 +313,7 @@ fn found_in_text_trims_url_punctuation_and_keeps_balanced_parentheses() {
 
 #[test]
 fn found_in_text_skips_unsafe_values_and_deduplicates_before_capping() {
-    let unsafe_value = format!("```\nunsafe\u{001b}value\n```\n");
+    let unsafe_value = "```\nunsafe\u{001b}value\n```\n".to_string();
     let question = format!(
         "{unsafe_value}`--one` `--one` `--two` `--three` `--four` `--five` `--six`"
     );
