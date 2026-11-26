@@ -66,6 +66,7 @@ mod prompt_prediction;
 mod prose_diff;
 mod provider_policy;
 mod query;
+mod question_copy;
 mod release_steward;
 mod staged_handoff;
 mod stranded_work;
@@ -115,6 +116,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     project_onboarding::register_project_onboarding(m)?;
     project_stats::register_project_stats(m)?;
     project_tag::register_project_tag(m)?;
+    question_copy::register_question_copy(m)?;
     prose_diff::register_prose_diff(m)?;
     memory_history::register_memory_history(m)?;
     agent_launch::register_agent_launch(m)?;

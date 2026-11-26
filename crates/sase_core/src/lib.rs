@@ -135,6 +135,7 @@ pub mod provider_disable;
 pub mod provider_priority;
 pub mod provider_usage;
 pub mod query;
+pub mod question_copy;
 pub mod question_round;
 pub mod queue_directive;
 pub mod rebase_gate;
