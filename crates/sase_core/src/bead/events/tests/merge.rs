@@ -80,14 +80,7 @@ fn colliding_stream(
     title: &str,
     created_at: &str,
 ) -> BeadEventStreamWire {
-    let mut issue = issue_with_refs(Vec::new());
-    issue.id = issue_id.to_string();
-    issue.title = title.to_string();
-    issue.created_at = created_at.to_string();
-    issue.updated_at = created_at.to_string();
-    let created = PendingEvent::created(&issue)
-        .into_record(issue_id, 1)
-        .unwrap();
+    let created = root_created_event(issue_id, title, created_at, 1);
     BeadEventStreamWire {
         stream_id: issue_id.to_string(),
         root_issue_id: issue_id.to_string(),
@@ -95,11 +88,62 @@ fn colliding_stream(
     }
 }
 
+fn root_created_event(
+    issue_id: &str,
+    title: &str,
+    created_at: &str,
+    ordinal: usize,
+) -> BeadEventRecordWire {
+    let mut issue = issue_with_refs(Vec::new());
+    issue.id = issue_id.to_string();
+    issue.title = title.to_string();
+    issue.created_at = created_at.to_string();
+    issue.updated_at = created_at.to_string();
+    PendingEvent::created(&issue)
+        .into_record(issue_id, ordinal)
+        .unwrap()
+}
+
 fn empty_stream(stream_id: &str) -> BeadEventStreamWire {
     BeadEventStreamWire {
         stream_id: stream_id.to_string(),
         root_issue_id: stream_id.to_string(),
         events: Vec::new(),
+    }
+}
+
+fn issue_removed_event(
+    stream_id: &str,
+    issue_id: &str,
+    removed_ids: &[&str],
+    timestamp: &str,
+    ordinal: usize,
+) -> BeadEventRecordWire {
+    let payload = BeadEventPayloadWire::IssueRemoved {
+        cascade_removed_issue_ids: removed_ids
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect(),
+    };
+    let actor = "owner@example.com";
+    let event_id = mint_bead_event_id(
+        stream_id,
+        ordinal,
+        timestamp,
+        actor,
+        BeadEventOperationWire::IssueRemoved,
+        issue_id,
+        &payload,
+    )
+    .unwrap();
+    BeadEventRecordWire {
+        schema_version: BEAD_EVENT_SCHEMA_VERSION,
+        event_id,
+        timestamp: timestamp.to_string(),
+        actor: actor.to_string(),
+        operation: BeadEventOperationWire::IssueRemoved,
+        issue_id: issue_id.to_string(),
+        payload,
     }
 }
 
@@ -319,6 +363,304 @@ fn child_created(
     PendingEvent::created(&issue)
         .into_record(stream_id, ordinal)
         .unwrap()
+}
+
+#[test]
+fn published_create_remove_create_relocates_local_subtree() {
+    let base = empty_stream("sase-ey");
+    let mut ours =
+        colliding_stream("sase-ey", "Local epic", "2026-08-03T11:00:00Z");
+    ours.events.push(child_created(
+        "sase-ey",
+        "sase-ey.1",
+        "Local phase",
+        "2026-08-03T11:00:01Z",
+        2,
+    ));
+
+    let mut theirs = colliding_stream(
+        "sase-ey",
+        "Published first epic",
+        "2026-08-03T11:01:00Z",
+    );
+    theirs.events.push(child_created(
+        "sase-ey",
+        "sase-ey.1",
+        "Published first phase",
+        "2026-08-03T11:01:01Z",
+        2,
+    ));
+    theirs.events.push(issue_removed_event(
+        "sase-ey",
+        "sase-ey",
+        &["sase-ey.1"],
+        "2026-08-03T11:01:02Z",
+        3,
+    ));
+    theirs.events.push(root_created_event(
+        "sase-ey",
+        "Published latest epic",
+        "2026-08-03T11:01:03Z",
+        4,
+    ));
+    theirs.events.push(child_created(
+        "sase-ey",
+        "sase-ey.1",
+        "Published latest phase",
+        "2026-08-03T11:01:04Z",
+        5,
+    ));
+
+    let outcome = merge_bead_event_streams_with_relocation(
+        &base,
+        &ours,
+        &theirs,
+        Some("sase-ez"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcome.relocations,
+        vec![("sase-ey".to_string(), "sase-ez".to_string())]
+    );
+    assert_eq!(outcome.merged.events.len(), theirs.events.len());
+    let relocated = outcome.relocated.unwrap();
+    assert_eq!(relocated.stream_id, "sase-ez");
+    let issues = reduce_event_streams(&[outcome.merged, relocated]).unwrap();
+    for (issue_id, title) in [
+        ("sase-ey", "Published latest epic"),
+        ("sase-ey.1", "Published latest phase"),
+        ("sase-ez", "Local epic"),
+        ("sase-ez.1", "Local phase"),
+    ] {
+        assert_eq!(
+            issues
+                .iter()
+                .find(|issue| issue.id == issue_id)
+                .map(|issue| issue.title.as_str()),
+            Some(title)
+        );
+    }
+}
+
+#[test]
+fn published_recreation_without_local_creation_is_not_a_collision() {
+    let mut base =
+        colliding_stream("sase-ey", "Original epic", "2026-08-03T11:00:00Z");
+    base.events.push(issue_removed_event(
+        "sase-ey",
+        "sase-ey",
+        &[],
+        "2026-08-03T11:00:01Z",
+        2,
+    ));
+    let mut ours = base.clone();
+    let mut note = note_event("ours-note", "2026-08-03T11:00:04Z", "local");
+    note.issue_id = "sase-ey".to_string();
+    ours.events.push(note);
+    let mut theirs = base.clone();
+    theirs.events.push(root_created_event(
+        "sase-ey",
+        "Recreated epic",
+        "2026-08-03T11:00:03Z",
+        3,
+    ));
+
+    let outcome = merge_bead_event_streams_with_relocation(
+        &base,
+        &ours,
+        &theirs,
+        Some("sase-ez"),
+    )
+    .unwrap();
+
+    assert!(outcome.relocated.is_none());
+    assert!(outcome.relocations.is_empty());
+    let issues = reduce_event_streams(&[outcome.merged]).unwrap();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].id, "sase-ey");
+    assert_eq!(issues[0].title, "Recreated epic");
+}
+
+#[test]
+fn local_recreation_of_published_tombstone_relocates() {
+    let mut base =
+        colliding_stream("sase-ey", "Original epic", "2026-08-03T11:00:00Z");
+    base.events.push(issue_removed_event(
+        "sase-ey",
+        "sase-ey",
+        &[],
+        "2026-08-03T11:00:01Z",
+        2,
+    ));
+    let mut ours = base.clone();
+    ours.events.push(root_created_event(
+        "sase-ey",
+        "Unpublished recreation",
+        "2026-08-03T11:00:03Z",
+        3,
+    ));
+    let mut theirs = base.clone();
+    let mut note = note_event("theirs-note", "2026-08-03T11:00:02Z", "remote");
+    note.issue_id = "sase-ey".to_string();
+    theirs.events.push(note);
+
+    let outcome = merge_bead_event_streams_with_relocation(
+        &base,
+        &ours,
+        &theirs,
+        Some("sase-ez"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcome.relocations,
+        vec![("sase-ey".to_string(), "sase-ez".to_string())]
+    );
+    assert!(outcome.relocated.is_some());
+}
+
+#[test]
+fn local_actions_on_published_incarnation_stay_when_recreation_moves() {
+    let base =
+        colliding_stream("sase-ey", "Original epic", "2026-08-03T11:00:00Z");
+    let mut ours = base.clone();
+    let mut old_note =
+        note_event("ours-old-note", "2026-08-03T11:00:01Z", "old");
+    old_note.issue_id = "sase-ey".to_string();
+    ours.events.push(old_note.clone());
+    let old_removal = issue_removed_event(
+        "sase-ey",
+        "sase-ey",
+        &[],
+        "2026-08-03T11:00:02Z",
+        3,
+    );
+    ours.events.push(old_removal.clone());
+    ours.events.push(root_created_event(
+        "sase-ey",
+        "New local incarnation",
+        "2026-08-03T11:00:03Z",
+        4,
+    ));
+    let theirs = base.clone();
+
+    let outcome = merge_bead_event_streams_with_relocation(
+        &base,
+        &ours,
+        &theirs,
+        Some("sase-ez"),
+    )
+    .unwrap();
+
+    assert!(outcome
+        .merged
+        .events
+        .iter()
+        .any(|event| event.event_id == old_note.event_id));
+    assert!(outcome
+        .merged
+        .events
+        .iter()
+        .any(|event| event.event_id == old_removal.event_id));
+    let relocated = outcome.relocated.unwrap();
+    assert_eq!(relocated.events.len(), 1);
+    assert_eq!(
+        relocated.events[0].operation,
+        BeadEventOperationWire::IssueCreated
+    );
+}
+
+#[test]
+fn ours_only_create_remove_create_history_is_not_a_collision() {
+    let base = empty_stream("sase-ey");
+    let mut ours = colliding_stream(
+        "sase-ey",
+        "First local incarnation",
+        "2026-08-03T11:00:00Z",
+    );
+    ours.events.push(issue_removed_event(
+        "sase-ey",
+        "sase-ey",
+        &[],
+        "2026-08-03T11:00:01Z",
+        2,
+    ));
+    ours.events.push(root_created_event(
+        "sase-ey",
+        "Latest local incarnation",
+        "2026-08-03T11:00:02Z",
+        3,
+    ));
+
+    let outcome = merge_bead_event_streams_with_relocation(
+        &base,
+        &ours,
+        &base,
+        Some("sase-ez"),
+    )
+    .unwrap();
+
+    assert!(outcome.relocated.is_none());
+    assert!(outcome.relocations.is_empty());
+    let issues = reduce_event_streams(&[outcome.merged]).unwrap();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].id, "sase-ey");
+    assert_eq!(issues[0].title, "Latest local incarnation");
+}
+
+#[test]
+fn recreation_of_tombstoned_child_uses_next_sibling() {
+    let mut base = colliding_stream("sase-ey", "Epic", "2026-08-03T11:00:00Z");
+    base.events.push(child_created(
+        "sase-ey",
+        "sase-ey.1",
+        "Original phase",
+        "2026-08-03T11:00:01Z",
+        2,
+    ));
+    base.events.push(issue_removed_event(
+        "sase-ey",
+        "sase-ey.1",
+        &[],
+        "2026-08-03T11:00:02Z",
+        3,
+    ));
+    let mut ours = base.clone();
+    ours.events.push(child_created(
+        "sase-ey",
+        "sase-ey.1",
+        "Local phase recreation",
+        "2026-08-03T11:00:04Z",
+        4,
+    ));
+    let mut theirs = base.clone();
+    let mut note = note_event("theirs-note", "2026-08-03T11:00:03Z", "remote");
+    note.issue_id = "sase-ey".to_string();
+    theirs.events.push(note);
+
+    let outcome = merge_bead_event_streams_with_relocation(
+        &base,
+        &ours,
+        &theirs,
+        Some("sase-ez"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcome.relocations,
+        vec![("sase-ey.1".to_string(), "sase-ey.2".to_string())]
+    );
+    assert!(outcome.relocated.is_none());
+    let issues = reduce_event_streams(&[outcome.merged]).unwrap();
+    assert!(issues.iter().all(|issue| issue.id != "sase-ey.1"));
+    assert_eq!(
+        issues
+            .iter()
+            .find(|issue| issue.id == "sase-ey.2")
+            .map(|issue| issue.title.as_str()),
+        Some("Local phase recreation")
+    );
 }
 
 fn note_event(

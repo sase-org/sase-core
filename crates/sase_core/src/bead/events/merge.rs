@@ -81,12 +81,12 @@ pub fn merge_bead_event_streams(
 /// duplicate `issue_created`. Duplicated *child* ids need no caller input:
 /// the next free sibling number is derivable from the stream itself.
 ///
-/// A duplicate `issue_created` collision is always resolved in favor of the
-/// already-published creation: the merge-base creation wins when present,
-/// otherwise the published upstream (`theirs`) creation wins, so only the
-/// pushing clone's local, unpublished creation is ever relocated. That clone
-/// is the one that receives the relocation record and can repair its
-/// references; the other clone never learns that a relocation happened.
+/// A collision is an unpublished local (`ours`) creation whose id already has
+/// a published creation in the merged history, even if that published
+/// incarnation was removed. Only that local creation and its later subtree
+/// events move. The pushing clone is the one that receives the relocation
+/// record and can repair its references; the other clone never learns that a
+/// relocation happened.
 ///
 /// Argument roles: `ours` is the local branch and `theirs` is the published
 /// upstream branch. The Python resolver calls this as
@@ -175,7 +175,7 @@ fn split_duplicate_creations(
     let mut relocated: Option<BeadEventStreamWire> = None;
     let mut relocations: Vec<BeadIdRelocationWire> = Vec::new();
 
-    while let Some((issue_id, loser_tag)) = losing_creation(&tagged)? {
+    while let Some((issue_id, creation_index)) = losing_creation(&tagged) {
         if issue_id == merged.stream_id {
             let Some(new_id) = relocation_issue_id else {
                 return Err(BeadError::validation(format!(
@@ -187,7 +187,7 @@ fn split_duplicate_creations(
                     "invalid relocation id for duplicate bead {issue_id}"
                 )));
             }
-            let moved = extract_subtree(&mut tagged, &issue_id, loser_tag);
+            let moved = extract_subtree(&mut tagged, &issue_id, creation_index);
             relocated = Some(relocated_stream(new_id, &issue_id, moved)?);
             relocations.push(BeadIdRelocationWire {
                 old_id: issue_id,
@@ -199,7 +199,7 @@ fn split_duplicate_creations(
             remap_subtree(
                 &mut tagged,
                 &issue_id,
-                loser_tag,
+                creation_index,
                 &new_id,
                 &merged.stream_id,
             )?;
@@ -215,10 +215,10 @@ fn split_duplicate_creations(
     Ok((relocated, relocations))
 }
 
-/// Return the issue id and contributing branch of the next creation to move.
+/// Return the next unpublished creation whose id already appears as published.
 fn losing_creation(
     tagged: &[(BeadEventRecordWire, BranchTag)],
-) -> Result<Option<(String, BranchTag)>, BeadError> {
+) -> Option<(String, usize)> {
     let mut creations: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (index, (event, _)) in tagged.iter().enumerate() {
         if event.operation == BeadEventOperationWire::IssueCreated {
@@ -229,70 +229,39 @@ fn losing_creation(
         }
     }
     for (issue_id, indexes) in creations {
-        if indexes.len() < 2 {
+        let is_published = indexes.iter().any(|index| {
+            matches!(
+                tagged[*index].1,
+                BranchTag::Base | BranchTag::Theirs | BranchTag::Both
+            )
+        });
+        if !is_published {
             continue;
         }
-        // Whichever creation the merge base already carried is authoritative;
-        // otherwise the published upstream (`theirs`) creation keeps the id.
-        // A published id may already be embedded by its creator (code, commit
-        // trailers, plan links, chats), and that creator never learns about a
-        // relocation performed by another clone's push. So only the pushing
-        // clone's local, unpublished (`ours`) creation may move. The oldest
-        // `(timestamp, event_id)` fallback below is defensive only, for
-        // collisions with no base or upstream creation.
-        let winner = indexes
+        if let Some(index) = indexes
             .iter()
             .copied()
-            .find(|index| tagged[*index].1 == BranchTag::Base)
-            .or_else(|| {
-                indexes
-                    .iter()
-                    .copied()
-                    .find(|index| tagged[*index].1 == BranchTag::Theirs)
-            })
-            .unwrap_or_else(|| {
-                *indexes
-                    .iter()
-                    .min_by_key(|index| {
-                        let event = &tagged[**index].0;
-                        (event.timestamp.as_str(), event.event_id.as_str())
-                    })
-                    .expect("collision groups are non-empty")
-            });
-        let loser = indexes
-            .iter()
-            .copied()
-            .find(|index| *index != winner)
-            .expect("collision groups hold at least two creations");
-        let loser_tag = tagged[loser].1;
-        // A single side that minted the same id twice, or two byte-identical
-        // creations, cannot be told apart by provenance, so there is nothing
-        // safe to relocate.
-        let ambiguous = matches!(loser_tag, BranchTag::Base | BranchTag::Both)
-            || indexes
-                .iter()
-                .filter(|index| **index != winner)
-                .any(|index| tagged[*index].1 != loser_tag);
-        if ambiguous {
-            return Err(BeadError::validation(format!(
-                "duplicate issue_created event for {issue_id}"
-            )));
+            .find(|index| tagged[*index].1 == BranchTag::Ours)
+        {
+            return Some((issue_id.to_string(), index));
         }
-        return Ok(Some((issue_id.to_string(), loser_tag)));
     }
-    Ok(None)
+    None
 }
 
 /// Remove and return the losing branch's events for `issue_id` and its children.
 fn extract_subtree(
     tagged: &mut Vec<(BeadEventRecordWire, BranchTag)>,
     issue_id: &str,
-    tag: BranchTag,
+    first_event_index: usize,
 ) -> Vec<BeadEventRecordWire> {
     let mut moved = Vec::new();
     let mut kept = Vec::with_capacity(tagged.len());
-    for (event, event_tag) in tagged.drain(..) {
-        if event_tag == tag && issue_id_in_subtree(&event.issue_id, issue_id) {
+    for (index, (event, event_tag)) in tagged.drain(..).enumerate() {
+        if index >= first_event_index
+            && event_tag == BranchTag::Ours
+            && issue_id_in_subtree(&event.issue_id, issue_id)
+        {
             moved.push(event);
         } else {
             kept.push((event, event_tag));
@@ -325,12 +294,14 @@ fn relocated_stream(
 fn remap_subtree(
     tagged: &mut [(BeadEventRecordWire, BranchTag)],
     issue_id: &str,
-    tag: BranchTag,
+    first_event_index: usize,
     new_id: &str,
     stream_id: &str,
 ) -> Result<(), BeadError> {
     for (index, (event, event_tag)) in tagged.iter_mut().enumerate() {
-        if *event_tag != tag || !issue_id_in_subtree(&event.issue_id, issue_id)
+        if index < first_event_index
+            || *event_tag != BranchTag::Ours
+            || !issue_id_in_subtree(&event.issue_id, issue_id)
         {
             continue;
         }
