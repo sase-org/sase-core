@@ -2,15 +2,19 @@ use serde_json::{json, Value as JsonValue};
 
 use super::{
     build_gate_staged_payload, evaluate_host_stage_admission,
-    evaluate_recovery_decision, evaluate_stage_admission,
-    evaluate_staged_monitor_membership, evaluate_staged_owner_liveness,
-    evaluate_staged_self_wait, gate_staged_payload_schema_version,
-    project_monitor_turn_state, receipt_authorizes, receipt_transition_allowed,
+    evaluate_inactive_stage, evaluate_recovery_decision,
+    evaluate_stage_admission, evaluate_staged_monitor_membership,
+    evaluate_staged_owner_liveness, evaluate_staged_self_wait,
+    gate_staged_payload_schema_version, project_monitor_turn_state,
+    receipt_authorizes, receipt_transition_allowed,
     recovery_adoption_lock_filename, recovery_context_wire_schema_version,
     staged_handoff_wire_schema_version,
     staged_monitor_launch_payload_schema_version, validate_gate_staged_payload,
     validate_recovery_context, validate_staged_handoff,
     validate_staged_handoff_receipt, validate_staged_monitor_launch_payload,
+    InactiveStageDecisionRequestWire, InactiveStageEvidenceValidityWire,
+    InactiveStageExecutionStateWire, InactiveStageOriginOutcomeWire,
+    InactiveStageReceiptOutcomeWire, InactiveStageRecoveryStateWire,
     StagedHandoffError, StagedMonitorMembershipRequestWire,
     StagedOwnerLivenessRequestWire, StagedSelfWaitRequestWire,
     GATE_STAGED_PAYLOAD_SCHEMA_VERSION, RECOVERY_CONTEXT_WIRE_SCHEMA_VERSION,
@@ -751,7 +755,186 @@ fn membership(
         schema_version: STAGED_HANDOFF_WIRE_SCHEMA_VERSION,
         monitor_state: state.to_string(),
         supervisor_present,
+        inactive_stage: None,
     }
+}
+
+fn failed_stage_policy() -> InactiveStageDecisionRequestWire {
+    InactiveStageDecisionRequestWire {
+        schema_version: STAGED_HANDOFF_WIRE_SCHEMA_VERSION,
+        stage_validity: InactiveStageEvidenceValidityWire::Valid,
+        stage_id: Some(STAGED_ID.to_string()),
+        receipt_validity: InactiveStageEvidenceValidityWire::Absent,
+        receipt_id: None,
+        receipt_outcome: None,
+        origin_id: Some("origin-turn".to_string()),
+        origin_identity_valid: true,
+        origin_outcome: InactiveStageOriginOutcomeWire::Failed,
+        origin_finalizing: false,
+        execution_state: InactiveStageExecutionStateWire::Absent,
+        recovery_state: InactiveStageRecoveryStateWire::Inactive,
+        successor_delivered: false,
+    }
+}
+
+#[test]
+fn failed_never_started_stage_is_inactive_and_settlement_eligible() {
+    let decision = evaluate_inactive_stage(failed_stage_policy())
+        .expect("valid failed-origin facts");
+    assert!(decision.inactive);
+    assert!(!decision.pending_owner);
+    assert!(decision.settlement_eligible);
+    assert_eq!(decision.reason, "origin_failed");
+
+    let mut held = failed_stage_policy();
+    held.receipt_validity = InactiveStageEvidenceValidityWire::Valid;
+    held.receipt_id = Some(STAGED_ID.to_string());
+    held.receipt_outcome = Some(InactiveStageReceiptOutcomeWire::Held);
+    let decision =
+        evaluate_inactive_stage(held).expect("matching held receipt");
+    assert!(decision.inactive);
+    assert!(!decision.pending_owner);
+    assert!(decision.settlement_eligible);
+}
+
+#[test]
+fn failed_receipt_only_is_inactive_but_has_no_stage_to_settle() {
+    let mut receipt_only = failed_stage_policy();
+    receipt_only.stage_validity = InactiveStageEvidenceValidityWire::Absent;
+    receipt_only.stage_id = None;
+    receipt_only.receipt_validity = InactiveStageEvidenceValidityWire::Valid;
+    receipt_only.receipt_id = Some(STAGED_ID.to_string());
+    receipt_only.receipt_outcome = Some(InactiveStageReceiptOutcomeWire::Held);
+
+    let decision = evaluate_inactive_stage(receipt_only)
+        .expect("valid held receipt from failed origin");
+    assert!(decision.inactive);
+    assert!(!decision.pending_owner);
+    assert!(!decision.settlement_eligible);
+    assert_eq!(decision.reason, "origin_failed_receipt_only");
+}
+
+#[test]
+fn unknown_execution_and_recovery_preserve_pending_ownership() {
+    let mut request = failed_stage_policy();
+    request.execution_state = InactiveStageExecutionStateWire::Unknown;
+    let decision = evaluate_inactive_stage(request.clone()).unwrap();
+    assert!(!decision.inactive);
+    assert!(decision.pending_owner);
+    assert!(!decision.settlement_eligible);
+    assert_eq!(decision.reason, "execution_unknown");
+
+    request.execution_state = InactiveStageExecutionStateWire::Absent;
+    request.recovery_state = InactiveStageRecoveryStateWire::Unknown;
+    let decision = evaluate_inactive_stage(request.clone()).unwrap();
+    assert!(!decision.inactive);
+    assert!(decision.pending_owner);
+    assert_eq!(decision.reason, "recovery_unknown");
+
+    request.execution_state = InactiveStageExecutionStateWire::Present;
+    request.recovery_state = InactiveStageRecoveryStateWire::Inactive;
+    let decision = evaluate_inactive_stage(request).unwrap();
+    assert!(decision.inactive);
+    assert!(!decision.pending_owner);
+    assert!(!decision.settlement_eligible);
+    assert_eq!(decision.reason, "execution_present");
+}
+
+#[test]
+fn live_finalizing_successful_and_adopted_stages_keep_their_window() {
+    let mut request = failed_stage_policy();
+    request.origin_outcome = InactiveStageOriginOutcomeWire::Running;
+    let decision = evaluate_inactive_stage(request.clone()).unwrap();
+    assert!(decision.pending_owner);
+    assert_eq!(decision.reason, "origin_not_failed");
+
+    request.origin_outcome = InactiveStageOriginOutcomeWire::Failed;
+    request.origin_finalizing = true;
+    let decision = evaluate_inactive_stage(request.clone()).unwrap();
+    assert!(decision.pending_owner);
+    assert_eq!(decision.reason, "origin_finalizing");
+
+    request.origin_finalizing = false;
+    request.origin_outcome = InactiveStageOriginOutcomeWire::Succeeded;
+    let decision = evaluate_inactive_stage(request.clone()).unwrap();
+    assert!(decision.pending_owner);
+    assert_eq!(decision.reason, "origin_not_failed");
+
+    request.origin_outcome = InactiveStageOriginOutcomeWire::Failed;
+    request.receipt_validity = InactiveStageEvidenceValidityWire::Valid;
+    request.receipt_id = Some(STAGED_ID.to_string());
+    request.receipt_outcome = Some(InactiveStageReceiptOutcomeWire::Adopted);
+    let decision = evaluate_inactive_stage(request).unwrap();
+    assert!(decision.pending_owner);
+    assert!(!decision.settlement_eligible);
+    assert_eq!(decision.reason, "receipt_adopted");
+}
+
+#[test]
+fn active_recovery_and_delivered_successors_are_not_settlement_candidates() {
+    let mut request = failed_stage_policy();
+    request.recovery_state = InactiveStageRecoveryStateWire::Active;
+    let decision = evaluate_inactive_stage(request.clone()).unwrap();
+    assert!(decision.inactive);
+    assert!(!decision.pending_owner);
+    assert!(!decision.settlement_eligible);
+    assert_eq!(decision.reason, "recovery_active");
+
+    request.recovery_state = InactiveStageRecoveryStateWire::Inactive;
+    request.successor_delivered = true;
+    let decision = evaluate_inactive_stage(request).unwrap();
+    assert!(decision.inactive);
+    assert!(!decision.pending_owner);
+    assert!(!decision.settlement_eligible);
+    assert_eq!(decision.reason, "successor_delivered");
+}
+
+#[test]
+fn malformed_mismatched_and_unverified_evidence_stays_pending() {
+    let mut request = failed_stage_policy();
+    request.stage_validity = InactiveStageEvidenceValidityWire::Malformed;
+    let decision = evaluate_inactive_stage(request.clone()).unwrap();
+    assert!(decision.pending_owner);
+    assert_eq!(decision.reason, "stage_evidence_malformed");
+
+    request = failed_stage_policy();
+    request.receipt_validity = InactiveStageEvidenceValidityWire::Valid;
+    request.receipt_id =
+        Some("bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_string());
+    request.receipt_outcome = Some(InactiveStageReceiptOutcomeWire::Held);
+    let decision = evaluate_inactive_stage(request.clone()).unwrap();
+    assert!(decision.pending_owner);
+    assert_eq!(decision.reason, "stage_receipt_identity_mismatch");
+
+    request = failed_stage_policy();
+    request.origin_identity_valid = false;
+    let decision = evaluate_inactive_stage(request).unwrap();
+    assert!(decision.pending_owner);
+    assert_eq!(decision.reason, "origin_identity_unverified");
+
+    let mut request = failed_stage_policy();
+    request.stage_validity = InactiveStageEvidenceValidityWire::Absent;
+    let decision = evaluate_inactive_stage(request).unwrap();
+    assert!(decision.pending_owner);
+    assert_eq!(decision.reason, "stage_evidence_malformed");
+}
+
+#[test]
+fn inactive_stage_policy_drives_monitor_membership_and_owner_liveness() {
+    let mut membership = membership("held", false);
+    membership.inactive_stage = Some(failed_stage_policy());
+    let facts = evaluate_staged_monitor_membership(membership)
+        .expect("inactive staged monitor membership");
+    assert!(!facts.nonterminal);
+    assert!(!facts.blocks_lane_start);
+    assert!(!facts.occupies_runner_capacity);
+
+    let mut owner = liveness("monitor-1", STAGED_ID, true, false);
+    owner.inactive_stage = Some(failed_stage_policy());
+    let decision =
+        evaluate_staged_owner_liveness(owner).expect("inactive owner liveness");
+    assert!(!decision.pending_owner);
+    assert_eq!(decision.reason.as_deref(), Some("origin_failed"));
 }
 
 #[test]
@@ -906,6 +1089,7 @@ fn liveness(
         staged_id: staged_id.to_string(),
         stage_record_present,
         proc_exists,
+        inactive_stage: None,
     }
 }
 

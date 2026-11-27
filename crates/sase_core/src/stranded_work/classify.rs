@@ -8,6 +8,10 @@ use std::collections::BTreeSet;
 
 use chrono::DateTime;
 
+use crate::staged_handoff::{
+    evaluate_inactive_stage, InactiveStageEvidenceValidityWire,
+};
+
 use super::propagate::apply_stranded_propagation;
 use super::wire::{
     StrandedWorkBeadFactsWire, StrandedWorkInputWire,
@@ -106,11 +110,12 @@ fn newest_agent_member(
 
 /// Owner kind for one member, or `None` when it owns nothing.
 ///
-/// First match wins: `finalizing`, `handoff`, `recovery`, a *live*
-/// monitor/gate (active turn state or in-flight follow-up), then the
-/// lifecycle rule. `starting` and `unknown` lifecycles report as `running`:
-/// both mean execution in flight, and the owner vocabulary has no finer word
-/// for them.
+/// First match wins: `finalizing`, remaining `handoff`, `recovery`, a *live*
+/// monitor/gate (active turn state or in-flight follow-up), then the lifecycle
+/// rule. A core-confirmed inactive stage suppresses only that member's stale
+/// handoff and synthetic staged-monitor ownership. `starting` and `unknown`
+/// lifecycles report as `running`: both mean execution in flight, and the
+/// owner vocabulary has no finer word for them.
 ///
 /// A monitor or gate whose follow-up launched needs no special case here: a
 /// live successor owns the bead through this same rule, which is exactly what
@@ -128,30 +133,63 @@ fn owner_kind(member: &StrandedWorkMemberFactsWire) -> Option<String> {
     if member.finalizing {
         return Some("finalizing".to_string());
     }
-    let handoff = normalize_optional(&member.pending_handoff);
-    if handoff.is_some() || member.handoff_inflight {
-        return Some("handoff".to_string());
-    }
-    // A staged record means a handoff is in flight and owns the bead like
-    // a handoff until the stage is delivered. A delivered stage (a matching
-    // `adopted` receipt plus no further delivery work, as reported by the
-    // collector's `staged_delivered` fact) no longer owns: the successor
-    // owns through its own member facts when live, and the normal
-    // settle-grace and stranded-cause rules apply otherwise. Malformed
-    // staged state also owns: it must never be discarded as an ordinary
-    // abandoned run. A held `handoff_not_adopted` receipt owns for the same
-    // reason; a lone `adopted` receipt without a staged record does not.
-    if normalize_optional(&member.staged_handoff).is_some() {
-        let delivered = member.staged_delivered
-            && normalize_optional(&member.staged_receipt_outcome).as_deref()
-                == Some("adopted");
-        if !delivered {
+    let staged_record_present =
+        normalize_optional(&member.staged_handoff).is_some();
+    let receipt_present =
+        normalize_optional(&member.staged_receipt_outcome).is_some();
+    let inactive_stage_decision = member
+        .inactive_stage
+        .as_ref()
+        .filter(|facts| {
+            !member.remote
+                && (!staged_record_present
+                    || facts.stage_validity
+                        == InactiveStageEvidenceValidityWire::Valid)
+                && (!receipt_present
+                    || facts.receipt_validity
+                        == InactiveStageEvidenceValidityWire::Valid)
+                && (staged_record_present || receipt_present)
+        })
+        .and_then(|facts| evaluate_inactive_stage(facts.clone()).ok());
+    let inactive_stage = inactive_stage_decision
+        .as_ref()
+        .is_some_and(|decision| decision.inactive);
+    let failed_origin_stage_inactive =
+        inactive_stage_decision.as_ref().is_some_and(|decision| {
+            decision.inactive
+                && matches!(
+                    decision.reason.as_str(),
+                    "origin_failed" | "origin_failed_receipt_only"
+                )
+        });
+    let member_live =
+        !failed_origin_stage_inactive && (member.process_live || member.remote);
+
+    // Ignore all stale ownership markers together once the shared policy
+    // confirms that this stage is inactive. Keep finalization and recovery
+    // above/below this branch so their independent ownership still wins.
+    if !inactive_stage {
+        let handoff = normalize_optional(&member.pending_handoff);
+        if handoff.is_some() || member.handoff_inflight {
             return Some("handoff".to_string());
         }
-    }
-    if let Some(outcome) = normalize_optional(&member.staged_receipt_outcome) {
-        if outcome != "adopted" {
-            return Some("handoff".to_string());
+        // A staged record means a handoff is in flight and owns the bead like
+        // a handoff until delivered. Malformed state remains conservative.
+        if staged_record_present {
+            let delivered = member.staged_delivered
+                && normalize_optional(&member.staged_receipt_outcome)
+                    .as_deref()
+                    == Some("adopted");
+            if !delivered {
+                return Some("handoff".to_string());
+            }
+        }
+        if let Some(outcome) =
+            normalize_optional(&member.staged_receipt_outcome)
+        {
+            if outcome != "adopted" {
+                return Some("handoff".to_string());
+            }
         }
     }
     if member.recovery_in_flight {
@@ -164,7 +202,7 @@ fn owner_kind(member: &StrandedWorkMemberFactsWire) -> Option<String> {
         // still owns. A dead member with a stale turn_state or abandoned
         // `followup_pending` does not; classify_bead then applies settle
         // grace and stranded causes.
-        let live = member.process_live || member.remote;
+        let live = member_live;
         if live {
             let turn_state = normalize_optional(&member.turn_state);
             if matches!(
@@ -177,9 +215,7 @@ fn owner_kind(member: &StrandedWorkMemberFactsWire) -> Option<String> {
         }
     }
     let lifecycle = normalize_field(&member.lifecycle);
-    if is_non_terminal_lifecycle(&lifecycle)
-        && (member.process_live || member.remote)
-    {
+    if is_non_terminal_lifecycle(&lifecycle) && member_live {
         if lifecycle == "asking"
             || lifecycle == "waiting"
             || lifecycle == "queued"

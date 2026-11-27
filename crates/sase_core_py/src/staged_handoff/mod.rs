@@ -8,6 +8,7 @@ use pyo3::wrap_pyfunction;
 use sase_core::staged_handoff::{
     build_gate_staged_payload as core_build_gate_payload,
     evaluate_host_stage_admission as core_evaluate_host_stage_admission,
+    evaluate_inactive_stage as core_evaluate_inactive_stage,
     evaluate_recovery_decision as core_evaluate_recovery,
     evaluate_stage_admission as core_evaluate_stage_admission,
     evaluate_staged_monitor_membership as core_evaluate_membership,
@@ -26,6 +27,7 @@ use sase_core::staged_handoff::{
     validate_staged_handoff as core_validate_staged_handoff,
     validate_staged_handoff_receipt as core_validate_receipt,
     validate_staged_monitor_launch_payload as core_validate_launch_payload,
+    InactiveStageDecisionRequestWire as CoreInactiveStageRequest,
     StagedMonitorMembershipRequestWire as CoreMembershipRequest,
     StagedOwnerLivenessRequestWire as CoreLivenessRequest,
     StagedSelfWaitRequestWire as CoreSelfWaitRequest,
@@ -165,6 +167,20 @@ where
     )
 }
 
+/// Decide whether a staged handoff is inactive and eligible for settlement.
+#[pyfunction]
+#[pyo3(name = "evaluate_inactive_staged_handoff")]
+fn py_evaluate_inactive_staged_handoff<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: CoreInactiveStageRequest =
+        staged_decision_from_pydict(request, "inactive stage")?;
+    let decision = core_evaluate_inactive_stage(request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &decision)
+}
+
 /// Decide staged-monitor membership facts from durable monitor state.
 #[pyfunction]
 #[pyo3(name = "evaluate_staged_monitor_membership")]
@@ -290,6 +306,7 @@ pub(crate) fn register_staged_handoff(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_staged_handoff_receipt, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_stage_admission, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_host_stage_admission, m)?)?;
+    m.add_function(wrap_pyfunction!(py_evaluate_inactive_staged_handoff, m)?)?;
     m.add_function(wrap_pyfunction!(py_staged_handoff_receipt_authorizes, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_gate_staged_payload_schema_version,

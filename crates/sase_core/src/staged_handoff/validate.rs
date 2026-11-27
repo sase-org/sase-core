@@ -400,7 +400,7 @@ fn validate_rfc3339(
     }
 }
 
-fn is_uuid(value: &str) -> bool {
+pub(super) fn is_uuid(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.len() != 36 {
         return false;

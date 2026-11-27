@@ -9,6 +9,11 @@ use super::wire::{
     StrandedWorkVerdictWire, STRANDED_WORK_WIRE_SCHEMA_VERSION,
 };
 use crate::bead::wire::BeadCompletionFailureWire;
+use crate::staged_handoff::{
+    InactiveStageDecisionRequestWire, InactiveStageEvidenceValidityWire,
+    InactiveStageExecutionStateWire, InactiveStageOriginOutcomeWire,
+    InactiveStageReceiptOutcomeWire, InactiveStageRecoveryStateWire,
+};
 
 const NOW: f64 = 1_800_000_000.0;
 const OLD: f64 = NOW - 3_600.0;
@@ -79,6 +84,24 @@ fn input(beads: Vec<StrandedWorkBeadFactsWire>) -> StrandedWorkInputWire {
         now: NOW,
         beads,
         ..StrandedWorkInputWire::default()
+    }
+}
+
+fn failed_stage_policy() -> InactiveStageDecisionRequestWire {
+    InactiveStageDecisionRequestWire {
+        schema_version: 1,
+        stage_validity: InactiveStageEvidenceValidityWire::Valid,
+        stage_id: Some("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_string()),
+        receipt_validity: InactiveStageEvidenceValidityWire::Valid,
+        receipt_id: Some("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_string()),
+        receipt_outcome: Some(InactiveStageReceiptOutcomeWire::Held),
+        origin_id: Some("origin-run".to_string()),
+        origin_identity_valid: true,
+        origin_outcome: InactiveStageOriginOutcomeWire::Failed,
+        origin_finalizing: false,
+        execution_state: InactiveStageExecutionStateWire::Absent,
+        recovery_state: InactiveStageRecoveryStateWire::Inactive,
+        successor_delivered: false,
     }
 }
 
@@ -538,6 +561,197 @@ fn retained_workspace_overrides_stale_handoff_evidence_but_keeps_successor_owner
     );
     assert_eq!(verdict.state, "owned");
     assert_eq!(verdict.owner.as_deref(), Some("w--2"));
+}
+
+#[test]
+fn failed_origin_inactive_stage_strands_and_blocks_its_waiting_ancestor() {
+    let mut origin = agent("w.e1--origin");
+    origin.lifecycle = "failed".to_string();
+    origin.pending_handoff = Some("monitor".to_string());
+    origin.handoff_inflight = true;
+    origin.staged_handoff = Some("monitor".to_string());
+    origin.staged_receipt_outcome = Some("handoff_not_adopted".to_string());
+    origin.inactive_stage = Some(failed_stage_policy());
+
+    // The monitor store can synthesize this as live/pending from staged
+    // membership even though no proc was submitted. The same core decision
+    // must suppress that stale member too.
+    let mut staged_monitor = monitor("w.e1--monitor");
+    staged_monitor.lifecycle = "running".to_string();
+    staged_monitor.process_live = true;
+    staged_monitor.started_at = Some(OLD + 10.0);
+    staged_monitor.turn_state = Some("pending".to_string());
+    staged_monitor.staged_handoff = Some("monitor".to_string());
+    staged_monitor.staged_receipt_outcome =
+        Some("handoff_not_adopted".to_string());
+    staged_monitor.inactive_stage = Some(failed_stage_policy());
+
+    let mut phase = bead("w.e1", "phase");
+    phase.parent_id = Some("w".to_string());
+    phase.members = vec![origin, staged_monitor];
+
+    let mut ancestor = bead("w", "epic");
+    ancestor.members = vec![live_agent("w--land", "waiting")];
+    let report = reduce_stranded_work(&input(vec![phase, ancestor]));
+
+    let phase = verdict_by(&report, "w.e1");
+    assert_eq!(phase.state, "stranded");
+    assert_eq!(phase.reason.as_deref(), Some("failed"));
+    assert_eq!(phase.blocks, vec!["w".to_string()]);
+    let ancestor = verdict_by(&report, "w");
+    assert_eq!(ancestor.state, "blocked");
+    assert_eq!(ancestor.blocked_by, vec!["w.e1".to_string()]);
+}
+
+#[test]
+fn failed_origin_inactive_stage_respects_grace_and_workspace_retention() {
+    let mut member = agent("w--origin");
+    member.lifecycle = "failed".to_string();
+    member.ended_at = Some(NOW - 10.0);
+    member.pending_handoff = Some("monitor".to_string());
+    member.staged_handoff = Some("monitor".to_string());
+    member.staged_receipt_outcome = Some("handoff_not_adopted".to_string());
+    member.inactive_stage = Some(failed_stage_policy());
+    let settling = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![member.clone()],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(settling.state, "settling");
+
+    member.ended_at = Some(OLD);
+    member.workspace_retention = true;
+    let retained = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![member],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(retained.state, "stranded");
+    assert_eq!(retained.reason.as_deref(), Some("failed"));
+}
+
+#[test]
+fn failed_origin_receipt_only_is_not_a_live_owner() {
+    let mut member = agent("w--origin");
+    member.lifecycle = "failed".to_string();
+    member.staged_receipt_outcome = Some("handoff_not_adopted".to_string());
+    let mut facts = failed_stage_policy();
+    facts.stage_validity = InactiveStageEvidenceValidityWire::Absent;
+    facts.stage_id = None;
+    member.inactive_stage = Some(facts);
+
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![member],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "stranded");
+    assert_eq!(verdict.reason.as_deref(), Some("failed"));
+}
+
+#[test]
+fn inactive_stage_keeps_independent_successor_and_recovery_owners() {
+    let mut origin = agent("w--origin");
+    origin.lifecycle = "failed".to_string();
+    origin.staged_handoff = Some("monitor".to_string());
+    origin.staged_receipt_outcome = Some("handoff_not_adopted".to_string());
+    origin.inactive_stage = Some(failed_stage_policy());
+    let mut successor = live_agent("w--successor", "running");
+    successor.started_at = Some(OLD + 10.0);
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![origin.clone(), successor],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "owned");
+    assert_eq!(verdict.owner.as_deref(), Some("w--successor"));
+
+    let mut recovery = failed_stage_policy();
+    recovery.recovery_state = InactiveStageRecoveryStateWire::Active;
+    origin.inactive_stage = Some(recovery);
+    origin.recovery_in_flight = true;
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![origin],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "owned");
+    assert_eq!(verdict.reason.as_deref(), Some("recovery"));
+}
+
+#[test]
+fn uncertain_inactive_stage_evidence_keeps_conservative_handoff_owner() {
+    let mut member = agent("w--origin");
+    member.lifecycle = "failed".to_string();
+    member.staged_handoff = Some("monitor".to_string());
+    member.staged_receipt_outcome = Some("handoff_not_adopted".to_string());
+    let mut facts = failed_stage_policy();
+    facts.execution_state = InactiveStageExecutionStateWire::Unknown;
+    member.inactive_stage = Some(facts);
+
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![member],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "owned");
+    assert_eq!(verdict.reason.as_deref(), Some("handoff"));
+
+    let mut remote = agent("w--remote-origin");
+    remote.lifecycle = "failed".to_string();
+    remote.remote = true;
+    remote.staged_handoff = Some("monitor".to_string());
+    remote.staged_receipt_outcome = Some("handoff_not_adopted".to_string());
+    remote.inactive_stage = Some(failed_stage_policy());
+    let verdict = reduce(
+        StrandedWorkBeadFactsWire {
+            members: vec![remote],
+            ..bead("w", "phase")
+        },
+        Vec::new(),
+    );
+    assert_eq!(verdict.state, "owned");
+    assert_eq!(verdict.reason.as_deref(), Some("handoff"));
+}
+
+#[test]
+fn inactive_stage_reduction_is_deterministic_when_member_order_is_shuffled() {
+    let mut origin = agent("w.e1--origin");
+    origin.lifecycle = "failed".to_string();
+    origin.ended_at = Some(OLD + 20.0);
+    origin.staged_handoff = Some("monitor".to_string());
+    origin.staged_receipt_outcome = Some("handoff_not_adopted".to_string());
+    origin.inactive_stage = Some(failed_stage_policy());
+    let mut prior = agent("w.e1--prior");
+    prior.ended_at = Some(OLD);
+
+    let mut phase = bead("w.e1", "phase");
+    phase.parent_id = Some("w".to_string());
+    let mut ancestor = bead("w", "epic");
+    ancestor.members = vec![live_agent("w--land", "waiting")];
+
+    let mut first_phase = phase.clone();
+    first_phase.members = vec![origin.clone(), prior.clone()];
+    let first =
+        reduce_stranded_work(&input(vec![first_phase, ancestor.clone()]));
+
+    phase.members = vec![prior, origin];
+    let second = reduce_stranded_work(&input(vec![ancestor, phase]));
+    assert_eq!(first, second);
+    assert_eq!(verdict_by(&first, "w.e1").state, "stranded");
+    assert_eq!(verdict_by(&first, "w").state, "blocked");
 }
 
 #[test]

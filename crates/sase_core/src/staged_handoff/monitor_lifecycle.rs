@@ -16,7 +16,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::validate::StagedHandoffError;
+use super::inactive_stage::{
+    evaluate_inactive_stage, InactiveStageDecisionRequestWire,
+    InactiveStageEvidenceValidityWire,
+};
+use super::validate::{is_uuid, StagedHandoffError};
 use super::wire::STAGED_HANDOFF_WIRE_SCHEMA_VERSION;
 
 /// Monitor states the membership decision accepts.
@@ -52,6 +56,8 @@ pub struct StagedMonitorMembershipRequestWire {
     pub schema_version: u32,
     pub monitor_state: String,
     pub supervisor_present: bool,
+    #[serde(default)]
+    pub inactive_stage: Option<InactiveStageDecisionRequestWire>,
 }
 
 /// Durable staged-monitor membership facts.
@@ -80,6 +86,26 @@ pub fn evaluate_staged_monitor_membership(
             return Err(StagedHandoffError::Invalid(
                 "staged monitors have no supervisor".to_string(),
             ));
+        }
+        if let Some(inactive_stage) = request.inactive_stage {
+            let has_identity = (inactive_stage.stage_validity
+                == InactiveStageEvidenceValidityWire::Valid
+                && inactive_stage.stage_id.is_some())
+                || (inactive_stage.receipt_validity
+                    == InactiveStageEvidenceValidityWire::Valid
+                    && inactive_stage.receipt_id.is_some());
+            if has_identity {
+                let decision = evaluate_inactive_stage(inactive_stage)?;
+                if !decision.pending_owner {
+                    return Ok(StagedMonitorMembershipWire {
+                        schema_version: STAGED_HANDOFF_WIRE_SCHEMA_VERSION,
+                        nonterminal: false,
+                        blocks_lane_start: false,
+                        has_supervisor: false,
+                        occupies_runner_capacity: false,
+                    });
+                }
+            }
         }
         return Ok(StagedMonitorMembershipWire {
             schema_version: STAGED_HANDOFF_WIRE_SCHEMA_VERSION,
@@ -123,6 +149,8 @@ pub struct StagedOwnerLivenessRequestWire {
     pub staged_id: String,
     pub stage_record_present: bool,
     pub proc_exists: bool,
+    #[serde(default)]
+    pub inactive_stage: Option<InactiveStageDecisionRequestWire>,
 }
 
 /// Whether a positively identified staged monitor stays a pending owner.
@@ -168,6 +196,23 @@ pub fn evaluate_staged_owner_liveness(
     }
     if !is_uuid(&request.staged_id) {
         return Ok(decision(false, "staged_id_is_not_a_uuid"));
+    }
+    if let Some(inactive_stage) = request.inactive_stage {
+        let policy_identity = match inactive_stage.stage_validity {
+            InactiveStageEvidenceValidityWire::Valid => {
+                inactive_stage.stage_id.as_deref()
+            }
+            InactiveStageEvidenceValidityWire::Absent => {
+                inactive_stage.receipt_id.as_deref()
+            }
+            InactiveStageEvidenceValidityWire::Malformed => None,
+        };
+        if policy_identity == Some(request.staged_id.as_str()) {
+            let policy = evaluate_inactive_stage(inactive_stage)?;
+            if !policy.pending_owner {
+                return Ok(decision(false, &policy.reason));
+            }
+        }
     }
     if !request.stage_record_present {
         return Ok(decision(false, "no_durable_staged_record"));
@@ -265,19 +310,4 @@ pub fn evaluate_staged_self_wait(
         }
         _ => Ok(decision(false, "stage_identity_mismatch")),
     }
-}
-
-fn is_uuid(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 36 {
-        return false;
-    }
-    let hyphen_at = [8_usize, 13, 18, 23];
-    bytes.iter().enumerate().all(|(index, byte)| {
-        if hyphen_at.contains(&index) {
-            *byte == b'-'
-        } else {
-            byte.is_ascii_hexdigit()
-        }
-    })
 }

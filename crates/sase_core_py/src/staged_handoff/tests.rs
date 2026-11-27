@@ -30,6 +30,7 @@ fn staged_handoff_bindings_are_registered() {
             "validate_staged_handoff_receipt",
             "evaluate_stage_admission",
             "evaluate_host_stage_admission",
+            "evaluate_inactive_staged_handoff",
             "staged_handoff_receipt_authorizes",
             "gate_staged_payload_schema_version",
             "validate_gate_staged_payload",
@@ -50,6 +51,42 @@ fn staged_handoff_bindings_are_registered() {
         }
         assert_eq!(py_staged_handoff_wire_schema_version(), 1);
         assert_eq!(py_gate_staged_payload_schema_version(), 1);
+    });
+}
+
+#[test]
+fn inactive_staged_handoff_binding_round_trips() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let request = json!({
+            "schema_version": 1,
+            "stage_validity": "valid",
+            "stage_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "receipt_validity": "absent",
+            "receipt_id": null,
+            "receipt_outcome": null,
+            "origin_id": "origin-turn",
+            "origin_identity_valid": true,
+            "origin_outcome": "failed",
+            "origin_finalizing": false,
+            "execution_state": "absent",
+            "recovery_state": "inactive",
+            "successor_delivered": false
+        });
+        let request = json_value_to_py(py, &request).unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_evaluate_inactive_staged_handoff(py, request).unwrap();
+        let result = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(
+            result,
+            json!({
+                "schema_version": 1,
+                "inactive": true,
+                "pending_owner": false,
+                "settlement_eligible": true,
+                "reason": "origin_failed"
+            })
+        );
     });
 }
 

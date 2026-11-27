@@ -5,6 +5,7 @@
 //! admission policy. It is separate from the finalizer context wire.
 
 pub mod gate;
+mod inactive_stage;
 mod monitor_launch;
 mod monitor_lifecycle;
 mod reconcile;
@@ -18,6 +19,12 @@ pub use gate::{
     GateAutoSnapshotWire, GateCreatorWire, GateResourceSnapshotWire,
     GateStagedPayloadWire, GateWorkspaceModeWire,
     GATE_STAGED_PAYLOAD_SCHEMA_VERSION,
+};
+pub use inactive_stage::{
+    evaluate_inactive_stage, InactiveStageDecisionRequestWire,
+    InactiveStageDecisionWire, InactiveStageEvidenceValidityWire,
+    InactiveStageExecutionStateWire, InactiveStageOriginOutcomeWire,
+    InactiveStageReceiptOutcomeWire, InactiveStageRecoveryStateWire,
 };
 pub use monitor_launch::{
     staged_monitor_launch_payload_schema_version,

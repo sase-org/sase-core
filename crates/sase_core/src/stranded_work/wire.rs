@@ -5,6 +5,7 @@
 //! rejected so wire drift fails loudly.
 
 use crate::bead::wire::BeadCompletionFailureWire;
+use crate::staged_handoff::InactiveStageDecisionRequestWire;
 use serde::{Deserialize, Serialize};
 
 /// Wire schema version for [`StrandedWorkInputWire`]/[`StrandedWorkReportWire`].
@@ -104,6 +105,11 @@ pub struct StrandedWorkMemberFactsWire {
     /// member facts when live.
     #[serde(default)]
     pub staged_delivered: bool,
+    /// Shared staged-handoff evidence used to suppress only confirmed
+    /// inactive ownership. Omitted by older producers, which retain the
+    /// conservative historical ownership behavior.
+    #[serde(default)]
+    pub inactive_stage: Option<InactiveStageDecisionRequestWire>,
     #[serde(default)]
     pub handoff_inflight: bool,
     #[serde(default)]
