@@ -71,6 +71,7 @@ pub(super) struct RemoteHostRuntime {
     backoff_until: Option<Instant>,
     consecutive_failures: u32,
     last_error: Option<FederationErrorWire>,
+    last_read_error: Option<FederationErrorWire>,
 }
 
 impl RemoteHost {
@@ -539,15 +540,23 @@ impl RemoteHost {
         runtime.consecutive_failures = 0;
         runtime.backoff_until = None;
         runtime.last_error = None;
+        runtime.last_read_error = None;
     }
 
     pub(super) async fn record_read_failure(&self, error: FederationErrorWire) {
         let mut runtime = self.runtime.lock().await;
-        runtime.consecutive_failures =
-            runtime.consecutive_failures.saturating_add(1);
-        let window = host_read_backoff_window(runtime.consecutive_failures);
-        runtime.backoff_until = Some(Instant::now() + window);
-        runtime.last_error = Some(error);
+        runtime.last_read_error = Some(error.clone());
+        if is_retryable_read_error(&error) {
+            runtime.consecutive_failures =
+                runtime.consecutive_failures.saturating_add(1);
+            let window = host_read_backoff_window(runtime.consecutive_failures);
+            runtime.backoff_until = Some(Instant::now() + window);
+            runtime.last_error = Some(error);
+        }
+    }
+
+    pub(super) async fn last_read_error(&self) -> Option<FederationErrorWire> {
+        self.runtime.lock().await.last_read_error.clone()
     }
 
     #[cfg(test)]
@@ -575,7 +584,8 @@ pub(super) async fn read_one_host(
         Err(error) => return host.error_result(error, false, None),
     };
     if cache_only {
-        return cached_or_error(&host, &cache, &cache_key, None).await;
+        let last_error = host.last_read_error().await;
+        return cached_or_error(&host, &cache, &cache_key, last_error).await;
     }
     if let Some(backoff) = host.backoff_error().await {
         return cached_or_error(&host, &cache, &cache_key, Some(backoff)).await;
@@ -621,9 +631,7 @@ pub(super) async fn read_one_host(
             )
         }
         Err(error) => {
-            if is_retryable_read_error(&error) {
-                host.record_read_failure(error.clone()).await;
-            }
+            host.record_read_failure(error.clone()).await;
             cached_or_error(&host, &cache, &cache_key, Some(error)).await
         }
     }

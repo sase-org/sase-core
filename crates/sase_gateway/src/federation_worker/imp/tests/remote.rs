@@ -873,6 +873,24 @@ async fn read_backoff_serves_cache_and_short_circuits_slow_host() {
         "the timed-out read must have contacted the host",
     );
 
+    // A cache-only read must preserve the failure signal instead of making
+    // the cached payload look healthy. It must also avoid another request.
+    let after_failure = connections();
+    let cache_only_after_failure = state
+        .read_all(ReadOperation::Summary, true, deadline())
+        .await
+        .unwrap();
+    let cache_only_host = summary_hosts(&cache_only_after_failure);
+    assert_eq!(cache_only_host["status"], json!("stale"));
+    assert_eq!(cache_only_host["cached"], json!(true));
+    assert_eq!(cache_only_host["payload"], summary_hosts(&first)["payload"],);
+    assert_eq!(cache_only_host["error"]["code"], json!("deadline"));
+    assert_eq!(
+        cache_only_host["error"]["target"],
+        json!("deadline_unix_ms"),
+    );
+    assert_eq!(connections(), after_failure);
+
     // An immediate second read makes no HTTP request and reports the
     // back-off instead: same status vocabulary, target backoff.
     let before = connections();
@@ -945,6 +963,19 @@ async fn read_backoff_serves_cache_and_short_circuits_slow_host() {
 
     // After the window, a read contacts the host again.
     host.clear_backoff_for_test().await;
+    let cache_only_after_backoff = state
+        .read_all(ReadOperation::Summary, true, deadline())
+        .await
+        .unwrap();
+    assert_eq!(
+        summary_hosts(&cache_only_after_backoff)["status"],
+        json!("stale"),
+        "cache-only reads must remain stale after back-off expires",
+    );
+    assert_eq!(
+        summary_hosts(&cache_only_after_backoff)["error"]["target"],
+        json!("deadline_unix_ms"),
+    );
     let failed_again = state
         .read_all(ReadOperation::Summary, false, deadline())
         .await
@@ -972,6 +1003,19 @@ async fn read_backoff_serves_cache_and_short_circuits_slow_host() {
         "{recovered}",
     );
     assert_eq!(host.backoff_failures_for_test().await, 0);
+    let cache_only_after_recovery = state
+        .read_all(ReadOperation::Summary, true, deadline())
+        .await
+        .unwrap();
+    assert_eq!(
+        summary_hosts(&cache_only_after_recovery)["status"],
+        json!("ok"),
+        "a successful network read must restore cache-only freshness",
+    );
+    assert_eq!(
+        summary_hosts(&cache_only_after_recovery)["error"],
+        serde_json::Value::Null,
+    );
 
     // User-initiated launch and mutate still contact the host while reads
     // back off.
