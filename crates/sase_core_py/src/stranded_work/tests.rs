@@ -112,3 +112,64 @@ fn stranded_work_binding_registered_by_name() {
         assert_eq!(value["blocked_ids"], json!(["w"]));
     });
 }
+
+#[test]
+fn zombie_plan_binding_round_trips_the_shared_predicate() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        let evaluate = module.getattr("zombie_plan_evaluate").unwrap();
+        let request = json!({
+            "schema_version": 1,
+            "snapshot": {
+                "schema_version": 1,
+                "complete": true,
+                "unknown_reason": null,
+                "beads": [
+                    {
+                        "id": "z",
+                        "title": "Epic",
+                        "status": "in_progress",
+                        "issue_type": "plan",
+                        "tier": "epic",
+                        "parent_id": null,
+                        "assignee": "z--land",
+                        "closed_at": null,
+                        "close_event_id": null
+                    },
+                    {
+                        "id": "z.1",
+                        "title": "Phase",
+                        "status": "closed",
+                        "issue_type": "phase",
+                        "tier": null,
+                        "parent_id": "z",
+                        "assignee": "",
+                        "closed_at": "2026-01-01T00:00:00Z",
+                        "close_event_id": "close-1"
+                    }
+                ]
+            },
+            "owners": [{
+                "plan_id": "z",
+                "records_available": true,
+                "unknown_reason": null,
+                "members": [{
+                    "name": "z--land",
+                    "turn_kind": "agent",
+                    "lifecycle": "done",
+                    "started_at": 1767225600.0,
+                    "ended_at": 1767225700.0
+                }]
+            }]
+        });
+        let request_obj = json_value_to_py(py, &request).unwrap();
+        let result = evaluate.call1((request_obj,)).unwrap();
+        let value = py_to_json_value(&result).unwrap();
+        assert_eq!(value["schema_version"], json!(1));
+        assert_eq!(value["rows"][0]["state"], json!("zombie"));
+        assert_eq!(value["rows"][0]["recovery_eligible"], json!(true));
+        assert_eq!(value["rows"][0]["close_token"], json!("z.1:close-1"));
+    });
+}

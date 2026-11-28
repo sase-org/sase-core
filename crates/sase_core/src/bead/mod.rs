@@ -27,6 +27,7 @@ pub mod touch_member_query;
 pub mod triage_owners;
 pub mod wire;
 pub mod work;
+pub mod zombie_plan;
 
 pub use crate::artifact_link::BeadLinkWire;
 pub use artifact_refs::{
@@ -105,8 +106,9 @@ pub use read::{
     reference_diagnostics, resolve_issue_id, resolve_issue_id_in_issues,
     resolve_issue_ids, show_issue, show_issue_detail,
     show_issue_detail_with_options, stats, statuses_for_ids, stranded_snapshot,
-    BeadDoctorReportWire, BeadIssueDetailWire, BeadProjectionDriftWire,
-    StrandedBeadWire, StrandedSnapshotWire, BEAD_READ_WIRE_SCHEMA_VERSION,
+    zombie_plan_tree_snapshot, BeadDoctorReportWire, BeadIssueDetailWire,
+    BeadProjectionDriftWire, StrandedBeadWire, StrandedSnapshotWire,
+    BEAD_READ_WIRE_SCHEMA_VERSION,
 };
 pub use read_model::{
     cached_store_snapshot, read_model_cache_path_for_store, read_model_status,
@@ -182,4 +184,10 @@ pub use wire::{
 pub use work::{
     build_epic_work_plan, build_epic_work_plan_from_issues, EpicWorkPlanWire,
     PhaseAssignmentWire,
+};
+pub use zombie_plan::{
+    evaluate_zombie_plans, ZombiePlanBeadWire, ZombiePlanEvaluationInputWire,
+    ZombiePlanEvaluationReportWire, ZombiePlanOwnerFactsWire,
+    ZombiePlanTreeSnapshotWire, ZombiePlanVerdictWire,
+    ZOMBIE_PLAN_WIRE_SCHEMA_VERSION,
 };

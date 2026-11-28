@@ -21,6 +21,10 @@ use super::wire::{
     BeadCompletionFailureWire, BeadError, BeadTierWire, IssueTypeWire,
     IssueWire, StatusWire,
 };
+use super::zombie_plan::{
+    ZombiePlanBeadWire, ZombiePlanTreeSnapshotWire,
+    ZOMBIE_PLAN_WIRE_SCHEMA_VERSION,
+};
 use crate::artifact_link::{
     ArtifactLinkRowWire, BeadLinkDirectionWire,
     ARTIFACT_LINK_ROW_SCHEMA_VERSION,
@@ -494,6 +498,27 @@ pub fn stranded_snapshot(
         read_store_issues(beads_dir)?,
         bead_ids,
     ))
+}
+
+/// One complete, slim project bead graph for zombie-plan evaluation.
+///
+/// The indexed read model and replay/legacy paths all flow through
+/// `read_store_issues`, so a caller reads the project graph once and can
+/// evaluate every in-progress plan against the same snapshot.
+pub fn zombie_plan_tree_snapshot(
+    beads_dir: &Path,
+) -> Result<ZombiePlanTreeSnapshotWire, BeadError> {
+    let mut beads: Vec<ZombiePlanBeadWire> = read_store_issues(beads_dir)?
+        .into_iter()
+        .map(ZombiePlanBeadWire::from)
+        .collect();
+    beads.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(ZombiePlanTreeSnapshotWire {
+        schema_version: ZOMBIE_PLAN_WIRE_SCHEMA_VERSION,
+        complete: true,
+        unknown_reason: None,
+        beads,
+    })
 }
 
 pub(crate) fn stranded_snapshot_in_issues(

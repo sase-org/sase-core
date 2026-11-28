@@ -1311,6 +1311,7 @@ fn bead_stranded_snapshot_binding_returns_slim_candidate_context() {
         let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
         sase_core_rs(py, &module).unwrap();
         assert!(module.getattr("bead_stranded_snapshot").is_ok());
+        assert!(module.getattr("bead_zombie_plan_tree_snapshot").is_ok());
 
         let snapshot = py_bead_stranded_snapshot(py, dir, None).unwrap();
         let snapshot = py_to_json_value(snapshot.bind(py)).unwrap();
@@ -1346,6 +1347,12 @@ fn bead_stranded_snapshot_binding_returns_slim_candidate_context() {
         assert_eq!(scoped["candidates"].as_array().unwrap().len(), 1);
         assert_eq!(scoped["candidates"][0]["id"], json!("beads-1"));
         assert!(scoped["context"].as_array().unwrap().is_empty());
+
+        let tree = py_bead_zombie_plan_tree_snapshot(py, dir).unwrap();
+        let tree = py_to_json_value(tree.bind(py)).unwrap();
+        assert_eq!(tree["complete"], json!(true));
+        assert_eq!(tree["beads"].as_array().unwrap().len(), 4);
+        assert_eq!(tree["beads"][0]["id"], json!("beads-1"));
     });
 }
 
