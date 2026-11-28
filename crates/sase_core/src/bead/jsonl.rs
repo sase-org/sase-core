@@ -949,7 +949,10 @@ pub(in crate::bead) fn parse_event_stream_bytes(
     Ok(events)
 }
 
-fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), BeadError> {
+pub(crate) fn write_file_atomic(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), BeadError> {
     let parent = path.parent().ok_or_else(|| {
         BeadError::io(format!(
             "cannot determine parent directory for {}",

@@ -17,6 +17,7 @@ pub mod jsonl;
 pub mod mutation;
 pub mod read;
 pub mod read_model;
+pub mod recovery;
 pub mod routing;
 pub mod schema;
 pub mod seal_watch;
@@ -116,6 +117,15 @@ pub use read_model::{
     CachedStoreSnapshot, BEAD_READ_MODEL_STATUS_WIRE_SCHEMA_VERSION,
     BEAD_READ_MODEL_VERIFY_WIRE_SCHEMA_VERSION, READ_MODEL_REDUCER_VERSION,
     READ_MODEL_SCHEMA_VERSION, READ_MODEL_SWEEP_INTERVAL_SECS,
+};
+pub use recovery::{
+    arm_recovery_activation, create_recovery_claim,
+    inspect_recovery_activation, inspect_recovery_claim,
+    inspect_recovery_store, recovery_claim_key, RecoveryActivationInspectWire,
+    RecoveryActivationWire, RecoveryArmRequestWire, RecoveryArmResultWire,
+    RecoveryClaimCreateRequestWire, RecoveryClaimCreateResultWire,
+    RecoveryClaimInspectWire, RecoveryClaimLookupWire, RecoveryClaimWire,
+    RecoveryStoreInspectWire, RECOVERY_WIRE_SCHEMA_VERSION,
 };
 pub use routing::{
     route_bead_targets, BeadTargetRouteErrorWire, BeadTargetRouteWire,

@@ -59,3 +59,4 @@ pub(crate) use store::store_io_stats;
 pub use store::{
     export_jsonl, mark_ready_to_work, sync_is_clean, unmark_ready_to_work,
 };
+pub(crate) use store::{with_bead_mutation_lock, MutationLockWait};
